@@ -1,0 +1,737 @@
+src/app/overlays.rs
+  46dcc8959d90ad53 1-438
+src/tools/fuzzy.rs
+  46dcc8959d90ad53 1-77
+src/ui/preferences.rs
+  46dcc8959d90ad53 1-447
+src/tools/sync_input.rs
+  46dcc8959d90ad53 1-43
+src/renderer/gpu.rs
+  46dcc8959d90ad53 1-474
+src/tools/url_detect.rs
+  46dcc8959d90ad53 1-59
+src/tools/error_detect.rs
+  46dcc8959d90ad53 1-276
+src/tools/cmd_timer.rs
+  46dcc8959d90ad53 1-38
+src/tools/teaching.rs
+  46dcc8959d90ad53 1-115
+src/tools/secret_mask.rs
+  46dcc8959d90ad53 1-151
+src/window/selection.rs
+  46dcc8959d90ad53 1-165
+src/tools/notify.rs
+  46dcc8959d90ad53 1-73
+src/tools/compare.rs
+  46dcc8959d90ad53 1-165
+src/window/manager.rs
+  46dcc8959d90ad53 1-194
+src/ui/primitives.rs
+  46dcc8959d90ad53 1-158
+src/network/ssh/session.rs
+  46dcc8959d90ad53 1-291
+src/plugin/host.rs
+  46dcc8959d90ad53 1-46
+src/ai/observer.rs
+  46dcc8959d90ad53 1-310
+src/window/mod.rs
+  46dcc8959d90ad53 1-9
+src/ai/backend.rs
+  46dcc8959d90ad53 1-160
+src/tools/system_info.rs
+  46dcc8959d90ad53 1-112
+src/network/ssh/dialog.rs
+  46dcc8959d90ad53 1-498
+README.md
+  46dcc8959d90ad53 1-154
+src/ui/mod.rs
+  46dcc8959d90ad53 1-9
+src/network/mod.rs
+  46dcc8959d90ad53 1-8
+.gitignore
+  46dcc8959d90ad53 1-5
+src/main.rs
+  46dcc8959d90ad53 1-25,27-106
+src/tools/alias_suggest.rs
+  46dcc8959d90ad53 1-78
+src/ai/knowledge.rs
+  46dcc8959d90ad53 1-81
+src/terminal/ansi.rs
+  46dcc8959d90ad53 1-289
+src/ai/context.rs
+  46dcc8959d90ad53 1-68
+src/ai/panel.rs
+  46dcc8959d90ad53 1-262
+src/effects/pipeline.rs
+  46dcc8959d90ad53 1-66
+src/tools/search.rs
+  46dcc8959d90ad53 1-221
+src/network/ssh/mod.rs
+  46dcc8959d90ad53 1-4
+src/tools/audit.rs
+  46dcc8959d90ad53 1-79
+src/app/mod.rs
+  46dcc8959d90ad53 1-407
+src/tools/timewarp.rs
+  46dcc8959d90ad53 1-109
+src/app/shortcuts.rs
+  46dcc8959d90ad53 1-616
+src/input.rs
+  46dcc8959d90ad53 1-81
+src/tools/mod.rs
+  46dcc8959d90ad53 1-33
+src/tools/env_detect.rs
+  46dcc8959d90ad53 1-71
+src/tools/hud.rs
+  46dcc8959d90ad53 1-383
+src/terminal/mod.rs
+  46dcc8959d90ad53 1-523
+examples/hello_plugin/src/lib.rs
+  46dcc8959d90ad53 1-83
+src/tools/heatmap.rs
+  46dcc8959d90ad53 1-206
+src/effects/effects.rs
+  46dcc8959d90ad53 1-999
+Cargo.toml
+  46dcc8959d90ad53 1-39
+src/config/toml.rs
+  46dcc8959d90ad53 1-206
+src/network/webview_dialog.rs
+  46dcc8959d90ad53 1-162
+src/ai/profile.rs
+  46dcc8959d90ad53 1-81
+src/tools/hex.rs
+  46dcc8959d90ad53 1-60
+examples/hello_plugin/Cargo.toml
+  46dcc8959d90ad53 1-11
+src/tools/diff.rs
+  46dcc8959d90ad53 1-67
+src/platform/macos.rs
+  46dcc8959d90ad53 1-13,15-17,19-27
+src/config/mod.rs
+  46dcc8959d90ad53 1-298
+src/ai/mod.rs
+  46dcc8959d90ad53 1-100
+src/tools/ssh_tunnel.rs
+  46dcc8959d90ad53 1-93
+src/ui/welcome.rs
+  46dcc8959d90ad53 1-292
+src/tools/codec.rs
+  46dcc8959d90ad53 1-134
+src/pty.rs
+  46dcc8959d90ad53 1-59
+src/effects/mod.rs
+  46dcc8959d90ad53 1-119
+LICENSE
+  46dcc8959d90ad53 1-21
+src/tools/network_monitor.rs
+  46dcc8959d90ad53 1-98
+src/renderer/mod.rs
+  46dcc8959d90ad53 1-727
+src/tools/exec_preview.rs
+  46dcc8959d90ad53 1-233
+src/app/lifecycle.rs
+  46dcc8959d90ad53 1-830
+src/tools/recording.rs
+  46dcc8959d90ad53 1-216
+src/terminal/grid.rs
+  46dcc8959d90ad53 1-41
+src/plugin/mod.rs
+  46dcc8959d90ad53 1-251
+src/tools/splash.rs
+  46dcc8959d90ad53 1-142
+src/ai/autocomplete.rs
+  46dcc8959d90ad53 1-390
+src/window/tab.rs
+  46dcc8959d90ad53 1-149
+src/tools/chart.rs
+  46dcc8959d90ad53 1-246
+src/tools/cicd.rs
+  46dcc8959d90ad53 1-264
+src/platform/mod.rs
+  46dcc8959d90ad53 1-2
+src/tools/file_manager.rs
+  46dcc8959d90ad53 1-269
+src/renderer/font.rs
+  46dcc8959d90ad53 1-76
+src/window/pane.rs
+  46dcc8959d90ad53 1-112
+src/tools/docker_panel.rs
+  46dcc8959d90ad53 1-211
+src/tools/snippet.rs
+  46dcc8959d90ad53 1-161
+src/network/webview.rs
+  46dcc8959d90ad53 1-82
+src/tools/blocks.rs
+  46dcc8959d90ad53 1-177
+src/tools/process_tree.rs
+  46dcc8959d90ad53 1-97
+src/tools/git_panel.rs
+  46dcc8959d90ad53 1-344
+src/ui/menubar.rs
+  46dcc8959d90ad53 1-325
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.8-ntes.9",
+  "base_commit_sha": "3e3c46ce9cfa5c951710d06ae3fd221a77f5749e",
+  "prompts": {
+    "46dcc8959d90ad53": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6fa63a6e-29eb-4ea1-9d68-d297cc1526ef",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "nongjiawu",
+      "messages": [],
+      "total_additions": 29955,
+      "total_deletions": 4485,
+      "accepted_lines": 16449,
+      "overriden_lines": 1,
+      "per_file_stats": {
+        "src/network/webview_dialog.rs": {
+          "additions": 196,
+          "deletions": 33,
+          "accepted_lines": 162
+        },
+        "src/tools/compare.rs": {
+          "additions": 204,
+          "deletions": 39,
+          "accepted_lines": 165
+        },
+        "src/tools/notify.rs": {
+          "additions": 73,
+          "accepted_lines": 73
+        },
+        "src/ai/autocomplete.rs": {
+          "additions": 416,
+          "deletions": 26,
+          "accepted_lines": 390
+        },
+        "src/tools/snippet.rs": {
+          "additions": 162,
+          "deletions": 1,
+          "accepted_lines": 161
+        },
+        "src/effects/mod.rs": {
+          "additions": 125,
+          "deletions": 6,
+          "accepted_lines": 119
+        },
+        "src/ssh/session.rs": {
+          "additions": 489,
+          "deletions": 201
+        },
+        "src/plugin/host.rs": {
+          "additions": 102,
+          "deletions": 56,
+          "accepted_lines": 46
+        },
+        "src/app.rs": {
+          "additions": 1000,
+          "deletions": 135
+        },
+        "src/tools/fuzzy.rs": {
+          "additions": 77,
+          "accepted_lines": 77
+        },
+        "src/shader/pipeline.rs": {
+          "additions": 66
+        },
+        "src/tools/url_detect.rs": {
+          "additions": 59,
+          "accepted_lines": 59
+        },
+        "src/llm/profile.rs": {
+          "additions": 81
+        },
+        "src/app/shortcuts.rs": {
+          "additions": 740,
+          "deletions": 124,
+          "accepted_lines": 616
+        },
+        "src/ai/context.rs": {
+          "additions": 68,
+          "accepted_lines": 68
+        },
+        "src/window_manager.rs": {
+          "additions": 284,
+          "deletions": 91
+        },
+        "src/hacker/sync_input.rs": {
+          "additions": 43
+        },
+        "src/tools/splash.rs": {
+          "additions": 144,
+          "deletions": 2,
+          "accepted_lines": 142
+        },
+        "src/ai/mod.rs": {
+          "additions": 100,
+          "accepted_lines": 100
+        },
+        "src/effects/effects.rs": {
+          "additions": 1009,
+          "deletions": 10,
+          "accepted_lines": 999
+        },
+        "src/app/lifecycle.rs": {
+          "additions": 937,
+          "deletions": 107,
+          "accepted_lines": 830
+        },
+        "src/ssh/mod.rs": {
+          "additions": 71,
+          "deletions": 67
+        },
+        "src/ai/panel.rs": {
+          "additions": 305,
+          "deletions": 43,
+          "accepted_lines": 262
+        },
+        "src/terminal/ansi.rs": {
+          "additions": 295,
+          "deletions": 6,
+          "accepted_lines": 289
+        },
+        "src/tools/heatmap.rs": {
+          "additions": 206,
+          "accepted_lines": 206
+        },
+        "src/shader/mod.rs": {
+          "additions": 62,
+          "deletions": 9
+        },
+        "src/ui/mod.rs": {
+          "additions": 189,
+          "deletions": 180,
+          "accepted_lines": 9
+        },
+        "src/tools/error_detect.rs": {
+          "additions": 276,
+          "accepted_lines": 276
+        },
+        "src/tools/cicd.rs": {
+          "additions": 265,
+          "deletions": 1,
+          "accepted_lines": 264
+        },
+        "src/hacker/workflow.rs": {
+          "additions": 199
+        },
+        "src/window/tab.rs": {
+          "additions": 189,
+          "deletions": 40,
+          "accepted_lines": 149
+        },
+        "src/tools/codec.rs": {
+          "additions": 134,
+          "accepted_lines": 134
+        },
+        "src/terminal/mod.rs": {
+          "additions": 538,
+          "deletions": 15,
+          "accepted_lines": 523
+        },
+        "src/window/selection.rs": {
+          "additions": 165,
+          "accepted_lines": 165
+        },
+        "src/tools/ssh_tunnel.rs": {
+          "additions": 93,
+          "accepted_lines": 93
+        },
+        "src/tools/sync_input.rs": {
+          "additions": 43,
+          "accepted_lines": 43
+        },
+        "src/tools/mod.rs": {
+          "additions": 33,
+          "accepted_lines": 33
+        },
+        "src/hacker/chart.rs": {
+          "additions": 248
+        },
+        "src/llm/mod.rs": {
+          "additions": 97
+        },
+        "src/tools/hud.rs": {
+          "additions": 734,
+          "deletions": 351,
+          "accepted_lines": 383
+        },
+        "src/ui/welcome.rs": {
+          "additions": 370,
+          "deletions": 78,
+          "accepted_lines": 292
+        },
+        "src/tools/timewarp.rs": {
+          "additions": 109,
+          "accepted_lines": 109
+        },
+        "src/hacker/diff.rs": {
+          "additions": 67
+        },
+        "Cargo.toml": {
+          "additions": 44,
+          "deletions": 5,
+          "accepted_lines": 39
+        },
+        "src/ai/observer.rs": {
+          "additions": 310,
+          "accepted_lines": 310
+        },
+        "examples/hello_plugin/src/lib.rs": {
+          "additions": 83,
+          "accepted_lines": 83
+        },
+        "src/tools/exec_preview.rs": {
+          "additions": 233,
+          "accepted_lines": 233
+        },
+        "src/hacker/codec.rs": {
+          "additions": 134
+        },
+        "src/ai/profile.rs": {
+          "additions": 82,
+          "deletions": 1,
+          "accepted_lines": 81
+        },
+        "src/tools/hex.rs": {
+          "additions": 60,
+          "accepted_lines": 60
+        },
+        "src/tools/audit.rs": {
+          "additions": 79,
+          "accepted_lines": 79
+        },
+        "src/tab.rs": {
+          "additions": 227,
+          "deletions": 93
+        },
+        "src/window/mod.rs": {
+          "additions": 10,
+          "deletions": 1,
+          "accepted_lines": 9
+        },
+        "src/autocomplete.rs": {
+          "additions": 460,
+          "deletions": 52
+        },
+        "src/network/webview.rs": {
+          "additions": 82,
+          "accepted_lines": 82
+        },
+        "README.md": {
+          "additions": 173,
+          "deletions": 19,
+          "accepted_lines": 154
+        },
+        "src/tools/alias_suggest.rs": {
+          "additions": 78,
+          "accepted_lines": 78
+        },
+        "src/tools/recording.rs": {
+          "additions": 216,
+          "accepted_lines": 216
+        },
+        "src/hacker/splash.rs": {
+          "additions": 142
+        },
+        "src/hacker/timewarp.rs": {
+          "additions": 109
+        },
+        "src/ai/knowledge.rs": {
+          "additions": 82,
+          "deletions": 1,
+          "accepted_lines": 81
+        },
+        "src/plugin/mod.rs": {
+          "additions": 300,
+          "deletions": 49,
+          "accepted_lines": 251
+        },
+        "src/tools/search.rs": {
+          "additions": 221,
+          "accepted_lines": 221
+        },
+        "src/tools/process_tree.rs": {
+          "additions": 97,
+          "accepted_lines": 97
+        },
+        "src/window/pane.rs": {
+          "additions": 114,
+          "deletions": 2,
+          "accepted_lines": 112
+        },
+        "src/config/toml.rs": {
+          "additions": 332,
+          "deletions": 126,
+          "accepted_lines": 206
+        },
+        "src/app/overlays.rs": {
+          "additions": 465,
+          "deletions": 27,
+          "accepted_lines": 438
+        },
+        "src/recording.rs": {
+          "additions": 217,
+          "deletions": 1
+        },
+        "src/toml_config.rs": {
+          "additions": 193,
+          "deletions": 1
+        },
+        "src/hacker/hud.rs": {
+          "additions": 223
+        },
+        "src/renderer/mod.rs": {
+          "additions": 1158,
+          "deletions": 431,
+          "accepted_lines": 727
+        },
+        "src/llm/context.rs": {
+          "additions": 68
+        },
+        "src/tools/file_manager.rs": {
+          "additions": 269,
+          "accepted_lines": 269
+        },
+        "src/renderer/gpu.rs": {
+          "additions": 685,
+          "deletions": 211,
+          "accepted_lines": 474
+        },
+        "src/tools/docker_panel.rs": {
+          "additions": 212,
+          "deletions": 1,
+          "accepted_lines": 211
+        },
+        "src/tools/network_monitor.rs": {
+          "additions": 98,
+          "accepted_lines": 98
+        },
+        "src/llm/panel.rs": {
+          "additions": 411,
+          "deletions": 109
+        },
+        "src/ai/backend.rs": {
+          "additions": 168,
+          "deletions": 8,
+          "accepted_lines": 160
+        },
+        "src/preferences.rs": {
+          "additions": 589,
+          "deletions": 131
+        },
+        "src/renderer/font.rs": {
+          "additions": 78,
+          "deletions": 2,
+          "accepted_lines": 76
+        },
+        "src/config/mod.rs": {
+          "additions": 474,
+          "deletions": 176,
+          "accepted_lines": 298
+        },
+        "src/hacker/snippet.rs": {
+          "additions": 161
+        },
+        "src/tools/system_info.rs": {
+          "additions": 112,
+          "accepted_lines": 112
+        },
+        "src/hacker/git_panel.rs": {
+          "additions": 344
+        },
+        "src/pty.rs": {
+          "additions": 60,
+          "deletions": 1,
+          "accepted_lines": 59
+        },
+        "src/renderer.rs": {
+          "additions": 265,
+          "deletions": 18
+        },
+        "src/tools/secret_mask.rs": {
+          "additions": 152,
+          "deletions": 1,
+          "accepted_lines": 151
+        },
+        "src/llm/backend.rs": {
+          "additions": 166
+        },
+        "src/pane.rs": {
+          "additions": 114,
+          "deletions": 3
+        },
+        "src/llm/knowledge.rs": {
+          "additions": 81
+        },
+        "src/config.rs": {
+          "additions": 340,
+          "deletions": 7
+        },
+        "src/ui/preferences.rs": {
+          "additions": 572,
+          "deletions": 125,
+          "accepted_lines": 447
+        },
+        "src/input.rs": {
+          "additions": 81,
+          "accepted_lines": 81
+        },
+        "src/ui/primitives.rs": {
+          "additions": 161,
+          "deletions": 3,
+          "accepted_lines": 158
+        },
+        "src/network/ssh/dialog.rs": {
+          "additions": 573,
+          "deletions": 75,
+          "accepted_lines": 498
+        },
+        "examples/hello_plugin/Cargo.toml": {
+          "additions": 11,
+          "accepted_lines": 11
+        },
+        "src/main.rs": {
+          "additions": 369,
+          "deletions": 265,
+          "accepted_lines": 105
+        },
+        "src/ssh_dialog.rs": {
+          "additions": 810,
+          "deletions": 279
+        },
+        "src/welcome.rs": {
+          "additions": 614,
+          "deletions": 289
+        },
+        "src/tools/diff.rs": {
+          "additions": 67,
+          "accepted_lines": 67
+        },
+        "src/menubar.rs": {
+          "additions": 212
+        },
+        "src/terminal/grid.rs": {
+          "additions": 41,
+          "accepted_lines": 41
+        },
+        "src/tools/blocks.rs": {
+          "additions": 177,
+          "accepted_lines": 177
+        },
+        "src/ui.rs": {
+          "additions": 97
+        },
+        "src/shader/effects.rs": {
+          "additions": 416,
+          "deletions": 33
+        },
+        "src/hacker/compare.rs": {
+          "additions": 317
+        },
+        "src/webview_dialog.rs": {
+          "additions": 271,
+          "deletions": 76
+        },
+        "src/app/mod.rs": {
+          "additions": 440,
+          "deletions": 33,
+          "accepted_lines": 407
+        },
+        "src/tools/teaching.rs": {
+          "additions": 116,
+          "deletions": 1,
+          "accepted_lines": 115
+        },
+        "src/hacker/hex.rs": {
+          "additions": 60
+        },
+        "src/network/ssh/mod.rs": {
+          "additions": 9,
+          "deletions": 5,
+          "accepted_lines": 4
+        },
+        "src/tools/env_detect.rs": {
+          "additions": 71,
+          "accepted_lines": 71
+        },
+        "src/effects/pipeline.rs": {
+          "additions": 66,
+          "accepted_lines": 66
+        },
+        "src/hacker/mod.rs": {
+          "additions": 12
+        },
+        "src/ansi.rs": {
+          "additions": 376,
+          "deletions": 143
+        },
+        "src/tools/git_panel.rs": {
+          "additions": 344,
+          "accepted_lines": 344
+        },
+        "src/ui/overlay.rs": {
+          "additions": 79
+        },
+        "src/webview.rs": {
+          "additions": 81
+        },
+        "src/window/manager.rs": {
+          "additions": 196,
+          "deletions": 2,
+          "accepted_lines": 194
+        },
+        "src/tools/cmd_timer.rs": {
+          "additions": 38,
+          "accepted_lines": 38
+        },
+        "src/platform/mod.rs": {
+          "additions": 2,
+          "accepted_lines": 2
+        },
+        "src/network/mod.rs": {
+          "additions": 8,
+          "accepted_lines": 8
+        },
+        "LICENSE": {
+          "additions": 21,
+          "accepted_lines": 21
+        },
+        "src/ui/menubar.rs": {
+          "additions": 365,
+          "deletions": 40,
+          "accepted_lines": 325
+        },
+        ".gitignore": {
+          "additions": 5,
+          "accepted_lines": 5
+        },
+        "src/hacker/fuzzy.rs": {
+          "additions": 77
+        },
+        "src/tools/chart.rs": {
+          "additions": 249,
+          "deletions": 3,
+          "accepted_lines": 246
+        },
+        "src/terminal.rs": {
+          "additions": 384
+        },
+        "src/network/ssh/session.rs": {
+          "additions": 291,
+          "accepted_lines": 291
+        },
+        "src/platform/macos.rs": {
+          "additions": 42,
+          "deletions": 15,
+          "accepted_lines": 25,
+          "overriden_lines": 1
+        }
+      }
+    }
+  }
+}
