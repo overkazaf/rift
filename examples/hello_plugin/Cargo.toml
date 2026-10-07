@@ -1,0 +1,11 @@
+[package]
+name = "hello-plugin"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+# Build: cargo build --target wasm32-unknown-unknown --release
+# Output: target/wasm32-unknown-unknown/release/hello_plugin.wasm
+# Load:   rterm --plugin path/to/hello_plugin.wasm

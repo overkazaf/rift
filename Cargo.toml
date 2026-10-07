@@ -1,0 +1,39 @@
+[package]
+name = "rift"
+version = "0.3.0"
+edition = "2021"
+description = "A cyberpunk terminal emulator with AI, SSH, time travel, and 32 built-in developer tools"
+license = "MIT"
+keywords = ["terminal", "emulator", "cyberpunk", "ai", "ssh"]
+categories = ["command-line-utilities"]
+
+[features]
+default = []
+plugins = ["wasmtime"]
+webview = ["wry"]
+gpu = ["wgpu", "pollster", "bytemuck"]
+
+[dependencies]
+winit = "0.30"
+softbuffer = "0.4"
+fontdue = "0.9"
+vte = "0.13"
+portable-pty = "0.8"
+log = "0.4"
+env_logger = "0.11"
+russh = "0.64"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "time"] }
+dirs = "7"
+bytes = "1"
+wasmtime = { version = "49", optional = true }
+wry = { version = "0.57", optional = true }
+wgpu = { version = "30", optional = true }
+pollster = { version = "1", optional = true }
+muda = "0.21"
+ureq = "3"
+unicode-width = "0.2"
+bytemuck = { version = "1", features = ["derive"], optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+cocoa = "0.26"
+objc = "0.2"
