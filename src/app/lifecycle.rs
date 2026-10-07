@@ -801,6 +801,17 @@ pub fn about_to_wait(app: &mut App, event_loop: &ActiveEventLoop) {
         app.wm.flush_all_responses();
         app.update_title();
 
+        // Feed Observer with the current terminal line (output tracking)
+        if app.observer.enabled {
+            let term = &app.wm.active_pane().terminal;
+            let row = term.cursor_row.min(term.grid.len().saturating_sub(1));
+            let line: String = term.grid[row].iter().map(|c| c.c).collect();
+            let trimmed = line.trim();
+            if !trimmed.is_empty() {
+                app.observer.on_output(trimmed);
+            }
+        }
+
         // Handle OSC 52 clipboard requests + bell for all panes
         for tab in &mut app.wm.tabs {
             for pane in &mut tab.panes {

@@ -248,6 +248,25 @@ pub fn handle_key(app: &mut App, event: &KeyEvent, event_loop: &ActiveEventLoop)
     // 7. Normal input → active pane (or broadcast to all panes)
     let app_cursor = app.wm.active_pane().terminal.app_cursor_keys;
     if let Some(bytes) = input::encode_key(event, app.modifiers, app_cursor) {
+        // Observer: detect Enter key → extract current command line
+        if app.observer.enabled && bytes == b"\r" {
+            let term = &app.wm.active_pane().terminal;
+            let row = term.cursor_row.min(term.grid.len().saturating_sub(1));
+            let line: String = term.grid[row].iter().map(|c| c.c).collect();
+            let trimmed = line.trim();
+            if !trimmed.is_empty() {
+                // Strip common shell prompts ($ or %) to get the command
+                let cmd = if let Some(pos) = trimmed.rfind(|c| c == '$' || c == '%') {
+                    trimmed[pos + 1..].trim()
+                } else {
+                    trimmed
+                };
+                if !cmd.is_empty() {
+                    app.observer.on_command(cmd);
+                }
+            }
+        }
+
         if let Some(rec) = &mut app.recorder {
             rec.record_input(&bytes);
         }

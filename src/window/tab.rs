@@ -140,10 +140,6 @@ impl Tab {
     }
 
     pub fn display_title(&self) -> &str {
-        let pane = self.active_pane();
-        if let Some(t) = pane.title() {
-            if !t.is_empty() { return t; }
-        }
         &self.title
     }
 }

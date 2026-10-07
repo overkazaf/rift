@@ -125,32 +125,33 @@ impl Renderer {
         let active_text = self.theme.fg;
         let inactive_text = dim(self.theme.fg, 0.5);
 
-        // Active tab: lighter rounded pill (Ghostty style)
-        let active_bg = lighten(bar_bg, 18);
+        // Active tab: use TERMINAL BG color (same as content area — Ghostty style)
+        // This creates the illusion that the active tab IS the content area
+        let active_bg = self.theme.bg;
         let active_bg_px = pack(active_bg.0, active_bg.1, active_bg.2);
 
-        // Tab layout: equal width
+        // Tab layout: fill full width equally
         let tab_count = tabs.len().max(1);
-        let tab_w = (buf_width / tab_count).min(300).max(60);
+        let tab_w = buf_width / tab_count;
 
         for (i, (title, is_active)) in tabs.iter().enumerate() {
             let x0 = i * tab_w;
-            let x1 = ((i + 1) * tab_w).min(buf_width);
+            // Last tab extends to edge to avoid gap
+            let x1 = if i == tab_count - 1 { buf_width } else { (i + 1) * tab_w };
             if x0 >= buf_width { break; }
 
             if *is_active {
-                // Active: rounded pill background (lighter than bar)
-                let margin = 4;
-                let top = 5;
-                let bot = bar_height.saturating_sub(4);
+                // Active: terminal bg, only TOP corners rounded, bottom flush with content
+                let margin = 2;
+                let top = 4;
+                let bot = bar_height; // flush to bottom — no gap
                 let pl = x0 + margin;
                 let pr = x1.saturating_sub(margin);
-                let radius = 6i32;
+                let radius = 7i32;
 
                 for y in top..bot {
-                    let dy_top = (top as i32 + radius) - y as i32;
-                    let dy_bot = y as i32 - (bot as i32 - radius);
-                    let dy = dy_top.max(dy_bot).max(0);
+                    // Only round top corners
+                    let dy = (top as i32 + radius) - y as i32;
                     let inset = if dy > 0 && dy <= radius {
                         radius - integer_sqrt((radius * radius - dy * dy).max(0) as usize) as i32
                     } else { 0 };
@@ -195,12 +196,22 @@ impl Renderer {
                 self.draw_char(buffer, buf_width, bar_height, c, gx, text_y, text_color);
             }
 
-            // Close button "x"
+            // Tab index number right-aligned (Ghostty-style ⌘N indicator)
+            if i < 9 {
+                let idx_char = (b'1' + i as u8) as char;
+                let idx_color = dim(text_color, 0.35);
+                let idx_x = x1.saturating_sub(cw + 8);
+                if idx_x > x0 + cw && idx_x + cw <= buf_width {
+                    self.draw_char(buffer, buf_width, bar_height, idx_char, idx_x, text_y, idx_color);
+                }
+            }
+
+            // Close button "x" (to the left of index when multiple tabs)
             let close_margin = 4;
-            if tab_count > 1 && x1 >= cw * 2 + close_margin + 8 {
-                let close_x = x1.saturating_sub(cw + close_margin + 6);
+            if tab_count > 1 {
+                let close_x = x1.saturating_sub(cw * 2 + close_margin + 12);
                 let close_color = if *is_active { dim(active_text, 0.35) } else { dim(inactive_text, 0.5) };
-                if close_x + cw <= buf_width {
+                if close_x > x0 && close_x + cw <= buf_width {
                     self.draw_char(buffer, buf_width, bar_height, 'x', close_x, text_y, close_color);
                 }
             }
