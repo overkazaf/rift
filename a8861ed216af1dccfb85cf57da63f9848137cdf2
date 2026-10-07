@@ -1,0 +1,37 @@
+src/app/lifecycle.rs
+  46dcc8959d90ad53 697-700
+src/ai/panel.rs
+  46dcc8959d90ad53 137-146
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.8-ntes.9",
+  "base_commit_sha": "a8861ed216af1dccfb85cf57da63f9848137cdf2",
+  "prompts": {
+    "46dcc8959d90ad53": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6fa63a6e-29eb-4ea1-9d68-d297cc1526ef",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "nongjiawu",
+      "messages": [],
+      "total_additions": 14,
+      "total_deletions": 3,
+      "accepted_lines": 14,
+      "overriden_lines": 0,
+      "per_file_stats": {
+        "src/app/lifecycle.rs": {
+          "additions": 4,
+          "deletions": 1,
+          "accepted_lines": 4
+        },
+        "src/ai/panel.rs": {
+          "additions": 10,
+          "deletions": 2,
+          "accepted_lines": 10
+        }
+      }
+    }
+  }
+}
