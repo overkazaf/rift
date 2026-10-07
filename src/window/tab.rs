@@ -25,7 +25,7 @@ pub struct Tab {
 impl Tab {
     pub fn new(pane: Pane) -> Self {
         Self {
-            title: "shell".to_string(),
+            title: "Tab 1".to_string(),
             panes: vec![pane],
             layout: Layout::Single,
             active: 0,

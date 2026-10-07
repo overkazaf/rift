@@ -101,17 +101,23 @@ pub fn handle_key(app: &mut App, event: &KeyEvent, event_loop: &ActiveEventLoop)
             }
         }
     }
-    // Ctrl+Shift+Z for time warp (Cmd+Shift+Z eaten by macOS Redo)
+    // Ctrl+Shift shortcuts (avoid macOS interception)
     if app.modifiers.control_key() && app.modifiers.shift_key() {
         if let Key::Character(ref s) = event.logical_key {
-            if s.eq_ignore_ascii_case("z") && !event.repeat {
-                if app.timewarp_browser.active {
-                    app.timewarp_browser.exit();
-                } else {
-                    app.timewarp_browser.enter();
+            match s.to_lowercase().as_str() {
+                "z" if !event.repeat => {
+                    if app.timewarp_browser.active { app.timewarp_browser.exit(); }
+                    else { app.timewarp_browser.enter(); }
+                    app.request_redraw();
+                    return;
                 }
-                app.request_redraw();
-                return;
+                "v" if !event.repeat => {
+                    if !app.observer.enabled { app.observer.toggle(); }
+                    app.observer_summary = Some(app.observer.generate_summary());
+                    app.request_redraw();
+                    return;
+                }
+                _ => {}
             }
         }
     }
@@ -528,16 +534,8 @@ fn handle_mod_shift(app: &mut App, key: &str, event_loop: &ActiveEventLoop) -> b
         "o" | "O" => { app.docker.toggle(); true }
         "m" | "M" => { app.secret_mask.toggle(); true }
         "u" | "U" => { app.audit.toggle(); true }
-        "v" | "V" => {
-            // Toggle observer + show summary
-            if !app.observer.enabled {
-                app.observer.toggle();
-                log::info!("Observer: enabled");
-            }
-            let summary = app.observer.generate_summary();
-            app.observer_summary = Some(summary);
-            true
-        }
+        // "v" removed — Cmd+Shift+V intercepted by macOS "Paste and Match Style"
+        // Observer moved to Ctrl+Shift+V below
         "p" | "P" => {
             app.broadcast = !app.broadcast;
             app.update_title();

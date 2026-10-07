@@ -95,50 +95,41 @@ impl Renderer {
     ) {
         if bar_height == 0 { return; }
 
-        let bar_bg = darken(self.theme.bg, 24);
-        let accent = self.theme.cursor;
+        // Ghostty style: flat dark bar, no gradients, no accent lines
+        let bar_bg = darken(self.theme.bg, 20);
+        let bar_bg_px = pack(bar_bg.0, bar_bg.1, bar_bg.2);
 
-        // Background with subtle horizontal gradient (slightly brighter toward right)
+        // Solid dark background
         for y in 0..bar_height {
-            for x in 0..buf_width {
-                let grad = (x as f32 / buf_width as f32) * 3.0; // 0 to 3 brightness boost
-                let r = (bar_bg.0 as f32 + grad).min(255.0) as u8;
-                let g = (bar_bg.1 as f32 + grad).min(255.0) as u8;
-                let b = (bar_bg.2 as f32 + grad).min(255.0) as u8;
-                let idx = y * buf_width + x;
-                if idx < buffer.len() { buffer[idx] = pack(r, g, b); }
-            }
+            let off = y * buf_width;
+            let end = (off + buf_width).min(buffer.len());
+            buffer[off..end].fill(bar_bg_px);
         }
 
-        // Bottom accent line (1px accent, 1px glow)
-        let accent_px = pack(accent.0, accent.1, accent.2);
-        let glow = dim(accent, 0.25);
-        let glow_px = pack(glow.0, glow.1, glow.2);
+        // Thin bottom separator (subtle, not accent colored)
+        let sep_color = lighten(bar_bg, 10);
+        let sep_px = pack(sep_color.0, sep_color.1, sep_color.2);
         {
             let y = bar_height.saturating_sub(1);
-            for x in 0..buf_width {
-                let idx = y * buf_width + x;
-                if idx < buffer.len() { buffer[idx] = accent_px; }
-            }
-            if bar_height >= 2 {
-                let y2 = bar_height.saturating_sub(2);
-                for x in 0..buf_width {
-                    let idx = y2 * buf_width + x;
-                    if idx < buffer.len() { buffer[idx] = glow_px; }
-                }
-            }
+            let off = y * buf_width;
+            let end = (off + buf_width).min(buffer.len());
+            buffer[off..end].fill(sep_px);
         }
 
         let tabs = wm.tab_bar_info();
         let cw = self.font.cell_width;
         let ch = self.font.cell_height;
-        let text_y = (bar_height.saturating_sub(ch + 2)) / 2;
-        let active_text = self.theme.fg;
-        let inactive_text = dim(self.theme.fg, 0.55);  // brighter for readability
-        let inactive_bg = lighten(bar_bg, 14);  // more visible background
-        let inactive_bg_px = pack(inactive_bg.0, inactive_bg.1, inactive_bg.2);
-        let active_bg_px = pack(self.theme.bg.0, self.theme.bg.1, self.theme.bg.2);
+        let text_y = (bar_height.saturating_sub(ch)) / 2;
 
+        // Colors
+        let active_text = self.theme.fg;
+        let inactive_text = dim(self.theme.fg, 0.5);
+
+        // Active tab: lighter rounded pill (Ghostty style)
+        let active_bg = lighten(bar_bg, 18);
+        let active_bg_px = pack(active_bg.0, active_bg.1, active_bg.2);
+
+        // Tab layout: equal width
         let tab_count = tabs.len().max(1);
         let tab_w = (buf_width / tab_count).min(300).max(60);
 
@@ -147,21 +138,21 @@ impl Renderer {
             let x1 = ((i + 1) * tab_w).min(buf_width);
             if x0 >= buf_width { break; }
 
-            let margin = 3;
-            let top = 4;
-            let bot = bar_height.saturating_sub(2); // leave room for accent line
-
             if *is_active {
-                // Active: terminal bg with rounded top corners
+                // Active: rounded pill background (lighter than bar)
+                let margin = 4;
+                let top = 5;
+                let bot = bar_height.saturating_sub(4);
                 let pl = x0 + margin;
                 let pr = x1.saturating_sub(margin);
-                let r = 5i32;
+                let radius = 6i32;
 
                 for y in top..bot {
-                    let dy = (top as i32 + r) - y as i32;
-                    let inset = if dy > 0 && dy <= r {
-                        let val = r * r - (r - dy) * (r - dy);
-                        r - if val > 0 { integer_sqrt(val as usize) as i32 } else { 0 }
+                    let dy_top = (top as i32 + radius) - y as i32;
+                    let dy_bot = y as i32 - (bot as i32 - radius);
+                    let dy = dy_top.max(dy_bot).max(0);
+                    let inset = if dy > 0 && dy <= radius {
+                        radius - integer_sqrt((radius * radius - dy * dy).max(0) as usize) as i32
                     } else { 0 };
 
                     let rl = (pl as i32 + inset).max(0) as usize;
@@ -174,96 +165,40 @@ impl Renderer {
                         }
                     }
                 }
-
-                // Active tab: 3px accent bar at bottom (connection to content)
-                for dy in 0..3 {
-                    let y = bot.saturating_sub(1) + dy;
-                    if y < bar_height {
-                        let off = y * buf_width + pl;
-                        let end = (off + pr.saturating_sub(pl)).min(buffer.len());
-                        if off < buffer.len() {
-                            let bar_color = if dy == 0 { accent_px } else { glow_px };
-                            buffer[off..end].fill(bar_color);
-                        }
-                    }
-                }
             } else {
-                // Inactive: subtle background (not transparent — gives tabs "shape")
-                let pl = x0 + margin + 1;
-                let pr = x1.saturating_sub(margin + 1);
-                for y in (top + 2)..bot {
-                    if pl < pr {
-                        let off = y * buf_width + pl;
-                        let end = (off + pr - pl).min(buffer.len());
-                        if off < buffer.len() {
-                            buffer[off..end].fill(inactive_bg_px);
-                        }
-                    }
-                }
-
-                // Subtle separator between inactive tabs
-                if i > 0 && !tabs.get(i - 1).map_or(false, |(_, a)| *a) {
-                    let sep_c = lighten(bar_bg, 8);
-                    let sp = pack(sep_c.0, sep_c.1, sep_c.2);
-                    for y in (top + 4)..bot.saturating_sub(2) {
-                        let idx = y * buf_width + x0;
-                        if idx < buffer.len() { buffer[idx] = sp; }
-                    }
-                }
-            }
-
-            // Status dot: ● for active (accent), · for inactive (dim)
-            let dot_x = x0 + margin + 6;
-            let dot_cy = text_y as i32 + ch as i32 / 2;
-            if *is_active {
-                let dot_r: i32 = 3;
-                let dot_px = accent_px;
-                for ddy in -dot_r..=dot_r {
-                    for ddx in -dot_r..=dot_r {
-                        if ddx * ddx + ddy * ddy <= dot_r * dot_r {
-                            let px = dot_x as i32 + ddx;
-                            let py = dot_cy + ddy;
-                            if px >= 0 && py >= 0 && (px as usize) < buf_width && (py as usize) < bar_height {
-                                let idx = py as usize * buf_width + px as usize;
-                                if idx < buffer.len() { buffer[idx] = dot_px; }
-                            }
-                        }
-                    }
-                }
-            } else {
-                // Small dim dot for inactive
-                let dot_px = pack(inactive_text.0, inactive_text.1, inactive_text.2);
-                let dot_r: i32 = 2;
-                for ddy in -dot_r..=dot_r {
-                    for ddx in -dot_r..=dot_r {
-                        if ddx * ddx + ddy * ddy <= dot_r * dot_r {
-                            let px = dot_x as i32 + ddx;
-                            let py = dot_cy + ddy;
-                            if px >= 0 && py >= 0 && (px as usize) < buf_width && (py as usize) < bar_height {
-                                let idx = py as usize * buf_width + px as usize;
-                                if idx < buffer.len() { buffer[idx] = dot_px; }
-                            }
+                // Inactive: no background (just text on dark bar)
+                // Thin vertical separator between tabs
+                if i > 0 {
+                    let prev_active = tabs.get(i - 1).map_or(false, |(_, a)| *a);
+                    if !prev_active {
+                        let sp = pack(sep_color.0, sep_color.1, sep_color.2);
+                        for y in 8..bar_height.saturating_sub(8) {
+                            let idx = y * buf_width + x0;
+                            if idx < buffer.len() { buffer[idx] = sp; }
                         }
                     }
                 }
             }
 
-            // Title text after dot
-            let title_x = dot_x as usize + 8;
-            let max_chars = (x1.saturating_sub(title_x + cw * 2)) / cw;
+            // Title: centered in tab
+            let text_color = if *is_active { active_text } else { inactive_text };
+            let max_chars = ((x1 - x0) / cw).saturating_sub(2);
             let title_str = truncate_str(title, max_chars);
-            let tc = if *is_active { active_text } else { inactive_text };
+            let title_len = title_str.chars().count();
+            let text_total_w = title_len * cw;
+            let text_x = x0 + ((x1 - x0).saturating_sub(text_total_w)) / 2;
 
             for (ci, c) in title_str.chars().enumerate() {
-                let gx = title_x + ci * cw;
+                let gx = text_x + ci * cw;
                 if gx + cw > x1 || gx + cw > buf_width { break; }
                 if c == ' ' { continue; }
-                self.draw_char(buffer, buf_width, bar_height, c, gx, text_y, tc);
+                self.draw_char(buffer, buf_width, bar_height, c, gx, text_y, text_color);
             }
 
-            // Close button "x" (active tab slightly brighter)
-            if tab_count > 1 && x1 >= cw * 2 + margin + 8 {
-                let close_x = x1.saturating_sub(cw + margin + 6);
+            // Close button "x"
+            let close_margin = 4;
+            if tab_count > 1 && x1 >= cw * 2 + close_margin + 8 {
+                let close_x = x1.saturating_sub(cw + close_margin + 6);
                 let close_color = if *is_active { dim(active_text, 0.35) } else { dim(inactive_text, 0.5) };
                 if close_x + cw <= buf_width {
                     self.draw_char(buffer, buf_width, bar_height, 'x', close_x, text_y, close_color);
