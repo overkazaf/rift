@@ -1,0 +1,62 @@
+src/app/lifecycle.rs
+  46dcc8959d90ad53 552-600
+src/app/shortcuts.rs
+  46dcc8959d90ad53 355-362,531-540
+src/renderer/mod.rs
+  46dcc8959d90ad53 137-138,177-187
+README.md
+  46dcc8959d90ad53 3,5,7-14,20-33,37-49,53-80,84-118,122-132,139,148,151,158-164,169-173,175-183,185-194,199,202,212,216-217,222-226,228-245,250-261,263-312,320-331
+src/app/overlays.rs
+  46dcc8959d90ad53 25-32
+src/app/mod.rs
+  46dcc8959d90ad53 14,83-84,148-149
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.8-ntes.9",
+  "base_commit_sha": "62feba99259d590797f51b2fbabae0fd74ac1ef1",
+  "prompts": {
+    "46dcc8959d90ad53": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6fa63a6e-29eb-4ea1-9d68-d297cc1526ef",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "nongjiawu",
+      "messages": [],
+      "total_additions": 347,
+      "total_deletions": 73,
+      "accepted_lines": 347,
+      "overriden_lines": 0,
+      "per_file_stats": {
+        "src/app/overlays.rs": {
+          "additions": 8,
+          "accepted_lines": 8
+        },
+        "src/app/mod.rs": {
+          "additions": 5,
+          "accepted_lines": 5
+        },
+        "README.md": {
+          "additions": 252,
+          "deletions": 70,
+          "accepted_lines": 252
+        },
+        "src/app/shortcuts.rs": {
+          "additions": 18,
+          "deletions": 1,
+          "accepted_lines": 18
+        },
+        "src/renderer/mod.rs": {
+          "additions": 15,
+          "deletions": 2,
+          "accepted_lines": 15
+        },
+        "src/app/lifecycle.rs": {
+          "additions": 49,
+          "accepted_lines": 49
+        }
+      }
+    }
+  }
+}
