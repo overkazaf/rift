@@ -549,6 +549,55 @@ pub fn redraw(app: &mut App) {
         );
     }
 
+    // Observer summary overlay
+    if let Some(ref summary) = app.observer_summary {
+        let w = width as usize;
+        let h = height as usize;
+        let cw = app.renderer.cell_width();
+        let ch = app.renderer.cell_height();
+        let theme = &app.renderer.theme;
+
+        // Dim background
+        for px in buffer.iter_mut() {
+            let r = ((*px >> 16) & 0xff) / 3;
+            let g = ((*px >> 8) & 0xff) / 3;
+            let b = (*px & 0xff) / 3;
+            *px = (r << 16) | (g << 8) | b;
+        }
+
+        let lines: Vec<&str> = summary.lines().collect();
+        let panel_w = (50 * cw).min(w - 40);
+        let panel_h = ((lines.len() + 4) * (ch + 3) + 40).min(h - 40);
+        let px0 = (w - panel_w) / 2;
+        let py0 = (h - panel_h) / 2;
+
+        let bg = crate::ui::lighten(theme.bg, 6);
+        crate::ui::fill_rect(&mut buffer, w, px0, py0, panel_w, panel_h, crate::ui::pack_rgb(bg));
+        crate::ui::draw_border(&mut buffer, w, px0, py0, panel_w, panel_h,
+            crate::ui::pack_rgb(crate::ui::dim(theme.cursor, 0.4)));
+
+        let mut ty = py0 + 12;
+        let enabled_text = if app.observer.enabled { "ON" } else { "OFF" };
+        let title = format!("AI Observer [{}]", enabled_text);
+        crate::ui::render_text(&mut buffer, w, &mut app.renderer.font, &title, px0 + 16, ty, theme.cursor);
+        ty += ch + 8;
+
+        let max_chars = (panel_w - 32) / cw;
+        for line in &lines {
+            if ty + ch >= py0 + panel_h - ch - 10 { break; }
+            let color = if line.starts_with("##") { theme.cursor }
+                else if line.starts_with("  ") { crate::ui::dim(theme.fg, 0.7) }
+                else { theme.fg };
+            crate::ui::render_text(&mut buffer, w, &mut app.renderer.font,
+                crate::ui::trunc(line, max_chars), px0 + 16, ty, color);
+            ty += ch + 3;
+        }
+
+        let help = "Esc: close  V: toggle observer";
+        crate::ui::render_text(&mut buffer, w, &mut app.renderer.font, help,
+            px0 + 16, py0 + panel_h - ch - 10, crate::ui::dim(theme.fg, 0.3));
+    }
+
     // Loading spinners for async operations
     {
         let w = width as usize;

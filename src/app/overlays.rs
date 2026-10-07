@@ -22,6 +22,14 @@ pub fn try_intercept(app: &mut App, event: &KeyEvent) -> bool {
     if app.timewarp_browser.active {
         return handle_timewarp(app, event);
     }
+    // Observer summary dismissal
+    if app.observer_summary.is_some() {
+        if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
+            app.observer_summary = None;
+            app.request_redraw();
+        }
+        return true; // consume all keys while summary visible
+    }
     if app.welcome.visible {
         return handle_welcome(app, event);
     }

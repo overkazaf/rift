@@ -134,8 +134,8 @@ impl Renderer {
         let ch = self.font.cell_height;
         let text_y = (bar_height.saturating_sub(ch + 2)) / 2;
         let active_text = self.theme.fg;
-        let inactive_text = dim(self.theme.fg, 0.45);
-        let inactive_bg = lighten(bar_bg, 6);
+        let inactive_text = dim(self.theme.fg, 0.55);  // brighter for readability
+        let inactive_bg = lighten(bar_bg, 14);  // more visible background
         let inactive_bg_px = pack(inactive_bg.0, inactive_bg.1, inactive_bg.2);
         let active_bg_px = pack(self.theme.bg.0, self.theme.bg.1, self.theme.bg.2);
 
@@ -171,6 +171,19 @@ impl Renderer {
                         let end = (off + rr - rl).min(buffer.len());
                         if off < buffer.len() {
                             buffer[off..end].fill(active_bg_px);
+                        }
+                    }
+                }
+
+                // Active tab: 3px accent bar at bottom (connection to content)
+                for dy in 0..3 {
+                    let y = bot.saturating_sub(1) + dy;
+                    if y < bar_height {
+                        let off = y * buf_width + pl;
+                        let end = (off + pr.saturating_sub(pl)).min(buffer.len());
+                        if off < buffer.len() {
+                            let bar_color = if dy == 0 { accent_px } else { glow_px };
+                            buffer[off..end].fill(bar_color);
                         }
                     }
                 }

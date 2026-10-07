@@ -352,7 +352,14 @@ pub fn handle_menu_action(app: &mut App, action: MenuAction, event_loop: &Active
         MenuAction::TeachingMode => app.teaching.toggle(),
         // AI
         MenuAction::AiAssistant => app.ai_panel.toggle(),
-        MenuAction::ObserverMode => {} // TODO: integrate observer
+        MenuAction::ObserverMode => {
+            app.observer.toggle();
+            if app.observer.enabled {
+                log::info!("Observer: enabled");
+            } else {
+                log::info!("Observer: disabled");
+            }
+        }
         // Terminal
         MenuAction::HudToggle => {
             app.hud_visible = !app.hud_visible;
@@ -521,6 +528,16 @@ fn handle_mod_shift(app: &mut App, key: &str, event_loop: &ActiveEventLoop) -> b
         "o" | "O" => { app.docker.toggle(); true }
         "m" | "M" => { app.secret_mask.toggle(); true }
         "u" | "U" => { app.audit.toggle(); true }
+        "v" | "V" => {
+            // Toggle observer + show summary
+            if !app.observer.enabled {
+                app.observer.toggle();
+                log::info!("Observer: enabled");
+            }
+            let summary = app.observer.generate_summary();
+            app.observer_summary = Some(summary);
+            true
+        }
         "p" | "P" => {
             app.broadcast = !app.broadcast;
             app.update_title();

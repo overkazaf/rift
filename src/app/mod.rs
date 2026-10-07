@@ -11,6 +11,7 @@ use winit::keyboard::ModifiersState;
 use winit::window::{Window, WindowId};
 
 use crate::ai::{AiPanel, Autocomplete, LlmManager};
+use crate::ai::observer::Observer;
 use crate::config::Config;
 use crate::network::{SshConnectRequest, SshDialog, SshPty, WebViewDialog, WebViewPane};
 use crate::renderer::Renderer;
@@ -79,6 +80,8 @@ pub struct App {
     pub docker: DockerPanel,
     pub audit: AuditLog,
     pub notifier: Notifier,
+    pub observer: Observer,
+    pub observer_summary: Option<String>,
 
     pub startup_time: std::time::Instant,
 
@@ -142,6 +145,8 @@ impl App {
             docker: DockerPanel::new(),
             audit: AuditLog::new(),
             notifier: Notifier::new(),
+            observer: Observer::new(),
+            observer_summary: None,
 
             startup_time: std::time::Instant::now(),
 
