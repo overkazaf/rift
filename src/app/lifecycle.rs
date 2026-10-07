@@ -694,7 +694,10 @@ pub fn about_to_wait(app: &mut App, event_loop: &ActiveEventLoop) {
     let in_startup = app.startup_time.elapsed().as_secs_f32() < 2.5;
 
     if has_shader || in_startup {
-        event_loop.set_control_flow(ControlFlow::Poll);
+        // Cap at ~60fps to avoid CPU spin (Poll = 100% CPU)
+        event_loop.set_control_flow(ControlFlow::WaitUntil(
+            std::time::Instant::now() + std::time::Duration::from_millis(16)
+        ));
     } else {
         event_loop.set_control_flow(ControlFlow::Wait);
     }

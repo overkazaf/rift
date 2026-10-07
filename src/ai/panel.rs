@@ -134,8 +134,16 @@ impl AiPanel {
         let panel_h = (ch * 10 + 40).min(height / 3).max(ch * 6);
         let panel_y = height.saturating_sub(panel_h);
 
-        // Background
-        let bg = darken(theme.bg, 10);
+        // Dim the entire screen first (dark overlay)
+        for px in buffer.iter_mut() {
+            let r = ((*px >> 16) & 0xff) / 3;
+            let g = ((*px >> 8) & 0xff) / 3;
+            let b = (*px & 0xff) / 3;
+            *px = (r << 16) | (g << 8) | b;
+        }
+
+        // Solid panel background
+        let bg = darken(theme.bg, 15);
         let bg_px = pack(bg.0, bg.1, bg.2);
         for y in panel_y..height {
             let off = y * width;
