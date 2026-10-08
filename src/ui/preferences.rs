@@ -251,178 +251,80 @@ impl Preferences {
         font: &mut FontManager,
         theme: &Theme,
     ) {
+        use super::kit::{center_scroll, Ctx, PanelSpec, Rect, Tokens, Tone};
         if !self.visible {
             return;
         }
+        let tk = Tokens::new(theme, font.cell_width, font.cell_height);
+        let mut cx = Ctx::new(buffer, width, height, font, &tk);
+        cx.backdrop(tk.backdrop);
 
-        // Dim the background
-        for px in buffer.iter_mut() {
-            let r = ((*px >> 16) & 0xff) / 3;
-            let g = ((*px >> 8) & 0xff) / 3;
-            let b = (*px & 0xff) / 3;
-            *px = (r << 16) | (g << 8) | b;
-        }
-
-        let cw = font.cell_width;
-        let ch = font.cell_height;
-        let row_h = ch + 12;
-
-        // Auto-size panel: at least wide enough for section tabs + padding
-        let tabs_w: usize = self.sections.iter().map(|s| s.name.chars().count() * cw + 20).sum();
-        let panel_w = (tabs_w + 60).max(45 * cw).max(520).min(width.saturating_sub(40));
+        // Stable panel size across sections: fits the busiest one, capped at 10 rows.
+        let max_rows = self.sections.iter().map(|s| s.items.len()).max().unwrap_or(1).min(10);
+        let want = cx.title_h() + cx.footer_h() + 2 * tk.sp.md + (max_rows + 1) * tk.row_h + tk.sp.sm;
+        let rect = cx.centered_cols(76, want);
         let section = &self.sections[self.active_section];
-        let content_rows = section.items.len();
-        let panel_h = (ch * 3 + 50 + content_rows * row_h + ch + 30)
-            .max(200)
-            .min(height.saturating_sub(40));
-        let px0 = (width - panel_w) / 2;
-        let py0 = (height - panel_h) / 2;
+        let spec = PanelSpec::new("Preferences")
+            .sub(section.name)
+            .hints(&[("Up/Down", "select"), ("Left/Right", "change"), ("Tab", "section"), ("S", "save"), ("Esc", "close")]);
+        let body = cx.panel(rect, &spec);
 
-        // Panel background
-        let panel_bg = lighten(theme.bg, 8);
-        let panel_bg_px = pack(panel_bg.0, panel_bg.1, panel_bg.2);
-        for y in py0..py0 + panel_h {
-            let offset = y * width + px0;
-            let end = (offset + panel_w).min(buffer.len());
-            if offset < buffer.len() {
-                buffer[offset..end].fill(panel_bg_px);
-            }
-        }
+        let names: Vec<&str> = self.sections.iter().map(|s| s.name).collect();
+        cx.tabs(body.x, body.y, body.w, &names, self.active_section);
+        cx.divider(body.x, body.y + tk.row_h, body.w);
 
-        // Panel border (accent / cursor color, slightly dimmed)
-        let border_color = dim(theme.cursor, 0.5);
-        let border_px = pack(border_color.0, border_color.1, border_color.2);
-        for x in px0..px0 + panel_w {
-            set_px(buffer, width, py0, x, border_px);
-            set_px(buffer, width, py0 + panel_h - 1, x, border_px);
-        }
-        for y in py0..py0 + panel_h {
-            set_px(buffer, width, y, px0, border_px);
-            set_px(buffer, width, y, px0 + panel_w - 1, border_px);
-        }
+        let list = Rect::new(body.x, body.y + tk.row_h + tk.sp.sm, body.w, body.h.saturating_sub(tk.row_h + tk.sp.sm));
+        let vis = cx.rows_fit(list.h);
+        let scroll = center_scroll(self.active_item, section.items.len(), vis);
+        let sb = if section.items.len() > vis { tk.sp.sm } else { 0 };
+        let rw = list.w.saturating_sub(sb);
+        let value_x = list.x + rw * 45 / 100;
 
-        // Title
-        let title_y = py0 + 14;
-        render_text(buffer, width, font, "Preferences", px0 + 20, title_y, theme.cursor);
+        for (n, item) in section.items.iter().skip(scroll).take(vis).enumerate() {
+            let i = scroll + n;
+            let row = Rect::new(list.x, list.y + n * tk.row_h, rw, tk.row_h);
+            let selected = i == self.active_item;
+            cx.row_bg(row, selected, false);
 
-        // Section tabs
-        let tab_y = title_y + ch + 12;
-        let mut tx = px0 + 20;
-        for (i, section) in self.sections.iter().enumerate() {
-            let is_active = i == self.active_section;
-            let color = if is_active { theme.cursor } else { dim(theme.fg, 0.4) };
-
-            render_text(buffer, width, font, section.name, tx, tab_y, color);
-
-            let name_w = section.name.chars().count() * cw;
-            if is_active {
-                let underline_y = tab_y + ch + 2;
-                let accent_px = pack(theme.cursor.0, theme.cursor.1, theme.cursor.2);
-                for x in tx..tx + name_w {
-                    set_px(buffer, width, underline_y, x, accent_px);
-                    set_px(buffer, width, underline_y + 1, x, accent_px);
-                }
-            }
-
-            tx += name_w + 20;
-        }
-
-        // Separator line
-        let sep_y = tab_y + ch + 8;
-        let sep_color = dim(theme.fg, 0.1);
-        let sep_px = pack(sep_color.0, sep_color.1, sep_color.2);
-        for x in (px0 + 16)..(px0 + panel_w - 16) {
-            set_px(buffer, width, sep_y, x, sep_px);
-        }
-
-        // Items — two-column layout: label on left, value on right
-        let label_col = px0 + 24;
-        let value_col = px0 + panel_w / 2; // value starts at halfway
-        let mut iy = sep_y + 14;
-
-        for (i, item) in section.items.iter().enumerate() {
-            if iy + row_h >= py0 + panel_h - 30 {
-                break;
-            }
-
-            let is_selected = i == self.active_item;
-
-            // Selected row highlight — stronger contrast
-            if is_selected {
-                let hl_color = lighten(panel_bg, 16);
-                let hl_px = pack(hl_color.0, hl_color.1, hl_color.2);
-                for y in iy..(iy + row_h) {
-                    let offset = y * width + px0 + 10;
-                    let end = (offset + panel_w - 20).min(buffer.len());
-                    if offset < buffer.len() {
-                        buffer[offset..end].fill(hl_px);
-                    }
-                }
-
-                // Left accent bar for selected item
-                let accent_px = pack(theme.cursor.0, theme.cursor.1, theme.cursor.2);
-                for y in (iy + 2)..(iy + row_h - 2) {
-                    set_px(buffer, width, y, px0 + 12, accent_px);
-                    set_px(buffer, width, y, px0 + 13, accent_px);
-                }
-            }
-
-            let label_color = if is_selected {
-                theme.fg
-            } else {
-                dim(theme.fg, 0.6)
+            let label_x = row.x + tk.sp.md + 2 * tk.scale;
+            let value_w = row.right().saturating_sub(value_x + tk.sp.md);
+            let label = match item {
+                PrefItem::ThemeSelect { label, .. }
+                | PrefItem::FontSize { label, .. }
+                | PrefItem::Number { label, .. }
+                | PrefItem::Toggle { label, .. }
+                | PrefItem::Info { label, .. } => *label,
             };
+            let label_color = if selected { tk.text } else { tk.text_muted };
+            cx.line_fit(label_x, row.y, value_x.saturating_sub(label_x + tk.sp.md), label, label_color);
 
-            let text_y = iy + (row_h - ch) / 2;
-
-            // Label on left, value on right (never overlap)
+            // Adjustable values show "< v >" and light up when selected.
+            let adj_color = if selected { tk.accent } else { tk.text };
             match item {
-                PrefItem::ThemeSelect { label, current, .. } => {
-                    render_text(buffer, width, font, label, label_col, text_y, label_color);
-                    let val = format!("< {} >", current);
-                    let vc = if is_selected { theme.cursor } else { dim(theme.fg, 0.5) };
-                    render_text(buffer, width, font, &val, value_col, text_y, vc);
+                PrefItem::ThemeSelect { current, .. } => {
+                    cx.line_fit(value_x, row.y, value_w, &format!("< {} >", current), adj_color);
                 }
                 PrefItem::FontSize { label, current, .. } => {
-                    render_text(buffer, width, font, label, label_col, text_y, label_color);
                     let val = if *label == "Opacity" {
                         format!("< {:.0}% >", current * 100.0)
                     } else {
                         format!("< {:.0}px >", current)
                     };
-                    let vc = if is_selected { theme.cursor } else { dim(theme.fg, 0.5) };
-                    render_text(buffer, width, font, &val, value_col, text_y, vc);
+                    cx.line_fit(value_x, row.y, value_w, &val, adj_color);
                 }
-                PrefItem::Number { label, current, .. } => {
-                    render_text(buffer, width, font, label, label_col, text_y, label_color);
-                    let val = format!("< {} >", current);
-                    let vc = if is_selected { theme.cursor } else { dim(theme.fg, 0.5) };
-                    render_text(buffer, width, font, &val, value_col, text_y, vc);
+                PrefItem::Number { current, .. } => {
+                    cx.line_fit(value_x, row.y, value_w, &format!("< {} >", current), adj_color);
                 }
-                PrefItem::Toggle { label, current, .. } => {
-                    render_text(buffer, width, font, label, label_col, text_y, label_color);
-                    let (val, vc) = if *current {
-                        ("ON", theme.cursor)
-                    } else {
-                        ("OFF", dim(theme.fg, 0.3))
-                    };
-                    render_text(buffer, width, font, val, value_col, text_y, vc);
+                PrefItem::Toggle { current, .. } => {
+                    let (t, tone) = if *current { ("ON", Tone::Success) } else { ("OFF", Tone::Neutral) };
+                    cx.badge_line(value_x, row.y, t, tone);
                 }
-                PrefItem::Info { label, value } => {
-                    render_text(buffer, width, font, label, label_col, text_y, label_color);
-                    render_text(buffer, width, font, value, value_col, text_y, dim(theme.fg, 0.4));
+                PrefItem::Info { value, .. } => {
+                    cx.line_fit(value_x, row.y, value_w, value, tk.text_muted);
                 }
             }
-
-            iy += row_h;
         }
-
-        // Bottom help text — clamp to panel width
-        let help = "Up/Down  Left/Right  Tab  S:save  Esc";
-        let help_max_chars = (panel_w - 40) / cw;
-        let help_str = truncate(help, help_max_chars);
-        let help_y = py0 + panel_h - ch - 14;
-        render_text(buffer, width, font, help_str, px0 + 20, help_y, dim(theme.fg, 0.3));
+        cx.scrollbar(list, section.items.len(), vis, scroll);
     }
 }
 
@@ -444,4 +346,3 @@ pub enum PrefsAction {
     SaveConfig,
 }
 
-use super::primitives::{render_text, pack, dim, lighten, set_px, trunc as truncate};

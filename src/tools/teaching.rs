@@ -60,56 +60,53 @@ impl TeachingMode {
         &self,
         buffer: &mut [u32],
         width: usize,
-        _height: usize,
+        height: usize,
         font: &mut FontManager,
         theme: &Theme,
         cursor_x: usize,
         cursor_y: usize,
     ) {
+        use crate::ui::kit::{Ctx, Rect, Tokens};
         if !self.enabled {
             return;
         }
         let Some(ref text) = self.last_explanation else {
             return;
         };
+        let tk = Tokens::new(theme, font.cell_width, font.cell_height);
+        let mut cx = Ctx::new(buffer, width, height, font, &tk);
 
-        let cw = font.cell_width;
-        let ch = font.cell_height;
         let lines: Vec<&str> = text.lines().take(6).collect();
         let max_line_len = lines.iter().map(|l| l.chars().count()).max().unwrap_or(20);
 
-        let tip_w = ((max_line_len + 4) * cw).min(width / 2);
-        let tip_h = lines.len() * (ch + 2) + 12;
-        let tip_x = cursor_x.min(width.saturating_sub(tip_w + 10));
-        let tip_y = if cursor_y > tip_h + 20 {
-            cursor_y - tip_h - 10
+        let tip_w = ((max_line_len + 2) * tk.cw + 2 * tk.sp.md + 2 * tk.sp.sm).clamp(20 * tk.cw, (width / 2).max(20 * tk.cw)).min(width);
+        let tip_h = lines.len().max(1) * tk.row_h + 2 * tk.sp.sm;
+        let tip_x = cursor_x.min(width.saturating_sub(tip_w + tk.sp.md));
+        // Prefer above the cursor line; fall back to below.
+        let tip_y = if cursor_y > tip_h + tk.sp.xl {
+            cursor_y - tip_h - tk.sp.sm
         } else {
-            cursor_y + ch + 10
+            cursor_y + tk.ch + tk.sp.md
         };
-
-        let bg = crate::ui::darken(theme.bg, 5);
-        crate::ui::fill_rect(buffer, width, tip_x, tip_y, tip_w, tip_h, crate::ui::pack_rgb(bg));
-        let border = crate::ui::dim(theme.cursor, 0.4);
-        crate::ui::draw_border(
-            buffer,
-            width,
-            tip_x,
-            tip_y,
-            tip_w,
-            tip_h,
-            crate::ui::pack_rgb(border),
-        );
-
-        let mut ty = tip_y + 6;
+        let rect = Rect::new(tip_x, tip_y.min(height.saturating_sub(tip_h)), tip_w, tip_h);
+        let inner = cx.float(rect);
         for (i, line) in lines.iter().enumerate() {
-            let color = if i == 0 {
-                theme.cursor
-            } else {
-                crate::ui::dim(theme.fg, 0.7)
-            };
-            let display = crate::ui::trunc(line, (tip_w.saturating_sub(16)) / cw.max(1));
-            crate::ui::render_text(buffer, width, font, display, tip_x + 8, ty, color);
-            ty += ch + 2;
+            let c = if i == 0 { tk.accent } else { tk.text };
+            cx.line_fit(inner.x + tk.sp.xs, inner.y + i * tk.row_h, inner.w.saturating_sub(2 * tk.sp.xs), line, c);
         }
+    }
+}
+
+#[cfg(test)]
+mod qa_tests {
+    use super::*;
+    use crate::ui::kit::gallery::qa::each_theme;
+
+    #[test]
+    fn renders_bubble() {
+        let mut t = TeachingMode::new();
+        t.enabled = true;
+        t.last_explanation = Some("Lists files in long format.\n-l  use a long listing format\n-a  include hidden entries".into());
+        each_theme("teaching", |b, w, h, f, th| t.render(b, w, h, f, th, 300, 400));
     }
 }

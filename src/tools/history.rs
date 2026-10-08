@@ -14,11 +14,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::config::{Rgb, Theme};
 use crate::renderer::font::FontManager;
 
-/// Fixed "fzf green" accent — used regardless of theme so matched text and
-/// the panel chrome always pop against the dark backdrop.
-const GREEN_ACCENT: Rgb = (92, 219, 149);
-const ERROR_ACCENT: Rgb = (235, 110, 110);
-
 /// Cap on how many raw (post-aggregation-input) history lines we keep —
 /// keeps very large history files cheap to re-filter on every keystroke.
 const MAX_PARSED_LINES: usize = 20_000;
@@ -233,142 +228,82 @@ impl HistorySearch {
         font: &mut FontManager,
         theme: &Theme,
     ) {
+        use crate::ui::kit::{Ctx, PanelSpec, Rect, Tokens, Tone};
         if !self.visible {
             return;
         }
+        let tk = Tokens::new(theme, font.cell_width, font.cell_height);
+        let mut cx = Ctx::new(buffer, width, height, font, &tk);
 
-        let cw = font.cell_width.max(1);
-        let ch = font.cell_height.max(1);
-        let row_h = ch + 6;
-        let pad = 8usize;
-
-        // Fixed vertical "chrome": top pad + header + input + separator + footer + bottom pad.
-        let chrome_h = pad + (ch + 6) + (ch + 6) + (1 + 6) + (ch + pad) + pad;
-
-        let max_total_h = (height * 3 / 5).max(ch * 10).min(height.saturating_sub(ch));
+        // Bottom sheet: title bar + search field + result rows + key hints.
+        let chrome_h = cx.title_h() + cx.footer_h() + tk.input_h + tk.sp.sm + 2 * tk.sp.md;
+        let max_total_h = (height * 3 / 5).max(tk.row_h * 10).min(height.saturating_sub(tk.row_h));
         let rows_budget = max_total_h.saturating_sub(chrome_h);
-        let desired_rows = 10usize;
-        let visible_rows = desired_rows.min((rows_budget / row_h).max(1)).max(1);
+        let visible_rows = 10usize.min((rows_budget / tk.row_h).max(1)).max(1);
+        let sheet_h = (chrome_h + visible_rows * tk.row_h).min(height);
+        let sheet = cx.bottom_sheet(sheet_h + tk.sp.sm);
+        let rect = Rect::new(sheet.x + tk.sp.sm, sheet.y, sheet.w.saturating_sub(2 * tk.sp.sm), sheet_h);
 
-        let panel_h = (chrome_h + visible_rows * row_h).min(height);
-        let panel_y = height.saturating_sub(panel_h);
+        let count = format!("{}/{} results", self.filtered.len(), self.entries.len());
+        let spec = PanelSpec::new("History")
+            .sub("smart search")
+            .badge(&count, Tone::Neutral)
+            .hints(&[("Enter", "run"), ("Tab", "insert"), ("Up/Down", "navigate"), ("Esc", "close")]);
+        let body = cx.panel(rect, &spec);
 
-        let bg = crate::ui::darken(theme.bg, 14);
-        crate::ui::fill_rect(buffer, width, 0, panel_y, width, panel_h, crate::ui::pack_rgb(bg));
+        let input = Rect::new(body.x, body.y, body.w, tk.input_h);
+        cx.text_input(input, &self.query, self.query.chars().count(), None, "Type to filter history...", true);
+        let rows_area = Rect::new(body.x, body.y + tk.input_h + tk.sp.sm, body.w, body.h.saturating_sub(tk.input_h + tk.sp.sm));
 
-        // Glowing green top border (2px), fzf-style.
-        let border_px = crate::ui::pack_rgb(GREEN_ACCENT);
-        let glow_px = crate::ui::pack_rgb(crate::ui::dim(GREEN_ACCENT, 0.35));
-        for x in 0..width {
-            crate::ui::set_px(buffer, width, panel_y, x, border_px);
-            if panel_y + 1 < height {
-                crate::ui::set_px(buffer, width, panel_y + 1, x, glow_px);
-            }
-        }
-
-        let header_y = panel_y + pad + 2;
-        let input_y = header_y + ch + 6;
-        let sep_y = input_y + ch + 6;
-        let rows_top = sep_y + 7;
-        let footer_y = panel_y + panel_h.saturating_sub(ch + pad);
-
-        // Header: title (left) + "N/M results" (right).
-        crate::ui::render_text(buffer, width, font, "\u{25C8} Smart History", pad, header_y, GREEN_ACCENT);
-        let count_str = format!("{}/{} results", self.filtered.len(), self.entries.len());
-        let count_x = width.saturating_sub(count_str.len() * cw + pad);
-        crate::ui::render_text(buffer, width, font, &count_str, count_x, header_y, crate::ui::dim(theme.fg, 0.5));
-
-        // Input row: prompt + query (or placeholder) + cursor.
-        crate::ui::render_text(buffer, width, font, ">", pad, input_y, GREEN_ACCENT);
-        let input_x = pad + 2 * cw;
-        if self.query.is_empty() {
-            crate::ui::render_text(buffer, width, font, "Type to filter history...", input_x, input_y, crate::ui::dim(theme.fg, 0.35));
-        } else {
-            crate::ui::render_text(buffer, width, font, &self.query, input_x, input_y, theme.fg);
-        }
-        let cursor_x = input_x + self.query.chars().count() * cw;
-        let cursor_px = crate::ui::pack_rgb(GREEN_ACCENT);
-        for y in input_y..(input_y + ch).min(height) {
-            crate::ui::set_px(buffer, width, y, cursor_x, cursor_px);
-            crate::ui::set_px(buffer, width, y, cursor_x + 1, cursor_px);
-        }
-
-        // Separator.
-        let sep_color = crate::ui::pack_rgb(crate::ui::dim(theme.fg, 0.15));
-        if sep_y < height {
-            let off = sep_y * width;
-            let end = (off + width).min(buffer.len());
-            if off < buffer.len() {
-                buffer[off..end].fill(sep_color);
-            }
-        }
-
-        // Results.
         if self.entries.is_empty() {
-            crate::ui::render_text(
-                buffer, width, font,
-                "No shell history found (~/.zsh_history or ~/.bash_history)",
-                pad, rows_top, crate::ui::dim(theme.fg, 0.4),
-            );
-        } else if self.filtered.is_empty() {
-            crate::ui::render_text(buffer, width, font, "No matches", pad, rows_top, crate::ui::dim(theme.fg, 0.4));
-        } else {
-            let query_lower = self.query.to_lowercase();
-            let scroll = if self.selected + 1 > visible_rows {
-                self.selected + 1 - visible_rows
-            } else {
-                0
-            };
-
-            // Reserve space on the right for "<marker> <time ago>  xN".
-            let right_reserved = 22 * cw;
-            let cmd_x = pad + 2 * cw;
-            let max_cmd_chars = width.saturating_sub(cmd_x + right_reserved) / cw;
-
-            for (row_i, &entry_idx) in self.filtered.iter().skip(scroll).take(visible_rows).enumerate() {
-                let Some(entry) = self.entries.get(entry_idx) else { continue };
-                let is_sel = scroll + row_i == self.selected;
-                let ry = rows_top + row_i * row_h;
-                if ry + ch > height {
-                    break;
-                }
-
-                if is_sel {
-                    let hl = crate::ui::lighten(bg, 10);
-                    crate::ui::fill_rect(buffer, width, 0, ry.saturating_sub(3), width, row_h, crate::ui::pack_rgb(hl));
-                    crate::ui::fill_rect(buffer, width, 0, ry.saturating_sub(3), 3, row_h, crate::ui::pack_rgb(GREEN_ACCENT));
-                }
-
-                let marker = if is_sel { ">" } else { " " };
-                crate::ui::render_text(buffer, width, font, marker, pad, ry, GREEN_ACCENT);
-
-                let base_color = if is_sel { theme.fg } else { crate::ui::dim(theme.fg, 0.75) };
-                let cmd_display = crate::ui::trunc(&entry.command, max_cmd_chars);
-                render_matched_line(buffer, width, font, cmd_display, cmd_x, ry, &query_lower, base_color, GREEN_ACCENT);
-
-                // Right side: time ago + frequency, with an optional exit-code marker.
-                let time_str = format_time_ago(entry.timestamp);
-                let info = format!("{}  x{}", time_str, entry.frequency);
-                let info_w = info.chars().count() * cw;
-                let info_x = width.saturating_sub(info_w + pad);
-                crate::ui::render_text(buffer, width, font, &info, info_x, ry, crate::ui::dim(theme.fg, 0.45));
-
-                if let Some(code) = entry.exit_code {
-                    let (mark, color) = if code == 0 { ("+", GREEN_ACCENT) } else { ("!", ERROR_ACCENT) };
-                    crate::ui::render_text(buffer, width, font, mark, info_x.saturating_sub(2 * cw), ry, color);
-                }
-
-                if !entry.directory.is_empty() {
-                    let dir_hint = format!(" ({})", crate::ui::trunc(&entry.directory, 20));
-                    let dir_x = cmd_x + cmd_display.chars().count() * cw;
-                    crate::ui::render_text(buffer, width, font, &dir_hint, dir_x, ry, crate::ui::dim(theme.fg, 0.3));
-                }
-            }
+            cx.empty_state(rows_area, "No shell history found", "Looked in ~/.zsh_history and ~/.bash_history");
+            return;
+        }
+        if self.filtered.is_empty() {
+            cx.empty_state(rows_area, "No matches", "");
+            return;
         }
 
-        // Footer help.
-        let help = "Enter: run   Tab: insert   \u{2191}\u{2193}: navigate   Esc: close";
-        crate::ui::render_text(buffer, width, font, help, pad, footer_y, crate::ui::dim(theme.fg, 0.3));
+        let query_lower = self.query.to_lowercase();
+        let vis = cx.rows_fit(rows_area.h);
+        let scroll = crate::ui::kit::scroll_into_view(self.selected, 0, vis);
+        let sb = if self.filtered.len() > vis { tk.sp.sm } else { 0 };
+        let row_w = rows_area.w.saturating_sub(sb);
+
+        for (row_i, &entry_idx) in self.filtered.iter().skip(scroll).take(vis).enumerate() {
+            let Some(entry) = self.entries.get(entry_idx) else { continue };
+            let is_sel = scroll + row_i == self.selected;
+            let row = Rect::new(rows_area.x, rows_area.y + row_i * tk.row_h, row_w, tk.row_h);
+            cx.row_bg(row, is_sel, false);
+
+            // Right side: exit marker + time ago + frequency.
+            let info = format!("{}  x{}", format_time_ago(entry.timestamp), entry.frequency);
+            let mut right = row.right().saturating_sub(tk.sp.md);
+            let iw = cx.tw(&info);
+            cx.line(right.saturating_sub(iw), row.y, &info, tk.text_muted);
+            right = right.saturating_sub(iw + tk.sp.md);
+            if let Some(code) = entry.exit_code {
+                let (mark, tone) = if code == 0 { ("ok", Tone::Success) } else { ("err", Tone::Danger) };
+                let bw = cx.badge_w(mark);
+                cx.badge_line(right.saturating_sub(bw), row.y, mark, tone);
+                right = right.saturating_sub(bw + tk.sp.md);
+            }
+
+            let cmd_x = row.x + tk.sp.md + 2 * tk.scale;
+            let mut cmd_w = right.saturating_sub(cmd_x);
+            if !entry.directory.is_empty() {
+                let dir = format!("({})", crate::ui::trunc(&entry.directory, 20));
+                let dw = cx.tw(&dir);
+                if cmd_w > dw + 20 * tk.cw {
+                    cx.line(right.saturating_sub(dw), row.y, &dir, tk.text_faint);
+                    cmd_w -= dw + tk.sp.md;
+                }
+            }
+            let cmd_display = crate::ui::kit::ellipsize(&entry.command.replace('\n', " "), cx.cols(cmd_w));
+            let base = if is_sel { tk.text } else { tk.text_muted };
+            render_matched_line(&mut cx, &cmd_display, cmd_x, row.y, &query_lower, base, tk.accent);
+        }
+        cx.scrollbar(rows_area, self.filtered.len(), vis, scroll);
     }
 }
 
@@ -403,11 +338,10 @@ fn score_entry(entry: &HistoryEntry, query_lower: &str) -> Option<i64> {
 }
 
 /// Render `text` with the first case-insensitive occurrence of `query_lower`
-/// highlighted in `match_color`; everything else in `base_color`.
+/// highlighted in `match_color`; everything else in `base_color`. `y` is the
+/// top of a kit line box.
 fn render_matched_line(
-    buffer: &mut [u32],
-    width: usize,
-    font: &mut FontManager,
+    cx: &mut crate::ui::kit::Ctx,
     text: &str,
     x: usize,
     y: usize,
@@ -416,7 +350,7 @@ fn render_matched_line(
     match_color: Rgb,
 ) {
     if query_lower.is_empty() {
-        crate::ui::render_text(buffer, width, font, text, x, y, base_color);
+        cx.line(x, y, text, base_color);
         return;
     }
 
@@ -425,13 +359,13 @@ fn render_matched_line(
     let qchars: Vec<char> = query_lower.chars().collect();
     let qlen = qchars.len();
 
-    let match_start = if qlen > 0 && lower_chars.len() >= qlen {
+    let match_start = if qlen > 0 && lower_chars.len() == chars.len() && lower_chars.len() >= qlen {
         (0..=lower_chars.len() - qlen).find(|&i| lower_chars[i..i + qlen] == qchars[..])
     } else {
         None
     };
 
-    let cw = font.cell_width;
+    let cw = cx.tk.cw;
     match match_start {
         Some(start) => {
             let end = start + qlen;
@@ -439,14 +373,14 @@ fn render_matched_line(
             let matched: String = chars[start..end].iter().collect();
             let after: String = chars[end..].iter().collect();
 
-            let mut cx = x;
-            crate::ui::render_text(buffer, width, font, &before, cx, y, base_color);
-            cx += before.chars().count() * cw;
-            crate::ui::render_text(buffer, width, font, &matched, cx, y, match_color);
-            cx += matched.chars().count() * cw;
-            crate::ui::render_text(buffer, width, font, &after, cx, y, base_color);
+            let mut px = x;
+            cx.line(px, y, &before, base_color);
+            px += before.chars().count() * cw;
+            cx.line(px, y, &matched, match_color);
+            px += matched.chars().count() * cw;
+            cx.line(px, y, &after, base_color);
         }
-        None => crate::ui::render_text(buffer, width, font, text, x, y, base_color),
+        None => cx.line(x, y, text, base_color),
     }
 }
 

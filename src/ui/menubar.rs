@@ -42,6 +42,7 @@ pub enum MenuAction {
     NoEffect,
     Preferences,
     Welcome,
+    UiGallery,
     WebView,
     Browser(crate::network::browser::BrowserCmd),
     // New actions
@@ -65,6 +66,7 @@ pub enum MenuAction {
     HudToggle,
     BroadcastToggle,
     Find,
+    ClearBuffer,
     CompareOutput,
     Pane(PaneCmd),
 }
@@ -136,6 +138,8 @@ impl AppMenuBar {
         let edit_menu = Submenu::new("Edit", true);
         let find = MenuItem::new("Find...", true, accel("CmdOrCtrl+F"));
         actions.insert(find.id().clone(), MenuAction::Find);
+        let clear_buffer = MenuItem::new("Clear Buffer", true, accel_mac("CmdOrCtrl+Alt+K"));
+        actions.insert(clear_buffer.id().clone(), MenuAction::ClearBuffer);
 
         let _ = edit_menu.append_items(&[
             &PredefinedMenuItem::undo(None),
@@ -147,6 +151,7 @@ impl AppMenuBar {
             &PredefinedMenuItem::select_all(None),
             &PredefinedMenuItem::separator(),
             &find,
+            &clear_buffer,
         ]);
 
         // ── View menu ──
@@ -351,7 +356,9 @@ impl AppMenuBar {
         let help_menu = Submenu::new("Help", true);
         let welcome = MenuItem::new("Welcome Guide", true, None::<Accelerator>);
         actions.insert(welcome.id().clone(), MenuAction::Welcome);
-        let _ = help_menu.append_items(&[&welcome]);
+        let gallery = MenuItem::new("UI Gallery", true, None::<Accelerator>);
+        actions.insert(gallery.id().clone(), MenuAction::UiGallery);
+        let _ = help_menu.append_items(&[&welcome, &gallery]);
 
         // ── Assemble menu bar ──
         let _ = menu.append_items(&[

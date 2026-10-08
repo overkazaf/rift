@@ -1,4 +1,4 @@
-use crate::config::{Rgb, Theme};
+use crate::config::Theme;
 use crate::renderer::font::FontManager;
 
 pub struct AiPanel {
@@ -135,131 +135,82 @@ impl AiPanel {
         font: &mut FontManager,
         theme: &Theme,
     ) {
+        use crate::ui::kit::{Ctx, PanelSpec, Rect, Tokens};
         if !self.visible {
             return;
         }
+        let tk = Tokens::new(theme, font.cell_width, font.cell_height);
+        let mut cx = Ctx::new(buffer, width, height, font, &tk);
+        cx.backdrop(tk.backdrop);
 
-        let cw = font.cell_width;
-        let ch = font.cell_height;
-        let panel_h = (ch * 10 + 40).min(height / 3).max(ch * 6);
-        let panel_y = height.saturating_sub(panel_h);
-
-        // Dim the entire screen first (dark overlay)
-        for px in buffer.iter_mut() {
-            let r = ((*px >> 16) & 0xff) / 3;
-            let g = ((*px >> 8) & 0xff) / 3;
-            let b = (*px & 0xff) / 3;
-            *px = (r << 16) | (g << 8) | b;
-        }
-
-        // Solid panel background
-        let bg = darken(theme.bg, 15);
-        let bg_px = pack(bg.0, bg.1, bg.2);
-        for y in panel_y..height {
-            let off = y * width;
-            let end = (off + width).min(buffer.len());
-            if off < buffer.len() {
-                buffer[off..end].fill(bg_px);
-            }
-        }
-
-        // Top separator
-        let sep = lighten(bg, 20);
-        let sep_px = pack(sep.0, sep.1, sep.2);
-        if panel_y > 0 {
-            let off = panel_y * width;
-            let end = (off + width).min(buffer.len());
-            if off < buffer.len() {
-                buffer[off..end].fill(sep_px);
-            }
-        }
-
-        let pad = 16;
-        let max_chars = (width - pad * 2) / cw;
-        let mut cy = panel_y + 10;
-
-        // Title + provider info
-        let title = if self.loading {
-            "rift AI  [thinking...]"
+        let sheet = sheet_rect(&cx);
+        let status = if self.loading {
+            "thinking..."
+        } else if self.error.is_some() {
+            "request failed"
+        } else if self.response.is_some() {
+            "ready"
         } else {
-            "rift AI"
+            "natural language to shell command"
         };
-        render_text(buffer, width, font, title, pad, cy, theme.cursor);
-        cy += ch + 8;
+        let hints: &[(&str, &str)] = if self.response.is_some() {
+            &[("Enter", "run"), ("Tab", "paste"), ("Shift+Enter", "new question"), ("Esc", "close")]
+        } else if self.loading {
+            &[("Esc", "close")]
+        } else {
+            &[("Enter", "ask"), ("Esc", "close")]
+        };
+        let body = cx.panel(sheet, &PanelSpec::new("rift AI").sub(status).hints(hints));
 
-        // Input line
-        let input_bg = lighten(bg, 8);
-        let input_bg_px = pack(input_bg.0, input_bg.1, input_bg.2);
-        let input_h = ch + 8;
-        for y in cy..(cy + input_h).min(height) {
-            let off = y * width + pad;
-            let end = (off + width - pad * 2).min(buffer.len());
-            if off < buffer.len() {
-                buffer[off..end].fill(input_bg_px);
-            }
+        // Input
+        let input = Rect::new(body.x, body.y, body.w, tk.input_h);
+        cx.text_input(input, &self.input, self.input.chars().count(), None, "Ask anything, e.g. \"find files larger than 100MB\"", !self.loading);
+        let mut y = body.y + tk.input_h + tk.sp.sm;
+        let bottom = body.bottom();
+
+        if self.loading {
+            let elapsed = ui_clock().elapsed().as_secs_f32();
+            let ty = cx.text_y(y, tk.row_h);
+            crate::ui::render_spinner(cx.buf, cx.w, cx.font, body.x + tk.sp.xs, ty, "Thinking", tk.accent, tk.text_muted, elapsed);
+            crate::ui::render_dots(cx.buf, cx.w, cx.font, body.x + tk.sp.xs + 11 * tk.cw, ty, tk.accent, elapsed);
+            return;
         }
-
-        // Input prompt
-        let prompt = "> ";
-        render_text(buffer, width, font, prompt, pad + 4, cy + 4, theme.cursor);
-        let input_x = pad + 4 + prompt.len() * cw;
-
-        // Input text
-        let display_input = trunc_str(&self.input, max_chars.saturating_sub(4));
-        render_text(buffer, width, font, display_input, input_x, cy + 4, theme.fg);
-
-        // Cursor
-        if !self.loading {
-            let cursor_x = input_x + display_input.chars().count() * cw;
-            let cursor_px = pack(theme.cursor.0, theme.cursor.1, theme.cursor.2);
-            for y in (cy + 4)..(cy + 4 + ch).min(height) {
-                set_px(buffer, width, y, cursor_x, cursor_px);
-                set_px(buffer, width, y, cursor_x + 1, cursor_px);
-            }
-        }
-        cy += input_h + 8;
-
-        // Response or error
         if let Some(ref err) = self.error {
-            let err_color: Rgb = (240, 80, 80);
-            let msg = format!("Error: {}", trunc_str(err, max_chars));
-            render_text(buffer, width, font, &msg, pad, cy, err_color);
+            cx.line_fit(body.x, y, body.w, &format!("Error: {}", err), tk.danger);
         } else if let Some(ref resp) = self.response {
             for (i, line) in resp.lines().enumerate() {
-                if cy + ch >= height.saturating_sub(ch + 10) {
+                if y + tk.row_h > bottom {
                     break;
                 }
-                let color = if i == 0 {
-                    // First line = command, use accent
-                    theme.cursor
+                if i == 0 {
+                    // First line = the suggested command.
+                    cx.line(body.x + tk.sp.xs, y, "$", tk.text_muted);
+                    let cx0 = body.x + tk.sp.xs + 2 * tk.cw;
+                    cx.line_fit(cx0, y, body.right().saturating_sub(cx0), line, tk.accent);
                 } else {
-                    dim(theme.fg, 0.6)
-                };
-                let display_line = trunc_str(line, max_chars);
-                render_text(buffer, width, font, display_line, pad, cy, color);
-                cy += ch + 2;
+                    cx.line_fit(body.x + tk.sp.xs, y, body.w, line, tk.text_muted);
+                }
+                y += tk.row_h;
             }
         }
-
-        // Bottom help
-        let help = if self.response.is_some() {
-            "Enter: run cmd | Tab: paste cmd | Shift+Enter: new Q | Esc: close"
-        } else if self.loading {
-            "waiting for response..."
-        } else {
-            "Enter: ask | Esc: close"
-        };
-        let help_y = height.saturating_sub(ch + 8);
-        render_text(
-            buffer,
-            width,
-            font,
-            trunc_str(help, max_chars),
-            pad,
-            help_y,
-            dim(theme.fg, 0.3),
-        );
     }
+}
+
+/// Monotonic clock for the in-panel spinner animation.
+fn ui_clock() -> std::time::Instant {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    *START.get_or_init(std::time::Instant::now)
+}
+
+/// Bottom-sheet rectangle of the AI panel. Fixed height (independent of the
+/// response) so annotations such as the Advisor badge can align with it.
+pub fn sheet_rect(cx: &crate::ui::kit::Ctx) -> crate::ui::kit::Rect {
+    let tk = cx.tk;
+    let rows = 8;
+    let h = cx.title_h() + cx.footer_h() + 2 * tk.sp.md + tk.input_h + tk.sp.sm + rows * tk.row_h;
+    let h = h.min(cx.h * 55 / 100).max(cx.title_h() + cx.footer_h() + tk.input_h);
+    let sheet = cx.bottom_sheet(h + tk.sp.sm);
+    crate::ui::kit::Rect::new(sheet.x + tk.sp.sm, sheet.y, sheet.w.saturating_sub(2 * tk.sp.sm), h)
 }
 
 pub enum AiPanelKey {
@@ -277,4 +228,3 @@ pub enum AiAction {
     CopyToTerminal(String),
 }
 
-use crate::ui::{pack, darken, lighten, dim, render_text, set_px, trunc as trunc_str};

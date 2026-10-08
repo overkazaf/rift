@@ -1,8 +1,8 @@
 use std::sync::mpsc::Receiver;
 
-use crate::config::{Rgb, Theme};
+use crate::config::Theme;
 use crate::renderer::font::FontManager;
-use crate::ui::{dim, fill_rect, pack_rgb, render_text, trunc};
+use crate::ui::trunc;
 
 use super::LlmConfig;
 
@@ -20,17 +20,6 @@ impl RiskLevel {
             "danger" | "dangerous" | "high" | "critical" => RiskLevel::Danger,
             "safe" | "low" | "none" => RiskLevel::Safe,
             _ => RiskLevel::Caution,
-        }
-    }
-
-    /// Theme-aware color for this risk level. Reuses the terminal's ANSI
-    /// red/green/yellow palette slots so the badge matches whatever theme
-    /// the user has active instead of hardcoding colors.
-    pub fn color(&self, theme: &Theme) -> Rgb {
-        match self {
-            RiskLevel::Safe => theme.palette[2],    // ANSI green
-            RiskLevel::Caution => theme.palette[3], // ANSI yellow
-            RiskLevel::Danger => theme.palette[1],  // ANSI red
         }
     }
 
@@ -142,10 +131,9 @@ impl Advisor {
         }
     }
 
-    /// Render a compact inline badge + notes + suggestion next to the AI
-    /// response. Intentionally minimal — a colored dot and a line or two of
-    /// dimmed text, not a second panel. Geometry mirrors `AiPanel::render`'s
-    /// layout so the badge lines up with the response panel it annotates.
+    /// Render a compact risk badge in the AI panel's title bar plus the
+    /// advisor's notes/suggestion at the bottom of the panel body. Geometry
+    /// comes from `panel::sheet_rect`, so it always lines up with the panel.
     pub fn render_inline(
         &self,
         buffer: &mut [u32],
@@ -154,63 +142,56 @@ impl Advisor {
         font: &mut FontManager,
         theme: &Theme,
     ) {
+        use crate::ui::kit::{Ctx, Tokens, Tone};
         if !self.enabled {
             return;
         }
-
-        let cw = font.cell_width.max(1);
-        let ch = font.cell_height.max(1);
-        // Mirrors AiPanel::render's panel geometry (same formula) so the
-        // badge sits in that panel's header rather than drifting from it.
-        let panel_h = (ch * 10 + 40).min(height / 3).max(ch * 6);
-        let panel_y = height.saturating_sub(panel_h);
-        let pad = 16;
-        let title_y = panel_y + 10;
+        let tk = Tokens::new(theme, font.cell_width, font.cell_height);
+        let mut cx = Ctx::new(buffer, width, height, font, &tk);
+        let sheet = super::panel::sheet_rect(&cx);
+        let body = cx.panel_content(sheet, true);
+        let right = cx.title_right_edge(sheet);
+        let title_y = sheet.y + 1;
+        let title_h = cx.title_h();
 
         if self.is_loading() {
             let label = "advisor reviewing...";
-            let x = width.saturating_sub(pad + label.len() * cw);
-            render_text(buffer, width, font, label, x, title_y, dim(theme.fg, 0.4));
+            let w = cx.tw(label);
+            let ty = cx.text_y(title_y, title_h);
+            cx.text(right.saturating_sub(w), ty, label, tk.text_muted);
             return;
         }
 
         let Some(review) = &self.review else { return };
-        let max_chars = width.saturating_sub(pad * 2) / cw;
 
-        // Badge: colored dot + risk label, top-right of the panel header —
-        // reads as an annotation "next to" the response below it.
+        // Risk badge, right-aligned in the title bar next to the Esc cap.
         let label = review.risk_level.label();
-        let dot_w = (ch / 2).max(6);
-        let gap = cw / 2 + 2;
-        let total_w = dot_w + gap + label.len() * cw;
-        let x0 = width.saturating_sub(pad + total_w);
-        let color = review.risk_level.color(theme);
-        let dot_y = title_y + ch.saturating_sub(dot_w) / 2;
-        fill_rect(buffer, width, x0, dot_y, dot_w, dot_w, pack_rgb(color));
-        render_text(buffer, width, font, label, x0 + dot_w + gap, title_y, color);
+        let tone = match review.risk_level {
+            RiskLevel::Safe => Tone::Success,
+            RiskLevel::Caution => Tone::Warning,
+            RiskLevel::Danger => Tone::Danger,
+        };
+        let bw = cx.badge_w(label);
+        cx.badge(right.saturating_sub(bw), title_y, label, tone, title_h);
 
-        // Notes + suggestion: a compact, dimmed block anchored just above
-        // the panel's bottom help line — reads as "below the response"
-        // without needing to know exactly how many lines the response
-        // used. Capped at a couple of notes to stay out of the way.
-        let help_y = height.saturating_sub(ch + 8);
-        let min_y = title_y + ch + 4;
-
-        let mut rows: Vec<(String, Rgb)> = Vec::new();
+        // Notes + suggestion: anchored to the bottom of the panel body so
+        // they read as "below the response" whatever its length.
+        let mut rows: Vec<(String, crate::config::Rgb)> = Vec::new();
         if let Some(ref suggestion) = review.suggestion {
-            rows.push((format!("Advisor suggests: {suggestion}"), theme.cursor));
+            rows.push((format!("Advisor suggests: {suggestion}"), tk.accent));
         }
         for note in review.notes.iter().take(2).rev() {
-            rows.push((format!("  - {note}"), dim(theme.fg, 0.55)));
+            rows.push((format!("- {note}"), tk.text_muted));
         }
 
-        let mut y = help_y.saturating_sub(ch + 4);
+        let mut y = body.bottom().saturating_sub(tk.row_h);
+        let min_y = body.y + tk.input_h + tk.sp.sm;
         for (text, color) in &rows {
             if y < min_y {
                 break;
             }
-            render_text(buffer, width, font, trunc(text, max_chars), pad, y, *color);
-            y = y.saturating_sub(ch + 2);
+            cx.line_fit(body.x + tk.sp.xs, y, body.w, text, *color);
+            y = y.saturating_sub(tk.row_h);
         }
     }
 }

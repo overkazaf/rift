@@ -127,82 +127,41 @@ impl SearchOverlay {
         &self,
         buffer: &mut [u32],
         width: usize,
-        _height: usize,
+        height: usize,
         font: &mut FontManager,
         theme: &Theme,
     ) {
+        use crate::ui::kit::{Ctx, Rect, Tokens};
         if !self.visible {
             return;
         }
+        let tk = Tokens::new(theme, font.cell_width, font.cell_height);
+        let mut cx = Ctx::new(buffer, width, height, font, &tk);
 
-        let cw = font.cell_width;
-        let ch = font.cell_height;
+        // Floating find bar, top-right: [ input ........ n/m ] [Esc]
+        let bar_w = (44 * tk.cw).min(width.saturating_sub(2 * tk.sp.lg));
+        let bar_h = tk.input_h + 2 * tk.sp.sm;
+        let bar = Rect::new(width.saturating_sub(bar_w + tk.sp.lg), tk.sp.lg, bar_w, bar_h);
+        let inner = cx.float(bar);
 
-        let bar_w = (32 * cw).min(width / 2);
-        let bar_h = ch + 14;
-        let bar_x = width.saturating_sub(bar_w + 12);
-        let bar_y = 8;
-
-        // Background
-        let bg = crate::ui::darken(theme.bg, 8);
-        crate::ui::fill_rect(buffer, width, bar_x, bar_y, bar_w, bar_h, crate::ui::pack_rgb(bg));
-        crate::ui::draw_border(
-            buffer,
-            width,
-            bar_x,
-            bar_y,
-            bar_w,
-            bar_h,
-            crate::ui::pack_rgb(crate::ui::dim(theme.cursor, 0.5)),
-        );
-
-        let text_y = bar_y + 7;
-
-        // Search icon
-        crate::ui::render_text(buffer, width, font, "/", bar_x + 8, text_y, theme.cursor);
-
-        // Query text
-        let max_input = (bar_w / cw).saturating_sub(10);
-        let input_display = crate::ui::trunc(&self.query, max_input);
-        crate::ui::render_text(
-            buffer,
-            width,
-            font,
-            input_display,
-            bar_x + 8 + 2 * cw,
-            text_y,
-            theme.fg,
-        );
-
-        // Cursor
-        let cursor_x = bar_x + 8 + 2 * cw + input_display.chars().count() * cw;
-        let cpx = crate::ui::pack_rgb(theme.cursor);
-        for y in text_y..text_y + ch {
-            crate::ui::set_px(buffer, width, y, cursor_x, cpx);
-            crate::ui::set_px(buffer, width, y, cursor_x + 1, cpx);
-        }
-
-        // Match count
         let count_str = format!(
             "{}/{}",
-            if self.matches.is_empty() {
-                0
-            } else {
-                self.current_match + 1
-            },
+            if self.matches.is_empty() { 0 } else { self.current_match + 1 },
             self.matches.len()
         );
-        let count_w = count_str.len() * cw;
-        let count_x = bar_x + bar_w - count_w - 8;
-        crate::ui::render_text(
-            buffer,
-            width,
-            font,
-            &count_str,
-            count_x,
-            text_y,
-            crate::ui::dim(theme.fg, 0.5),
-        );
+        let count_w = cx.tw(&count_str);
+        let esc_w = cx.kbd_hint_w("Esc", "").saturating_sub(tk.sp.sm);
+
+        // Right cluster (count + Esc cap), then the input fills the rest.
+        let esc_x = inner.right().saturating_sub(esc_w);
+        cx.kbd_chip(esc_x, inner.y, inner.h, "Esc");
+        let count_x = esc_x.saturating_sub(count_w + tk.sp.md);
+        let count_color = if self.matches.is_empty() && !self.query.is_empty() { tk.danger } else { tk.text_muted };
+        let cy = cx.text_y(inner.y, inner.h);
+        cx.text(count_x, cy, &count_str, count_color);
+
+        let input = Rect::new(inner.x, inner.y, count_x.saturating_sub(inner.x + tk.sp.md), inner.h);
+        cx.text_input(input, &self.query, self.query.chars().count(), None, "Find in scrollback", true);
     }
 }
 

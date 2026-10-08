@@ -204,27 +204,22 @@ impl ExecPreview {
         font: &mut crate::renderer::font::FontManager,
         theme: &crate::config::Theme,
     ) {
+        use crate::ui::kit::{Ctx, PanelSpec, Rect, Tokens, Tone};
         if !self.visible {
             return;
         }
+        let tk = Tokens::new(theme, font.cell_width, font.cell_height);
+        let mut cx = Ctx::new(buffer, width, height, font, &tk);
+        // Blocking, modal decision: dim everything behind it.
+        cx.backdrop(0.7);
 
-        // Dim the whole backdrop — this is a blocking, modal decision.
-        for px in buffer.iter_mut() {
-            let r = ((*px >> 16) & 0xff) / 3;
-            let g = ((*px >> 8) & 0xff) / 3;
-            let b = (*px & 0xff) / 3;
-            *px = (r << 16) | (g << 8) | b;
-        }
-
-        let cw = font.cell_width;
-        let ch = font.cell_height;
-
-        let (accent, label): (crate::config::Rgb, &str) = match self.severity {
-            Severity::Critical => ((243, 139, 168), "CRITICAL"),
-            Severity::Warning => ((249, 226, 175), "WARNING"),
-            Severity::Info => ((137, 180, 250), "NOTICE"),
+        let (tone, label) = match self.severity {
+            Severity::Critical => (Tone::Danger, "CRITICAL"),
+            Severity::Warning => (Tone::Warning, "WARNING"),
+            Severity::Info => (Tone::Accent, "NOTICE"),
         };
         let typed_confirm = self.needs_typed_confirm();
+        let accent = tk.tone(tone);
 
         let impact_lines: usize = self
             .impacts
@@ -232,92 +227,56 @@ impl ExecPreview {
             .map(|i| 1 + if i.detail.is_empty() { 0 } else { 1 })
             .sum::<usize>()
             .max(1);
-        let extra_lines = if typed_confirm { 2 } else { 0 };
+        let typed_h = if typed_confirm { tk.row_h + tk.input_h + tk.sp.sm } else { 0 };
+        let want_h = cx.title_h() + cx.footer_h() + 2 * tk.sp.md + tk.input_h + tk.sp.md + impact_lines * tk.row_h + typed_h;
+        let rect = cx.centered_cols(72, want_h);
 
-        let pw = (64 * cw).min(width.saturating_sub(24));
-        let ph = ((impact_lines + extra_lines + 7) * (ch + 3) + 28)
-            .min(height.saturating_sub(24))
-            .max(ch * 10);
-        let px = (width.saturating_sub(pw)) / 2;
-        let py = (height.saturating_sub(ph)) / 2;
-
-        let bg = crate::ui::lighten(theme.bg, 4);
-        crate::ui::fill_rect(buffer, width, px, py, pw, ph, crate::ui::pack_rgb(bg));
-
-        // Double border for a "glow" feel: dim outer ring + bright inner line.
-        crate::ui::draw_border(buffer, width, px, py, pw, ph, crate::ui::pack_rgb(crate::ui::dim(accent, 0.5)));
-        if pw > 2 && ph > 2 {
-            crate::ui::draw_border(buffer, width, px + 1, py + 1, pw - 2, ph - 2, crate::ui::pack_rgb(accent));
-        }
-
-        let max_chars = (pw.saturating_sub(32)) / cw.max(1);
-        let mut ty = py + 10;
-
-        // Header
-        let header = format!("{label} COMMAND \u{2014} CONFIRM TO PROCEED");
-        crate::ui::render_text(buffer, width, font, crate::ui::trunc(&header, max_chars), px + 16, ty, accent);
-        ty += ch + 10;
+        let hints: &[(&str, &str)] = if typed_confirm {
+            &[("Enter", "execute (after typing yes)"), ("Esc", "cancel")]
+        } else {
+            &[("Enter/Y", "execute"), ("Esc/N", "cancel")]
+        };
+        let spec = PanelSpec::new("Confirm command")
+            .sub("review before running")
+            .badge(label, tone)
+            .edge(tone)
+            .hints(hints);
+        let body = cx.panel(rect, &spec);
 
         // Command line, boxed
-        crate::ui::fill_rect(
-            buffer, width, px + 12, ty.saturating_sub(4), pw.saturating_sub(24), ch + 8,
-            crate::ui::pack_rgb(crate::ui::darken(bg, 10)),
-        );
-        crate::ui::render_text(buffer, width, font, "$", px + 20, ty, crate::ui::dim(theme.fg, 0.5));
-        crate::ui::render_text(
-            buffer, width, font,
-            crate::ui::trunc(&self.command, max_chars.saturating_sub(2)),
-            px + 20 + 2 * cw, ty, theme.cursor,
-        );
-        ty += ch + 16;
+        let boxr = Rect::new(body.x, body.y, body.w, tk.input_h);
+        cx.well(boxr);
+        let ty = cx.text_y(boxr.y, boxr.h);
+        cx.text(boxr.x + tk.sp.md, ty, "$", tk.text_muted);
+        let cmd_x = boxr.x + tk.sp.md + 2 * tk.cw;
+        cx.text_fit(cmd_x, ty, boxr.right().saturating_sub(cmd_x + tk.sp.md), &self.command, tk.text);
 
         // Impacts
-        let icon = if matches!(self.severity, Severity::Critical) { "!!" } else { "!" };
-        let footer_reserved = if typed_confirm { ch * 4 } else { ch * 2 };
+        let mut y = body.y + tk.input_h + tk.sp.md;
+        let impacts_bottom = body.bottom().saturating_sub(typed_h);
+        let marker = if matches!(self.severity, Severity::Critical) { "!!" } else { "!" };
         for impact in &self.impacts {
-            if ty + ch >= py + ph.saturating_sub(footer_reserved) {
+            let need = if impact.detail.is_empty() { tk.row_h } else { 2 * tk.row_h };
+            if y + need > impacts_bottom {
                 break;
             }
-            crate::ui::render_text(buffer, width, font, icon, px + 16, ty, accent);
-            crate::ui::render_text(
-                buffer, width, font,
-                crate::ui::trunc(&impact.description, max_chars.saturating_sub(3)),
-                px + 16 + 3 * cw, ty, theme.fg,
-            );
-            ty += ch + 2;
+            cx.line(body.x + tk.sp.xs, y, marker, accent);
+            let dx = body.x + tk.sp.xs + 3 * tk.cw;
+            cx.line_fit(dx, y, body.right().saturating_sub(dx), &impact.description, tk.text);
+            y += tk.row_h;
             if !impact.detail.is_empty() {
-                let detail_line = format!("    {}", impact.detail);
-                crate::ui::render_text(
-                    buffer, width, font,
-                    crate::ui::trunc(&detail_line, max_chars),
-                    px + 16, ty, crate::ui::dim(theme.fg, 0.55),
-                );
-                ty += ch + 2;
+                cx.line_fit(dx, y, body.right().saturating_sub(dx), &impact.detail, tk.text_muted);
+                y += tk.row_h;
             }
         }
-        ty += 4;
 
         // Extra safety for Critical: require the literal word "yes".
         if typed_confirm {
-            let prefix = "Type \"yes\" to confirm: ";
-            let prompt = format!("{prefix}{}", self.confirm_input);
-            crate::ui::render_text(buffer, width, font, crate::ui::trunc(&prompt, max_chars), px + 16, ty, accent);
-            let cursor_x = px + 16 + (prefix.chars().count() + self.confirm_input.chars().count()) * cw;
-            crate::ui::fill_rect(buffer, width, cursor_x, ty, cw.max(1), ch, crate::ui::pack_rgb(accent));
+            let y = body.bottom().saturating_sub(typed_h) + tk.sp.xs;
+            cx.line(body.x, y, "Type \"yes\" to confirm", accent);
+            let inp = Rect::new(body.x, y + tk.row_h, body.w, tk.input_h);
+            cx.text_input(inp, &self.confirm_input, self.confirm_input.chars().count(), None, "yes", true);
         }
-
-        // Footer
-        let footer = if typed_confirm {
-            "[Enter] Execute (after typing yes)   [Esc] Cancel"
-        } else {
-            "[Enter/Y] Execute   [Esc/N] Cancel"
-        };
-        crate::ui::render_text(
-            buffer, width, font,
-            crate::ui::trunc(footer, max_chars),
-            px + 16, py + ph.saturating_sub(ch + 10),
-            crate::ui::dim(theme.fg, 0.5),
-        );
     }
 }
 

@@ -170,208 +170,144 @@ impl RegexPlayground {
         font: &mut FontManager,
         theme: &Theme,
     ) {
+        use crate::ui::kit::{Ctx, PanelSpec, Rect, Tokens, Tone};
         if !self.visible {
             return;
         }
+        let tk = Tokens::new(theme, font.cell_width, font.cell_height);
+        let mut cx = Ctx::new(buffer, width, height, font, &tk);
+        cx.backdrop(tk.backdrop);
 
-        // Dim backdrop (same trick every modal tool in this app uses).
-        for px in buffer.iter_mut() {
-            let r = ((*px >> 16) & 0xff) / 3;
-            let g = ((*px >> 8) & 0xff) / 3;
-            let b = (*px & 0xff) / 3;
-            *px = (r << 16) | (g << 8) | b;
-        }
+        let rect = cx.centered_cols(96, height * 85 / 100);
+        let n = self.matches.len();
+        let count = if self.error.is_some() {
+            ("error".to_string(), Tone::Danger)
+        } else if self.pattern.is_empty() {
+            ("ready".to_string(), Tone::Neutral)
+        } else {
+            (format!("{} match{}", n, if n == 1 { "" } else { "es" }), if n > 0 { Tone::Success } else { Tone::Neutral })
+        };
+        let spec = PanelSpec::new("Regex Playground")
+            .sub("live matching")
+            .badge(&count.0, count.1)
+            .hints(&[
+                ("Tab", "switch field"),
+                ("Ctrl+I", "case"),
+                ("Ctrl+M", "multiline"),
+                ("Ctrl+S", "dot-all"),
+                ("Esc", "close"),
+            ]);
+        let body = cx.panel(rect, &spec);
+        let rh = tk.row_h;
+        let mut y = body.y;
 
-        let cw = font.cell_width;
-        let ch = font.cell_height;
-
-        let panel_w = (92 * cw).min(width.saturating_sub(40)).max(40 * cw.max(1));
-        let panel_h = (height * 4 / 5).min(height.saturating_sub(30));
-        let px0 = (width.saturating_sub(panel_w)) / 2;
-        let py0 = (height.saturating_sub(panel_h)) / 2;
-
-        let bg = crate::ui::darken(theme.bg, 5);
-        crate::ui::fill_rect(buffer, width, px0, py0, panel_w, panel_h, crate::ui::pack_rgb(bg));
-        crate::ui::draw_border(
-            buffer, width, px0, py0, panel_w, panel_h,
-            crate::ui::pack_rgb(crate::ui::dim(theme.cursor, 0.5)),
+        // ── Pattern field
+        cx.section(body.x, y, body.w, "Pattern");
+        y += rh;
+        let input = Rect::new(body.x, y, body.w, tk.input_h);
+        cx.text_input(
+            input,
+            &self.pattern,
+            self.pattern.chars().count(),
+            None,
+            "(type a pattern)",
+            self.active_field == Field::Pattern,
         );
+        y += tk.input_h + tk.sp.sm;
 
-        let content_x = px0 + 16;
-        let right_edge = px0 + panel_w - 16;
-        let max_chars = (panel_w.saturating_sub(32)) / cw.max(1);
-        let mut cy = py0 + 12;
-
-        // Title
-        crate::ui::render_text(buffer, width, font, "Regex Playground", content_x, cy, theme.cursor);
-        cy += ch + 10;
-
-        // ── Pattern field ──
-        let label = "Pattern:";
-        crate::ui::render_text(buffer, width, font, label, content_x, cy, crate::ui::dim(theme.fg, 0.6));
-        let input_x = content_x + (label.len() + 1) * cw;
-        let input_w = right_edge.saturating_sub(input_x);
-        let is_pat_active = self.active_field == Field::Pattern;
-        let box_bg = if is_pat_active { crate::ui::lighten(bg, 14) } else { crate::ui::lighten(bg, 5) };
-        let box_top = cy.saturating_sub(4);
-        let box_h = ch + 8;
-        crate::ui::fill_rect(buffer, width, input_x, box_top, input_w, box_h, crate::ui::pack_rgb(box_bg));
-        if is_pat_active {
-            let ul_px = crate::ui::pack_rgb(crate::ui::dim(theme.cursor, 0.7));
-            for x in input_x..input_x + input_w {
-                crate::ui::set_px(buffer, width, box_top + box_h - 1, x, ul_px);
-            }
-        }
-        let pat_max = (input_w.saturating_sub(10)) / cw.max(1);
-        let pat_display = if self.pattern.is_empty() { "(type a pattern)" } else { crate::ui::trunc(&self.pattern, pat_max) };
-        let pat_color = if self.pattern.is_empty() { crate::ui::dim(theme.fg, 0.25) } else { theme.fg };
-        crate::ui::render_text(buffer, width, font, pat_display, input_x + 6, cy, pat_color);
-        if is_pat_active {
-            let cur_x = input_x + 6 + pat_display.chars().count().min(pat_max) * cw;
-            let cpx = crate::ui::pack_rgb(theme.cursor);
-            for y in cy..cy + ch {
-                crate::ui::set_px(buffer, width, y, cur_x, cpx);
-            }
-        }
-        cy += ch + 12;
-
-        // ── Flags row ──
-        let flag_items = [
+        // ── Flags + status
+        let mut fx = body.x;
+        for (label, on) in [
             ("[i] case-insensitive", self.flags.case_insensitive),
             ("[m] multiline", self.flags.multiline),
             ("[s] dot-all", self.flags.dot_all),
-        ];
-        let mut fx = content_x;
-        for (label, on) in flag_items {
-            let color = if on { (90, 240, 140) } else { crate::ui::dim(theme.fg, 0.3) };
-            crate::ui::render_text(buffer, width, font, label, fx, cy, color);
-            fx += (label.len() + 3) * cw;
+        ] {
+            let w = cx.badge_w(label);
+            if fx + w > body.right() {
+                break;
+            }
+            cx.badge_line(fx, y, label, if on { Tone::Success } else { Tone::Neutral });
+            fx += w + tk.sp.sm;
         }
-        cy += ch + 10;
-
-        // ── Status: error or match count ──
+        y += rh;
         if let Some(ref err) = self.error {
-            let text = crate::ui::trunc(err, max_chars);
-            crate::ui::render_text(buffer, width, font, text, content_x, cy, (255, 100, 100));
+            cx.line_fit(body.x, y, body.w, err, tk.danger);
         } else if self.pattern.is_empty() {
-            crate::ui::render_text(
-                buffer, width, font, "Type a pattern to begin",
-                content_x, cy, crate::ui::dim(theme.fg, 0.35),
-            );
-        } else {
-            let n = self.matches.len();
-            let text = format!("{} match{} found", n, if n == 1 { "" } else { "es" });
-            let color = if n > 0 { (90, 240, 140) } else { crate::ui::dim(theme.fg, 0.4) };
-            crate::ui::render_text(buffer, width, font, &text, content_x, cy, color);
+            cx.line_fit(body.x, y, body.w, "Type a pattern to begin", tk.text_muted);
         }
-        cy += ch + 10;
+        y += rh + tk.sp.xs;
 
-        draw_sep(buffer, width, content_x, right_edge, cy, theme);
-        cy += 8;
+        // ── Test text
+        cx.section(body.x, y, body.w, "Test text");
+        y += rh;
+        let avail = body.bottom().saturating_sub(y);
+        let box_h = (6 * tk.ch + 2 * tk.sp.md).min(avail / 2).max(2 * tk.ch);
+        self.render_test_text(&mut cx, Rect::new(body.x, y, body.w, box_h));
+        y += box_h + tk.sp.md;
 
-        // ── Test text ──
-        crate::ui::render_text(buffer, width, font, "Test text:", content_x, cy, crate::ui::dim(theme.fg, 0.6));
-        cy += ch + 4;
-
-        let test_box_h = (6 * ch + 10).min(panel_h.saturating_sub(12 * ch)); // leave room below for matches
-        self.render_test_text(buffer, width, font, theme, bg, content_x, cy, panel_w - 32, test_box_h, cw, ch);
-        cy += test_box_h + 10;
-
-        draw_sep(buffer, width, content_x, right_edge, cy, theme);
-        cy += 8;
-
-        // ── Matches list ──
-        let matches_header = format!("Matches ({}):", self.matches.len());
-        crate::ui::render_text(buffer, width, font, &matches_header, content_x, cy, crate::ui::dim(theme.fg, 0.6));
-        cy += ch + 4;
-
-        let help_y = py0 + panel_h - ch - 10;
-        let bottom_limit = help_y - 4;
+        // ── Matches
+        let header = format!("Matches ({})", n);
+        cx.section(body.x, y, body.w, &header);
+        y += rh;
+        let bottom = body.bottom();
         let text_chars: Vec<char> = self.test_text.chars().collect();
-
         if self.matches.is_empty() {
-            if self.error.is_none() && !self.pattern.is_empty() {
-                crate::ui::render_text(buffer, width, font, "No matches", content_x, cy, crate::ui::dim(theme.fg, 0.35));
+            if self.error.is_none() && !self.pattern.is_empty() && y + rh <= bottom {
+                cx.line(body.x, y, "No matches", tk.text_muted);
             }
-        } else {
-            let mut shown = 0usize;
-            for (i, m) in self.matches.iter().enumerate() {
-                if cy + ch >= bottom_limit {
-                    break;
-                }
-                let color = match_color(i);
-                let pos_str = format!("{}. [{}-{}]", i + 1, m.start, m.end);
-                crate::ui::render_text(buffer, width, font, &pos_str, content_x, cy, color);
-
-                let text_x = content_x + (pos_str.chars().count() + 1) * cw;
-                let text_budget = max_chars.saturating_sub(pos_str.chars().count() + 2);
-                let quoted = format!("\"{}\"", m.text.replace('\n', "\\n"));
-                let quoted_trunc = crate::ui::trunc(&quoted, text_budget);
-                crate::ui::render_text(buffer, width, font, quoted_trunc, text_x, cy, theme.fg);
-
-                if !m.groups.is_empty() {
-                    let gy = cy + ch;
-                    if gy + ch < bottom_limit {
-                        let parts: Vec<String> = m
-                            .groups
-                            .iter()
-                            .enumerate()
-                            .map(|(gi, &(s, e))| {
-                                let gtext: String = text_chars.get(s..e).map(|sl| sl.iter().collect()).unwrap_or_default();
-                                format!("${}=\"{}\"", gi + 1, gtext.replace('\n', "\\n"))
-                            })
-                            .collect();
-                        let gline = format!("    groups: {}", parts.join("  "));
-                        let gline_trunc = crate::ui::trunc(&gline, max_chars);
-                        crate::ui::render_text(buffer, width, font, gline_trunc, content_x, gy, crate::ui::dim(theme.fg, 0.45));
-                        cy += ch;
-                    }
-                }
-                cy += ch + 2;
-                shown += 1;
-            }
-            if self.matches.len() > shown && cy + ch < bottom_limit {
-                let more = format!("  +{} more", self.matches.len() - shown);
-                crate::ui::render_text(buffer, width, font, &more, content_x, cy, crate::ui::dim(theme.fg, 0.3));
-            }
+            return;
         }
-
-        // ── Help ──
-        let help = "Tab/Enter: switch field   Ctrl+I: case   Ctrl+M: multiline   Ctrl+S: dot-all   Esc: close";
-        let help_trunc = crate::ui::trunc(help, max_chars);
-        crate::ui::render_text(buffer, width, font, help_trunc, content_x, help_y, crate::ui::dim(theme.fg, 0.25));
+        let mut shown = 0usize;
+        for (i, m) in self.matches.iter().enumerate() {
+            let need = if m.groups.is_empty() { rh } else { 2 * rh };
+            if y + need > bottom {
+                break;
+            }
+            let color = match_color(&tk, i);
+            let pos_str = format!("{}. [{}-{}]", i + 1, m.start, m.end);
+            cx.line(body.x, y, &pos_str, color);
+            let tx = body.x + cx.tw(&pos_str) + tk.sp.md;
+            let quoted = format!("\"{}\"", m.text.replace('\n', "\\n"));
+            cx.line_fit(tx, y, body.right().saturating_sub(tx), &quoted, tk.text);
+            y += rh;
+            if !m.groups.is_empty() {
+                let parts: Vec<String> = m
+                    .groups
+                    .iter()
+                    .enumerate()
+                    .map(|(gi, &(s, e))| {
+                        let gtext: String = text_chars.get(s..e).map(|sl| sl.iter().collect()).unwrap_or_default();
+                        format!("${}=\"{}\"", gi + 1, gtext.replace('\n', "\\n"))
+                    })
+                    .collect();
+                let gx = body.x + tk.sp.lg;
+                cx.line_fit(gx, y, body.right().saturating_sub(gx), &format!("groups: {}", parts.join("  ")), tk.text_muted);
+                y += rh;
+            }
+            shown += 1;
+        }
+        if n > shown && y + rh <= bottom + rh {
+            let more = format!("+{} more", n - shown);
+            let mw = cx.tw(&more);
+            cx.text(body.right().saturating_sub(mw), bottom.saturating_sub(rh) + (rh - tk.ch) / 2, &more, tk.text_faint);
+        }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn render_test_text(
-        &self,
-        buffer: &mut [u32],
-        width: usize,
-        font: &mut FontManager,
-        theme: &Theme,
-        panel_bg: Rgb,
-        box_x: usize,
-        box_y: usize,
-        box_w: usize,
-        box_h: usize,
-        cw: usize,
-        ch: usize,
-    ) {
-        let box_bg = crate::ui::darken(theme.bg, 3);
-        crate::ui::fill_rect(buffer, width, box_x, box_y, box_w, box_h, crate::ui::pack_rgb(box_bg));
+    fn render_test_text(&self, cx: &mut crate::ui::kit::Ctx, r: crate::ui::kit::Rect) {
+        let tk = cx.tk;
+        let (cw, ch) = (tk.cw, tk.ch);
         let is_active = self.active_field == Field::TestText;
-        let border_c = if is_active { crate::ui::dim(theme.cursor, 0.6) } else { crate::ui::dim(theme.fg, 0.15) };
-        crate::ui::draw_border(buffer, width, box_x, box_y, box_w, box_h, crate::ui::pack_rgb(border_c));
-        let _ = panel_bg;
+        cx.fill_rrect(r, tk.radius_sm, if is_active { tk.accent } else { tk.border_strong });
+        cx.fill_rrect(r.inset(1, 1), tk.radius_sm.saturating_sub(1), tk.field);
 
-        let inner_x = box_x + 6;
-        let inner_y = box_y + 6;
-        let max_cols = (box_w.saturating_sub(12) / cw.max(1)).max(1);
-        let max_rows = (box_h.saturating_sub(12) / ch.max(1)).max(1);
+        let pad = tk.sp.md;
+        let inner_x = r.x + pad;
+        let inner_y = r.y + tk.sp.sm;
+        let max_cols = (r.w.saturating_sub(2 * pad) / cw.max(1)).max(1);
+        let max_rows = (r.h.saturating_sub(2 * tk.sp.sm) / ch.max(1)).max(1);
 
         if self.test_text.is_empty() {
-            let hint = "(type sample text to match against)";
-            crate::ui::render_text(buffer, width, font, hint, inner_x, inner_y, crate::ui::dim(theme.fg, 0.25));
+            cx.text_fit(inner_x, inner_y, r.w.saturating_sub(2 * pad), "(type sample text to match against)", tk.text_faint);
         }
 
         let mut gi = 0usize; // global char offset into test_text
@@ -405,12 +341,12 @@ impl RegexPlayground {
                     let run: String = line_chars[li + k..li + k2].iter().collect();
                     let x = inner_x + k * cw;
                     if let Some(mi) = midx0 {
-                        let color = match_color(mi);
-                        let run_w = (k2 - k) * cw;
-                        crate::ui::fill_rect(buffer, width, x, y, run_w, ch, crate::ui::pack_rgb(crate::ui::dim(color, 0.3)));
-                        crate::ui::render_text(buffer, width, font, &run, x, y, color);
+                        let color = match_color(tk, mi);
+                        let bg = crate::ui::kit::mix(tk.field, color, 0.28);
+                        cx.fill(crate::ui::kit::Rect::new(x, y, (k2 - k) * cw, ch), bg);
+                        cx.text(x, y, &run, color);
                     } else {
-                        crate::ui::render_text(buffer, width, font, &run, x, y, theme.fg);
+                        cx.text(x, y, &run, tk.text);
                     }
                     k = k2;
                 }
@@ -429,27 +365,18 @@ impl RegexPlayground {
             let last_line_len = self.test_text.split('\n').last().map(|l| l.chars().count()).unwrap_or(0);
             let cur_row = nl_count.min(max_rows.saturating_sub(1));
             let cur_col = last_line_len.min(max_cols.saturating_sub(1));
-            let cx = inner_x + cur_col * cw;
-            let cyy = inner_y + cur_row * ch;
-            let cpx = crate::ui::pack_rgb(theme.cursor);
-            for y in cyy..cyy + ch {
-                crate::ui::set_px(buffer, width, y, cx, cpx);
-            }
+            cx.fill(
+                crate::ui::kit::Rect::new(inner_x + cur_col * cw, inner_y + cur_row * ch, 2 * tk.scale, ch),
+                tk.accent,
+            );
         }
     }
 }
 
-fn draw_sep(buffer: &mut [u32], width: usize, x0: usize, x1: usize, y: usize, theme: &Theme) {
-    let c = crate::ui::pack_rgb(crate::ui::dim(theme.fg, 0.1));
-    for x in x0..x1.min(width) {
-        crate::ui::set_px(buffer, width, y, x, c);
-    }
-}
-
-/// Alternate green/cyan per match index — also means two touching matches
-/// (no gap between them) always render in visibly different colors.
-fn match_color(idx: usize) -> Rgb {
-    if idx % 2 == 0 { (90, 240, 140) } else { (80, 220, 230) }
+/// Alternate success/accent per match index — also means two touching
+/// matches (no gap between them) always render in visibly different colors.
+fn match_color(tk: &crate::ui::kit::Tokens, idx: usize) -> Rgb {
+    if idx % 2 == 0 { tk.success } else { tk.accent }
 }
 
 // ── Mini regex engine ──

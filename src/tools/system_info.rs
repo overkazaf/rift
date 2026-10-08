@@ -75,31 +75,20 @@ impl SystemInfo {
         &self, buffer: &mut [u32], width: usize, height: usize,
         font: &mut crate::renderer::font::FontManager, theme: &crate::config::Theme,
     ) {
+        use crate::ui::kit::{Ctx, PanelSpec, Tokens};
         if !self.visible { return; }
-        crate::ui::dim_backdrop(buffer, 3);
-        let cw = font.cell_width;
-        let ch = font.cell_height;
-        let pw = (40 * cw).min(width - 40);
-        let ph = ((self.info.len() + 4) * (ch + 4) + 40).min(height - 40);
-        let px = (width - pw) / 2;
-        let py = (height - ph) / 2;
+        let tk = Tokens::new(theme, font.cell_width, font.cell_height);
+        let mut cx = Ctx::new(buffer, width, height, font, &tk);
+        cx.backdrop(tk.backdrop);
 
-        crate::ui::fill_rect(buffer, width, px, py, pw, ph, crate::ui::pack_rgb(crate::ui::lighten(theme.bg, 6)));
-        crate::ui::draw_border(buffer, width, px, py, pw, ph, crate::ui::pack_rgb(crate::ui::dim(theme.cursor, 0.4)));
-
-        let mut ty = py + 12;
-        crate::ui::render_text(buffer, width, font, "System Info", px + 16, ty, theme.cursor);
-        ty += ch + 8;
-
-        let label_w = 12 * cw;
-        for (key, val) in &self.info {
-            if ty + ch >= py + ph - 20 { break; }
-            crate::ui::render_text(buffer, width, font, key, px + 16, ty, (137, 180, 250));
-            crate::ui::render_text(buffer, width, font, crate::ui::trunc(val, (pw - label_w - 32) / cw), px + 16 + label_w, ty, crate::ui::dim(theme.fg, 0.7));
-            ty += ch + 4;
+        let want = cx.title_h() + cx.footer_h() + 2 * tk.sp.md + self.info.len() * tk.row_h;
+        let rect = cx.centered_cols(60, want.min(height.saturating_sub(2 * tk.sp.xl)));
+        let spec = PanelSpec::new("System Info").sub("this machine").hints(&[("Esc", "close")]);
+        let body = cx.panel(rect, &spec);
+        let vis = cx.rows_fit(body.h);
+        for (i, (key, val)) in self.info.iter().take(vis).enumerate() {
+            cx.kv(body.x, body.y + i * tk.row_h, body.w, 10, key, val, None);
         }
-
-        crate::ui::render_text(buffer, width, font, "Esc: close", px + 16, py + ph - ch - 10, crate::ui::dim(theme.fg, 0.3));
     }
 }
 

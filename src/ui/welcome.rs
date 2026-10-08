@@ -58,63 +58,39 @@ impl Welcome {
         font: &mut FontManager,
         theme: &Theme,
     ) {
+        use super::kit::{Ctx, PanelSpec, Rect, Tokens};
         if !self.visible {
             return;
         }
+        let tk = Tokens::new(theme, font.cell_width, font.cell_height);
+        let mut cx = Ctx::new(buffer, width, height, font, &tk);
+        cx.backdrop(0.7);
 
-        let cw = font.cell_width;
-        let ch = font.cell_height;
-
-        // Dark overlay
-        for px in buffer.iter_mut() {
-            let r = ((*px >> 16) & 0xff) / 4;
-            let g = ((*px >> 8) & 0xff) / 4;
-            let b = (*px & 0xff) / 4;
-            *px = (r << 16) | (g << 8) | b;
-        }
-
-        // Auto-size panel from font metrics
-        let panel_w = (48 * cw).max(480).min(width.saturating_sub(60));
-        let panel_h = (20 * ch).max(360).min(height.saturating_sub(60));
-        if panel_w < 100 || panel_h < 100 {
+        let want = cx.title_h() + cx.footer_h() + 2 * tk.sp.md + 11 * tk.row_h;
+        let rect = cx.centered_cols(56, want);
+        if rect.w < 100 || rect.h < 100 {
             return;
         }
-        let px0 = (width - panel_w) / 2;
-        let py0 = (height - panel_h) / 2;
-        let max_chars = (panel_w - 48) / cw; // max text chars per line
-
-        // Panel background
-        let bg = lighten(theme.bg, 6);
-        let bg_px = pack(bg.0, bg.1, bg.2);
-        for y in py0..py0 + panel_h {
-            let offset = y * width + px0;
-            let end = (offset + panel_w).min(buffer.len());
-            if offset < buffer.len() {
-                buffer[offset..end].fill(bg_px);
-            }
-        }
-
-        // Border
-        let border_color = dim(theme.cursor, 0.4);
-        let border_px = pack(border_color.0, border_color.1, border_color.2);
-        for x in px0..px0 + panel_w {
-            set_px(buffer, width, py0, x, border_px);
-            set_px(buffer, width, py0 + panel_h - 1, x, border_px);
-        }
-        for y in py0..py0 + panel_h {
-            set_px(buffer, width, y, px0, border_px);
-            set_px(buffer, width, y, px0 + panel_w - 1, border_px);
-        }
-
-        let cx = px0 + 24;
-        let cy_start = py0 + 20;
-        let key_col = cx;
-        let val_col = cx + 16.min(max_chars / 2) * cw;
+        let mk = crate::config::mod_key();
+        let page_title = ["Welcome", "Tabs & Panes", "Effects & Recording", "Tools & Config"][self.page.min(3)];
+        let last = self.page + 1 == self.total_pages;
+        let hints: &[(&str, &str)] = if last {
+            &[("Enter", "start"), ("Esc", "skip")]
+        } else {
+            &[("Left/Right", "page"), ("Enter", "next"), ("Esc", "skip")]
+        };
+        let counter = format!("{} / {}", self.page + 1, self.total_pages);
+        let spec = PanelSpec::new("Welcome to rift")
+            .sub(page_title)
+            .badge(&counter, super::kit::Tone::Neutral)
+            .hints(hints);
+        let body = cx.panel(rect, &spec);
+        // Reserve the last row for the page dots.
+        let content = Rect::new(body.x, body.y, body.w, body.h.saturating_sub(tk.row_h));
 
         match self.page {
-            0 => self.page_welcome(buffer, width, font, theme, cx, cy_start, max_chars),
+            0 => Self::page_welcome(&mut cx, content),
             1 => {
-                let mk = crate::config::mod_key();
                 let items: Vec<(String, &str)> = vec![
                     (format!("{}+Shift+T", mk), "New tab"),
                     (format!("{}+Shift+W", mk), "Close pane/tab"),
@@ -124,14 +100,9 @@ impl Welcome {
                     (format!("{}+Shift+D", mk), "Split horizontal"),
                     ("Alt+Arrow".into(), "Switch pane"),
                 ];
-                let pairs: Vec<(&str, &str)> = items.iter().map(|(k, v)| (k.as_str(), *v)).collect();
-                self.page_shortcuts(
-                    buffer, width, font, theme, key_col, val_col, cy_start, max_chars,
-                    "Tabs & Panes", &pairs, &["Active pane has accent border."],
-                );
+                Self::page_shortcuts(&mut cx, content, &items, &["Active pane has accent border."]);
             }
             2 => {
-                let mk = crate::config::mod_key();
                 let items: Vec<(String, &str)> = vec![
                     (format!("{}+Shift+1", mk), "CRT effect"),
                     (format!("{}+Shift+2", mk), "Glitch"),
@@ -140,143 +111,104 @@ impl Welcome {
                     (format!("{}+Shift+0", mk), "Effects off"),
                     (format!("{}+Shift+R", mk), "Record toggle"),
                 ];
-                let pairs: Vec<(&str, &str)> = items.iter().map(|(k, v)| (k.as_str(), *v)).collect();
-                self.page_shortcuts(
-                    buffer, width, font, theme, key_col, val_col, cy_start, max_chars,
-                    "Effects & Recording", &pairs, &["Recordings: .cast (asciinema v2)"],
-                );
+                Self::page_shortcuts(&mut cx, content, &items, &["Recordings: .cast (asciinema v2)"]);
             }
-            3 => self.page_features(buffer, width, font, theme, cx, cy_start, max_chars),
-            _ => {}
+            _ => Self::page_features(&mut cx, content),
         }
 
-        // Page indicator: "1 / 4"
-        let indicator = format!("{} / {}", self.page + 1, self.total_pages);
-        let ind_x = px0 + (panel_w.saturating_sub(indicator.len() * cw)) / 2;
-        let ind_y = py0 + panel_h - ch - 12;
-        render_text(buffer, width, font, &indicator, ind_x, ind_y, dim(theme.fg, 0.4));
-
-        // Nav hint
-        let nav = if self.page == self.total_pages - 1 {
-            "Enter: start  Esc: skip"
-        } else {
-            "Arrow: page  Enter: next  Esc: skip"
-        };
-        let nav_trunc = trunc(nav, max_chars);
-        let nav_x = px0 + (panel_w.saturating_sub(nav_trunc.len() * cw)) / 2;
-        let nav_y = ind_y - ch - 6;
-        render_text(buffer, width, font, nav_trunc, nav_x, nav_y, dim(theme.fg, 0.25));
+        // Page dots, centred on the last body row.
+        let dot = 2 * tk.sp.xs;
+        let gap = tk.sp.sm;
+        let total_w = self.total_pages * dot + self.total_pages.saturating_sub(1) * gap;
+        let mut dx = body.x + body.w.saturating_sub(total_w) / 2;
+        let dy = body.bottom().saturating_sub(tk.row_h) + (tk.row_h - dot) / 2;
+        for i in 0..self.total_pages {
+            let c = if i == self.page { tk.accent } else { tk.border_strong };
+            cx.fill_rrect(Rect::new(dx, dy, dot, dot), dot / 2, c);
+            dx += dot + gap;
+        }
     }
 
-    fn page_welcome(
-        &self, buffer: &mut [u32], buf_w: usize,
-        font: &mut FontManager, theme: &Theme,
-        x: usize, y: usize, max_c: usize,
-    ) {
-        let ch = font.cell_height;
-        let mut cy = y;
-
-        // Simple text logo — no ASCII art that breaks at large fonts
-        render_text(buffer, buf_w, font, "rift", x, cy, theme.cursor);
-        cy += ch + 4;
-
-        let sub = "Rust Terminal Emulator v0.3.0";
-        render_text(buffer, buf_w, font, trunc(sub, max_c), x, cy, dim(theme.fg, 0.5));
-        cy += ch * 2;
-
-        render_text(buffer, buf_w, font, "Welcome!", x, cy, theme.fg);
-        cy += ch + 6;
-
-        let lines = [
+    fn page_welcome(cx: &mut super::kit::Ctx, r: super::kit::Rect) {
+        let tk = cx.tk;
+        let mut y = r.y;
+        cx.line(r.x, y, "rift", tk.accent);
+        y += tk.row_h;
+        cx.line_fit(r.x, y, r.w, "Rust Terminal Emulator v0.3.0", tk.text_muted);
+        y += tk.row_h * 2;
+        cx.line(r.x, y, "Welcome!", tk.text);
+        y += tk.row_h;
+        for line in [
             "A programmable terminal with SSH,",
             "visual effects, WASM plugins,",
             "session recording, and more.",
-            "",
-            "Cmd/Ctrl+Shift+? reopens this guide.",
-        ];
-        for line in &lines {
-            render_text(buffer, buf_w, font, trunc(line, max_c), x, cy, dim(theme.fg, 0.7));
-            cy += ch + 2;
+        ] {
+            cx.line_fit(r.x, y, r.w, line, tk.text_muted);
+            y += tk.row_h;
         }
+        y += tk.row_h / 2;
+        let hint = format!("{}+Shift+? reopens this guide.", crate::config::mod_key());
+        cx.line_fit(r.x, y, r.w, &hint, tk.text_faint);
     }
 
-    fn page_shortcuts(
-        &self, buffer: &mut [u32], buf_w: usize,
-        font: &mut FontManager, theme: &Theme,
-        key_x: usize, val_x: usize, y: usize, max_c: usize,
-        title: &str,
-        shortcuts: &[(&str, &str)],
-        tips: &[&str],
-    ) {
-        let ch = font.cell_height;
-        let mut cy = y;
-
-        render_text(buffer, buf_w, font, trunc(title, max_c), key_x, cy, theme.cursor);
-        cy += ch + 10;
-
-        let key_max = (val_x.saturating_sub(key_x)) / font.cell_width;
-        let val_max = max_c.saturating_sub(key_max + 2);
-
-        for (key, desc) in shortcuts {
-            render_text(buffer, buf_w, font, trunc(key, key_max), key_x, cy, theme.cursor);
-            render_text(buffer, buf_w, font, trunc(desc, val_max), val_x, cy, dim(theme.fg, 0.7));
-            cy += ch + 4;
-        }
-
-        if !tips.is_empty() {
-            cy += ch / 2;
-            for tip in tips {
-                render_text(buffer, buf_w, font, trunc(tip, max_c), key_x, cy, dim(theme.fg, 0.45));
-                cy += ch + 2;
+    /// Key-cap column + description column.
+    fn page_shortcuts(cx: &mut super::kit::Ctx, r: super::kit::Rect, items: &[(String, &str)], tips: &[&str]) {
+        let tk = cx.tk;
+        let mut y = r.y;
+        let key_w = items.iter().map(|(k, _)| cx.tw(k)).max().unwrap_or(0) + 2 * (tk.sp.xs + 2 * tk.scale);
+        let desc_x = r.x + key_w + tk.sp.lg;
+        for (key, desc) in items {
+            if y + tk.row_h > r.bottom() {
+                break;
             }
+            cx.kbd_chip(r.x, y, tk.row_h, key);
+            cx.line_fit(desc_x, y, r.right().saturating_sub(desc_x), desc, tk.text);
+            y += tk.row_h;
+        }
+        y += tk.row_h / 2;
+        for tip in tips {
+            if y + tk.row_h > r.bottom() {
+                break;
+            }
+            cx.line_fit(r.x, y, r.w, tip, tk.text_muted);
+            y += tk.row_h;
         }
     }
 
-    fn page_features(
-        &self, buffer: &mut [u32], buf_w: usize,
-        font: &mut FontManager, theme: &Theme,
-        x: usize, y: usize, max_c: usize,
-    ) {
-        let ch = font.cell_height;
-        let cw = font.cell_width;
-        let mut cy = y;
-
-        render_text(buffer, buf_w, font, trunc("Tools & Config", max_c), x, cy, theme.cursor);
-        cy += ch + 10;
-
+    fn page_features(cx: &mut super::kit::Ctx, r: super::kit::Rect) {
+        let tk = cx.tk;
         let mk = crate::config::mod_key();
-        let shortcuts = [
+        let items: Vec<(String, &str)> = vec![
             (format!("{}+Shift+,", mk), "Preferences"),
             (format!("{}+Shift+S", mk), "SSH connect"),
             (format!("{}+Shift+?", mk), "This guide"),
         ];
-        let val_x = x + 16.min(max_c / 2) * cw;
-        let key_max = 16.min(max_c / 2);
-        let val_max = max_c.saturating_sub(key_max + 2);
-        for (key, desc) in &shortcuts {
-            render_text(buffer, buf_w, font, trunc(&key, key_max), x, cy, theme.cursor);
-            render_text(buffer, buf_w, font, trunc(desc, val_max), val_x, cy, dim(theme.fg, 0.7));
-            cy += ch + 4;
+        let key_w = items.iter().map(|(k, _)| cx.tw(k)).max().unwrap_or(0) + 2 * (tk.sp.xs + 2 * tk.scale);
+        let desc_x = r.x + key_w + tk.sp.lg;
+        let mut y = r.y;
+        for (key, desc) in &items {
+            cx.kbd_chip(r.x, y, tk.row_h, key);
+            cx.line_fit(desc_x, y, r.right().saturating_sub(desc_x), desc, tk.text);
+            y += tk.row_h;
         }
-
-        cy += ch;
-        render_text(buffer, buf_w, font, "Built-in:", x, cy, dim(theme.fg, 0.8));
-        cy += ch + 4;
-
-        let features = [
+        y += tk.row_h / 2;
+        cx.section(r.x, y, r.w, "Built-in");
+        y += tk.row_h;
+        for line in [
             "9 themes, WASM plugins, SSH,",
             "Hex viewer, Base64 codec,",
             "Snippets, Fuzzy search,",
             "Time warp, HUD status",
-        ];
-        for line in &features {
-            render_text(buffer, buf_w, font, trunc(line, max_c), x + cw, cy, dim(theme.fg, 0.55));
-            cy += ch + 3;
+        ] {
+            if y + tk.row_h > r.bottom() {
+                break;
+            }
+            cx.line_fit(r.x + tk.sp.xs, y, r.w, line, tk.text_muted);
+            y += tk.row_h;
         }
-
-        cy += ch;
-        let cfg = "~/.config/rift/config.toml";
-        render_text(buffer, buf_w, font, trunc(cfg, max_c), x, cy, dim(theme.fg, 0.35));
+        if y + tk.row_h <= r.bottom() {
+            cx.line_fit(r.x, y + tk.row_h / 2, r.w, "~/.config/rift/config.toml", tk.text_faint);
+        }
     }
 }
 
@@ -289,4 +221,17 @@ pub enum WelcomeKey {
     Q,
 }
 
-use super::primitives::{render_text, pack, lighten, dim, set_px, trunc};
+
+#[cfg(test)]
+mod qa_tests {
+    use super::*;
+    use crate::ui::kit::gallery::qa::each_theme;
+
+    #[test]
+    fn renders_every_page() {
+        for page in 0..4 {
+            let w = Welcome { visible: true, page, total_pages: 4 };
+            each_theme(&format!("welcome{page}"), |b, ww, hh, f, t| w.render(b, ww, hh, f, t));
+        }
+    }
+}

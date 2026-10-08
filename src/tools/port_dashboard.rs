@@ -25,16 +25,6 @@ enum SortField {
     State,
 }
 
-// Column widths in character cells — kept fixed so every row lines up like
-// `font-variant-numeric: tabular-nums` would for a proportional font.
-const COL_PORT: usize = 6;
-const COL_PROTO: usize = 5;
-const COL_PID: usize = 7;
-const COL_PROCESS: usize = 16;
-const COL_STATE: usize = 11;
-const COL_LOCAL: usize = 21;
-const COL_REMOTE: usize = 21;
-
 impl PortDashboard {
     pub fn new() -> Self {
         Self { visible: false, entries: Vec::new(), selected: 0, sort_by: SortField::Port }
@@ -97,147 +87,57 @@ impl PortDashboard {
         &self, buffer: &mut [u32], width: usize, height: usize,
         font: &mut crate::renderer::font::FontManager, theme: &crate::config::Theme,
     ) {
+        use crate::ui::kit::{center_scroll, Column, Ctx, PanelSpec, TableRow, Tokens, Tone, Width};
         if !self.visible { return; }
-        crate::ui::dim_backdrop(buffer, 3);
+        let tk = Tokens::new(theme, font.cell_width, font.cell_height);
+        let mut cx = Ctx::new(buffer, width, height, font, &tk);
+        cx.backdrop(tk.backdrop);
 
-        let cw = font.cell_width.max(1);
-        let ch = font.cell_height;
-
-        let content_chars = COL_PORT + COL_PROTO + COL_PID + COL_PROCESS + COL_STATE + COL_LOCAL + COL_REMOTE + 6;
-        let pw = ((content_chars + 4) * cw).min(width.saturating_sub(40)).max(cw * 24);
-
-        let title_h = ch + 10;
-        let footer_h = ch + 14;
-        let row_h = ch + 2;
-        let fixed_h = title_h + ch + 16 + footer_h;
-        let max_rows = ((height.saturating_sub(40).saturating_sub(fixed_h)) / row_h.max(1)).max(1);
-        let visible_rows = self.entries.len().clamp(1, max_rows);
-        let ph = (fixed_h + visible_rows * row_h).min(height.saturating_sub(40));
-
-        let px = width.saturating_sub(pw) / 2;
-        let py = height.saturating_sub(ph) / 2;
-        let right_edge = px + pw.saturating_sub(10);
-
-        let bg = crate::ui::lighten(theme.bg, 6);
-        crate::ui::fill_rect(buffer, width, px, py, pw, ph, crate::ui::pack_rgb(bg));
-        crate::ui::draw_border(buffer, width, px, py, pw, ph, crate::ui::pack_rgb(crate::ui::dim(theme.cursor, 0.4)));
-
-        let mut ty = py + 10;
-
-        // Title + live count.
-        let title = format!("PORT DASHBOARD  ({} entries)", self.entries.len());
-        crate::ui::render_text(buffer, width, font, &title, px + 16, ty, theme.cursor);
-        ty += title_h;
-
-        // Column headers — green accent, same fixed widths as the data rows.
-        let header_color = crate::ui::dim(theme.cursor, 0.85);
-        let mut rx = px + 16;
-        draw_col(buffer, width, font, &mut rx, right_edge, ty, "PORT", COL_PORT, header_color);
-        draw_col(buffer, width, font, &mut rx, right_edge, ty, "PROTO", COL_PROTO, header_color);
-        draw_col(buffer, width, font, &mut rx, right_edge, ty, "PID", COL_PID, header_color);
-        draw_col(buffer, width, font, &mut rx, right_edge, ty, "PROCESS", COL_PROCESS, header_color);
-        draw_col(buffer, width, font, &mut rx, right_edge, ty, "STATE", COL_STATE, header_color);
-        draw_col(buffer, width, font, &mut rx, right_edge, ty, "LOCAL", COL_LOCAL, header_color);
-        draw_col(buffer, width, font, &mut rx, right_edge, ty, "REMOTE", COL_REMOTE, header_color);
-
-        // Divider under the header row.
-        let sep_y = ty + ch + 2;
-        {
-            let sep_px = crate::ui::pack_rgb(crate::ui::dim(theme.fg, 0.15));
-            let off = sep_y * width + px + 8;
-            let end = (off + pw.saturating_sub(16)).min(buffer.len());
-            if off < buffer.len() { buffer[off..end].fill(sep_px); }
-        }
-        ty = sep_y + 6;
+        let want = cx.title_h() + cx.footer_h() + 2 * tk.sp.md + (self.entries.len().clamp(3, 40) + 1) * tk.row_h;
+        let rect = cx.centered(94, 140 * tk.cw, 100);
+        let rect = crate::ui::kit::Rect::new(rect.x, (height.saturating_sub(want.min(rect.h))) / 2, rect.w, want.min(rect.h));
+        let sort_label = match self.sort_by {
+            SortField::Port => "sort: port",
+            SortField::Process => "sort: process",
+            SortField::State => "sort: state",
+        };
+        let count = format!("{} entries", self.entries.len());
+        let spec = PanelSpec::new("Ports")
+            .sub(&count)
+            .badge(sort_label, Tone::Accent)
+            .hints(&[("Up/Down", "move"), ("k", "kill"), ("r", "refresh"), ("s", "sort"), ("Esc", "close")]);
+        let body = cx.panel(rect, &spec);
 
         if self.entries.is_empty() {
-            crate::ui::render_text(buffer, width, font, "No listening ports found", px + 16, ty,
-                crate::ui::dim(theme.fg, 0.4));
-        } else {
-            let total = self.entries.len();
-            let start = if total <= visible_rows { 0 } else {
-                self.selected.saturating_sub(visible_rows / 2).min(total - visible_rows)
-            };
-            let end = (start + visible_rows).min(total);
-
-            for i in start..end {
-                if ty + ch >= py + ph.saturating_sub(footer_h) { break; }
-                let e = &self.entries[i];
-                let sel = i == self.selected;
-
-                if sel {
-                    crate::ui::fill_rect(
-                        buffer, width, px + 4, ty.saturating_sub(1), pw.saturating_sub(8), row_h,
-                        crate::ui::pack_rgb(crate::ui::lighten(bg, 14)),
-                    );
-                }
-
-                let dim_fg = if sel { theme.fg } else { crate::ui::dim(theme.fg, 0.65) };
-                let proc_color = if sel { theme.fg } else { crate::ui::dim(theme.fg, 0.85) };
-                let addr_color = crate::ui::dim(theme.fg, if sel { 0.6 } else { 0.4 });
-                let st_color = state_color(&e.state, theme.fg);
-                let state_disp = if e.state.is_empty() { "-" } else { &e.state };
-
-                let mut rx = px + 16;
-                draw_col(buffer, width, font, &mut rx, right_edge, ty, &e.port.to_string(), COL_PORT, dim_fg);
-                draw_col(buffer, width, font, &mut rx, right_edge, ty, &e.proto, COL_PROTO, dim_fg);
-                draw_col(buffer, width, font, &mut rx, right_edge, ty, &e.pid.to_string(), COL_PID, dim_fg);
-                draw_col(buffer, width, font, &mut rx, right_edge, ty,
-                    crate::ui::trunc(&e.process_name, COL_PROCESS), COL_PROCESS, proc_color);
-                draw_col(buffer, width, font, &mut rx, right_edge, ty, state_disp, COL_STATE, st_color);
-                draw_col(buffer, width, font, &mut rx, right_edge, ty,
-                    crate::ui::trunc(&e.local_addr, COL_LOCAL), COL_LOCAL, addr_color);
-                draw_col(buffer, width, font, &mut rx, right_edge, ty,
-                    crate::ui::trunc(&e.remote_addr, COL_REMOTE), COL_REMOTE, addr_color);
-
-                ty += row_h;
-            }
+            cx.empty_state(body, "No listening ports found", "Press r to refresh");
+            return;
         }
-
-        let sort_label = match self.sort_by {
-            SortField::Port => "PORT",
-            SortField::Process => "PROCESS",
-            SortField::State => "STATE",
-        };
-        let footer = format!("[K] Kill  [R] Refresh  [S] Sort  [Esc] Close   (sort: {sort_label})");
-        let max_chars = pw.saturating_sub(32) / cw;
-        crate::ui::render_text(
-            buffer, width, font, crate::ui::trunc(&footer, max_chars),
-            px + 16, py + ph.saturating_sub(ch + 10), crate::ui::dim(theme.fg, 0.3),
-        );
+        let rows: Vec<TableRow> = self.entries.iter().map(|e| {
+            let tone = match e.state.as_str() {
+                "LISTEN" => Tone::Success,
+                "ESTABLISHED" => Tone::Accent,
+                "CLOSE_WAIT" => Tone::Warning,
+                _ => Tone::Neutral,
+            };
+            TableRow::new(vec![
+                e.port.to_string(), e.proto.clone(), e.pid.to_string(), e.process_name.clone(),
+                if e.state.is_empty() { "-".to_string() } else { e.state.clone() },
+                e.local_addr.clone(), e.remote_addr.clone(),
+            ]).cell_tone(4, tone)
+        }).collect();
+        let vis = cx.rows_fit(body.h.saturating_sub(tk.row_h));
+        let scroll = center_scroll(self.selected, rows.len(), vis);
+        cx.table(body, &[
+            Column::new("Port", Width::Cols(6)).right(), Column::new("Proto", Width::Cols(5)),
+            Column::new("PID", Width::Cols(7)).right(), Column::new("Process", Width::Flex(2)),
+            Column::new("State", Width::Cols(11)), Column::new("Local", Width::Flex(2)),
+            Column::new("Remote", Width::Flex(2)),
+        ], &rows, Some(self.selected), scroll);
     }
 }
 
 pub enum PortDashboardKey { Escape, Up, Down, Enter, Char(char) }
 pub enum PortAction { Kill(u32) }
-
-/// Render one fixed-width, left-padded column, skipping it entirely once it
-/// would spill past the panel's right edge (keeps truncation column-aligned
-/// rather than mid-glyph).
-fn draw_col(
-    buffer: &mut [u32], buf_w: usize, font: &mut crate::renderer::font::FontManager,
-    rx: &mut usize, right_edge: usize, y: usize, text: &str, w: usize, color: crate::config::Rgb,
-) {
-    let cw = font.cell_width.max(1);
-    if *rx + w * cw > right_edge { return; }
-    crate::ui::render_text(buffer, buf_w, font, &pad(text, w), *rx, y, color);
-    *rx += (w + 1) * cw;
-}
-
-fn pad(s: &str, w: usize) -> String {
-    format!("{:<1$}", s, w)
-}
-
-fn state_color(state: &str, fg: crate::config::Rgb) -> crate::config::Rgb {
-    match state {
-        "LISTEN" => (166, 227, 161),      // green
-        "ESTABLISHED" => (148, 226, 213), // cyan
-        "CLOSE_WAIT" => (249, 226, 175),  // yellow
-        "TIME_WAIT" => crate::ui::dim(fg, 0.35),
-        "" => crate::ui::dim(fg, 0.3),
-        _ => crate::ui::dim(fg, 0.55),
-    }
-}
 
 /// Kill a process by PID with SIGTERM (`kill -15 <pid>`).
 pub fn kill_pid(pid: u32) {

@@ -1,8 +1,10 @@
 mod ime;
 mod lifecycle;
+pub mod mouse;
 mod overlays;
 mod panes;
 pub mod shortcuts;
+mod tabs;
 
 use std::sync::Arc;
 
@@ -77,6 +79,8 @@ pub struct App {
     pub search: SearchOverlay,
     pub command_palette: CommandPalette,
     pub selection: Selection,
+    /// Scrollbar, context menu, tab-bar and click state (see `app::mouse`).
+    pub mui: mouse::MouseUi,
     pub mouse_pressed: bool,
     pub window_focused: bool,
     pub hover_pane: Option<usize>,
@@ -92,6 +96,8 @@ pub struct App {
     pub ime_area: Option<(i32, i32, u32, u32)>,
 
     pub blocks: BlockManager,
+    /// Warp-style block chrome state (hover, selection, toast).
+    pub blocks_ui: crate::blocks_ui::BlocksUi,
     pub error_detector: ErrorDetector,
     pub error_notif: ErrorNotification,
     pub exec_preview: ExecPreview,
@@ -171,6 +177,7 @@ impl App {
             search: SearchOverlay::new(),
             command_palette: CommandPalette::new(),
             selection: Selection::new(),
+            mui: mouse::MouseUi::default(),
             mouse_pressed: false,
             window_focused: true,
             hover_pane: None,
@@ -182,6 +189,7 @@ impl App {
             ime_area: None,
 
             blocks: BlockManager::new(),
+            blocks_ui: crate::blocks_ui::BlocksUi::new(),
             error_detector: ErrorDetector::new(),
             error_notif: ErrorNotification::new(),
             exec_preview: ExecPreview::hidden(),
@@ -334,7 +342,18 @@ impl ApplicationHandler for App {
                 self.cursor_x = position.x as usize;
                 self.cursor_y = position.y as usize;
 
+                // Command palette: hover highlights rows; swallow the move.
+                if self.command_palette.visible {
+                    overlays::palette_cursor_moved(self);
+                    return;
+                }
+
                 if crate::network::browser::on_cursor_moved(self) {
+                    return;
+                }
+
+                // Context menu hover, scrollbar / tab drags, tab + scrollbar hover.
+                if mouse::on_cursor_moved(self) {
                     return;
                 }
 
@@ -366,12 +385,14 @@ impl ApplicationHandler for App {
                         self.request_redraw();
                     }
                     self.update_resize_cursor();
+                    // Command blocks: hover toolbar / gutter (sets pointer cursor)
+                    if !self.mouse_pressed && crate::blocks_ui::on_mouse_move(self) {
+                        return;
+                    }
                 }
 
                 if self.mouse_pressed && self.selection.dragging {
-                    let (row, col) = self.pixel_to_cell(self.cursor_x, self.cursor_y);
-                    self.selection.extend_to(row, col);
-                    self.request_redraw();
+                    mouse::drag_selection(self);
                 } else if self.mouse_pressed {
                     let mouse_mode = self.wm.active_pane().terminal.mouse_mode;
                     if mouse_mode == MouseMode::AnyEvent && !self.modifiers.shift_key() {
@@ -381,7 +402,19 @@ impl ApplicationHandler for App {
                     }
                 }
             }
+            WindowEvent::CursorLeft { .. } => {
+                if self.mui.tabs.hover.take().is_some() || self.mui.scrollbar.hover.take().is_some() {
+                    self.request_redraw();
+                }
+            }
             WindowEvent::MouseInput { state, button, .. } => {
+                // Command palette is modal for the mouse: click runs/closes.
+                if self.command_palette.visible {
+                    if state == ElementState::Pressed && button == MouseButton::Left {
+                        overlays::palette_click(self, event_loop);
+                    }
+                    return;
+                }
                 let mouse_mode = self.wm.active_pane().terminal.mouse_mode;
 
                 match (state, button) {
@@ -389,6 +422,11 @@ impl ApplicationHandler for App {
                         self.mouse_pressed = true;
                         // Browser toolbar / divider / focus handoff
                         if crate::network::browser::on_mouse_press(self) {
+                            return;
+                        }
+                        // Context menu, tab rename commit, scrollbar.
+                        if mouse::on_left_press(self, event_loop) {
+                            self.mouse_pressed = false;
                             return;
                         }
                         let tbh = self.tab_bar_height();
@@ -416,19 +454,19 @@ impl ApplicationHandler for App {
                                     }
                                 }
                             }
+                            // Command blocks: toolbar buttons / gutter select / fold toggle
+                            if crate::blocks_ui::on_click(self) {
+                                self.mouse_pressed = false;
+                                return;
+                            }
                             // Then handle Cmd+Click URL / mouse mode / selection
                             if self.modifiers.super_key() {
-                                let (row, col) = self.pixel_to_cell(self.cursor_x, self.cursor_y);
-                                let terminal = &self.wm.active_pane().terminal;
-                                if row < terminal.rows {
-                                    let line: String = terminal.grid[row].iter().map(|c| c.c).collect();
-                                    if let Some(url) = crate::tools::url_detect::url_at_col(&line, col) {
-                                        // Cmd+Click opens in Rift's browser, Cmd+Shift+Click externally.
-                                        if self.modifiers.shift_key() || !cfg!(feature = "webview") {
-                                            crate::tools::url_detect::open_url(&url);
-                                        } else {
-                                            crate::network::browser::open(self, &url);
-                                        }
+                                if let Some(url) = mouse::url_at_cursor(self) {
+                                    // Cmd+Click opens in Rift's browser, Cmd+Shift+Click externally.
+                                    if self.modifiers.shift_key() || !cfg!(feature = "webview") {
+                                        crate::tools::url_detect::open_url(&url);
+                                    } else {
+                                        crate::network::browser::open(self, &url);
                                     }
                                 }
                             } else if mouse_mode != MouseMode::None && !self.modifiers.shift_key() {
@@ -436,10 +474,7 @@ impl ApplicationHandler for App {
                                 let seq = format!("\x1b[<0;{};{}M", col + 1, row + 1);
                                 self.wm.active_pane_mut().write(seq.as_bytes());
                             } else {
-                                self.selection.clear();
-                                let (row, col) = self.pixel_to_cell(self.cursor_x, self.cursor_y);
-                                self.selection.start_at(row, col);
-                                self.request_redraw();
+                                mouse::begin_selection(self);
                             }
                         }
                     }
@@ -448,21 +483,15 @@ impl ApplicationHandler for App {
                         if crate::network::browser::on_mouse_release(self) {
                             return;
                         }
+                        if mouse::on_left_release(self) {
+                            return;
+                        }
                         if self.dragging_border.take().is_some() {
                             self.update_resize_cursor();
                             return;
                         }
                         if self.selection.dragging {
-                            self.selection.finish();
-                            if self.selection.active {
-                                let text = self.selection.extract_text(
-                                    &self.wm.active_pane().terminal.grid,
-                                );
-                                if !text.is_empty() {
-                                    selection::copy_to_clipboard(&text);
-                                }
-                            }
-                            self.request_redraw();
+                            mouse::finish_selection(self);
                         } else if was_pressed && mouse_mode != MouseMode::None && !self.modifiers.shift_key() {
                             let (row, col) = self.pixel_to_cell(self.cursor_x, self.cursor_y);
                             let seq = format!("\x1b[<0;{};{}m", col + 1, row + 1);
@@ -470,23 +499,25 @@ impl ApplicationHandler for App {
                         }
                     }
                     (ElementState::Pressed, MouseButton::Right) => {
-                        if mouse_mode != MouseMode::None && !self.modifiers.shift_key() {
+                        mouse::dismiss_menu(self);
+                        if self.cursor_y < self.tab_bar_height() {
+                            // Nothing on the tab bar yet.
+                        } else if mouse_mode != MouseMode::None && !self.modifiers.shift_key() {
                             let (row, col) = self.pixel_to_cell(self.cursor_x, self.cursor_y);
                             let seq = format!("\x1b[<2;{};{}M", col + 1, row + 1);
                             self.wm.active_pane_mut().write(seq.as_bytes());
-                        } else if let Some(text) = selection::paste_from_clipboard() {
-                            let pane = self.wm.active_pane_mut();
-                            if pane.terminal.bracketed_paste {
-                                pane.write(b"\x1b[200~");
-                                pane.write(text.as_bytes());
-                                pane.write(b"\x1b[201~");
-                            } else {
-                                pane.write(text.as_bytes());
-                            }
+                        } else {
+                            // Paste moved into the context menu.
+                            mouse::open_context_menu(self);
                         }
                     }
                     (ElementState::Pressed, MouseButton::Middle) => {
-                        if mouse_mode != MouseMode::None && !self.modifiers.shift_key() {
+                        if mouse::dismiss_menu(self) {
+                            return;
+                        }
+                        if self.cursor_y < self.tab_bar_height() {
+                            tabs::middle_click(self, event_loop);
+                        } else if mouse_mode != MouseMode::None && !self.modifiers.shift_key() {
                             let (row, col) = self.pixel_to_cell(self.cursor_x, self.cursor_y);
                             let seq = format!("\x1b[<1;{};{}M", col + 1, row + 1);
                             self.wm.active_pane_mut().write(seq.as_bytes());
@@ -505,19 +536,20 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
-                let lines = match delta {
-                    MouseScrollDelta::LineDelta(_, y) => y as i32,
-                    MouseScrollDelta::PixelDelta(pos) => {
-                        let ch = self.renderer.cell_height().max(1) as f64;
-                        (pos.y / ch) as i32
-                    }
-                };
-                if lines > 0 {
-                    self.wm.active_pane_mut().terminal.scroll_view_up(lines as usize);
-                } else if lines < 0 {
-                    self.wm.active_pane_mut().terminal.scroll_view_down((-lines) as usize);
+                if self.command_palette.visible {
+                    let lines = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => y as i32,
+                        MouseScrollDelta::PixelDelta(pos) => {
+                            let ch = self.renderer.cell_height().max(1) as f64;
+                            (pos.y / ch) as i32
+                        }
+                    };
+                    overlays::palette_wheel(self, lines);
+                    return;
                 }
-                self.request_redraw();
+                // Notches = 3 lines, trackpad pixels accumulate; mouse
+                // reporting / alt-screen aware.
+                mouse::handle_wheel(self, delta);
             }
             WindowEvent::Ime(ime) => ime::handle_ime(self, ime),
             WindowEvent::Focused(focused) => {

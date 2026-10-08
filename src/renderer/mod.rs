@@ -218,11 +218,15 @@ pub struct Renderer {
     /// Per pane (index within the active tab) -> per visible row hash.
     pane_rows: HashMap<usize, Vec<u64>>,
     cur_pane: usize,
-    /// Per-row extra state (block indicator bar) for the next pane render.
-    row_extra: Option<Vec<u8>>,
+    /// View row holding the live cursor in the pane being rendered (differs
+    /// from `cursor_row` when collapsed blocks shift rows).
+    view_cursor_row: usize,
     /// Output of the last `render_pane_inner`: which rows were repainted.
     dirty_rows: Vec<bool>,
     tiles: TileCache,
+    /// Hover / drag / scrollbar state for the software-drawn chrome; set by
+    /// the app right before each frame.
+    pub chrome: crate::ui::tabbar::ChromeUi,
     pub prof: Option<Profiler>,
 }
 
@@ -256,9 +260,10 @@ impl Renderer {
             tab_sig: 0,
             pane_rows: HashMap::new(),
             cur_pane: NO_CACHE,
-            row_extra: None,
+            view_cursor_row: 0,
             dirty_rows: Vec::new(),
             tiles: TileCache::default(),
+            chrome: Default::default(),
             prof: if std::env::var("RIFT_PROFILE").map_or(false, |v| v == "1") {
                 Some(Profiler::default())
             } else {
@@ -314,7 +319,7 @@ impl Renderer {
         width: u32,
         height: u32,
         cmd_held: bool,
-        blocks: &crate::tools::blocks::BlockManager,
+        _blocks: &crate::tools::blocks::BlockManager, // block chrome is an overlay: see blocks_ui::draw
         split_ui: SplitUiState,
     ) {
         let t_start = Instant::now();
@@ -355,6 +360,7 @@ impl Renderer {
             for b in title.bytes() { tsig = mix(tsig, b as u64); }
             tsig = mix(tsig, *active as u64 + 0x100);
         }
+        tsig = mix(tsig, self.chrome.tab_sig());
 
         // A shader post-processes every frame, so keep that path simple:
         // full redraw (the back buffer itself stays unshaded).
@@ -373,29 +379,11 @@ impl Renderer {
             self.pane_rows.clear();
         }
 
-        // Block-indicator bar state for the first pane (rows hash it in).
-        // Exact OSC 133 blocks (owned by the terminal) win over the app-level heuristic.
-        let blocks = match layouts.first().and_then(|l| active_tab.pane(l.0)) {
-            Some(p) if p.terminal.blocks.osc_seen() => &p.terminal.blocks,
-            _ => blocks,
-        };
-        let block_states = if blocks.block_count() > 0 && !layouts.is_empty() {
-            Some(self.block_row_states(&active_tab.active_pane().terminal, blocks))
-        } else {
-            None
-        };
-
-        for (i, (idx, rect, is_active)) in layouts.iter().enumerate() {
+        for (idx, rect, is_active) in layouts.iter() {
             if let Some(pane) = active_tab.pane(*idx) {
                 let terminal = &pane.terminal;
                 self.cur_pane = *idx;
-                self.row_extra = if i == 0 { block_states.clone() } else { None };
                 self.render_pane_inner(terminal, &mut back, w, h, *rect, *is_active, cmd_held);
-                if i == 0 {
-                    if let Some(states) = &block_states {
-                        self.draw_block_indicators(states, &self.dirty_rows, &mut back, w, *rect);
-                    }
-                }
             }
         }
         self.cur_pane = NO_CACHE;
@@ -423,6 +411,21 @@ impl Renderer {
             }
         }
 
+        // Overlay scrollbar: output buffer only, so the damage-tracked back
+        // buffer never sees it.
+        if let Some(bar) = self.chrome.scrollbar {
+            if let (Some((_, rect, _)), Some(pane)) =
+                (layouts.iter().find(|(i, _, _)| *i == bar.pane), active_tab.pane(bar.pane))
+            {
+                let t = &pane.terminal;
+                if !t.is_alt_screen() {
+                    if let Some(th) = crate::ui::scrollbar::thumb(rect.height, t.rows, t.scrollback_len(), t.scroll_offset) {
+                        crate::ui::scrollbar::draw(buffer, w, *rect, cw, th, bar.alpha, bar.emphasized, self.theme.fg);
+                    }
+                }
+            }
+        }
+
         let elapsed = self.start_time.elapsed().as_secs_f32();
         self.shader.apply(buffer, width, height, elapsed);
         self.prof_add(Phase::Render, t_start.elapsed());
@@ -435,6 +438,7 @@ impl Renderer {
         buf_width: usize,
         bar_height: usize,
     ) {
+        use crate::ui::tabbar::{self, TabHit};
         if bar_height == 0 { return; }
 
         // Ghostty: dark titlebar bg, noticeably darker than terminal content
@@ -451,69 +455,76 @@ impl Renderer {
         let cw = self.font.cell_width;
         let ch = self.font.cell_height;
         let text_y = (bar_height.saturating_sub(ch)) / 2;
+        let buf_height = buffer.len() / buf_width.max(1);
 
         let active_text = self.theme.fg;
         let inactive_text = dim(self.theme.fg, 0.45);
 
         // Active tab = terminal bg (content flows into the tab)
-        let active_bg = self.theme.bg;
-        let active_bg_px = pack(active_bg.0, active_bg.1, active_bg.2);
+        let active_bg_px = pack_rgb(self.theme.bg);
+        let hover_px = pack_rgb(lighten(bar_bg, 12));
+        let drag_px = pack_rgb(lighten(bar_bg, 22));
 
         let tab_count = tabs.len().max(1);
-        let tab_w = buf_width / tab_count;
+        let layout = tabbar::layout(buf_width, tab_count, bar_height);
+        let show_close = tab_count > 1;
+        let close_w = cw * 2;
+        let hover = self.chrome.tab_hover;
 
         // Find active tab index for separator logic
         let active_idx = tabs.iter().position(|(_, a)| *a);
 
         for (i, (title, is_active)) in tabs.iter().enumerate() {
-            let x0 = i * tab_w;
-            let x1 = if i == tab_count - 1 { buf_width } else { (i + 1) * tab_w };
+            let (x0, x1) = layout.tabs[i];
             if x0 >= buf_width { break; }
+            let hovered = hover.and_then(|h| h.tab()) == Some(i);
+            let dragging = self.chrome.dragging_tab == Some(i);
 
             if *is_active {
-                // Ghostty: top-rounded rect, bottom flush, side margins for the gap
-                let margin = 4;
-                let top = 3;
-                let bot = bar_height;
-                let pl = x0 + margin;
-                let pr = x1.saturating_sub(margin);
-                let r = 8i32;
+                fill_tab_shape(buffer, buf_width, x0, x1, bar_height, active_bg_px);
+            } else if dragging {
+                fill_tab_shape(buffer, buf_width, x0, x1, bar_height, drag_px);
+            } else if hovered {
+                fill_tab_shape(buffer, buf_width, x0, x1, bar_height, hover_px);
+            }
 
-                for y in top..bot {
-                    let dy = (top as i32 + r) - y as i32;
-                    let inset = if dy > 0 && dy <= r {
-                        // Anti-aliased rounded corner
-                        let exact = r as f32 - ((r * r - dy * dy) as f32).sqrt();
-                        exact.round() as i32
-                    } else {
-                        0
-                    };
-                    let rl = (pl as i32 + inset).max(0) as usize;
-                    let rr = (pr as i32 - inset).max(0) as usize;
-                    if rl < rr && rl < buf_width {
-                        let off = y * buf_width + rl;
-                        let end = (off + rr - rl).min(buffer.len());
-                        if off < buffer.len() {
-                            buffer[off..end].fill(active_bg_px);
-                        }
-                    }
+            // Title centered, measured in terminal cells (CJK = 2 cells).
+            let text_color = if *is_active || hovered { active_text } else { inactive_text };
+            let reserve = if show_close { 4 } else { 2 };
+            let max_cols = ((x1 - x0) / cw.max(1)).saturating_sub(reserve);
+            let (title_str, cols) = tabbar::fit_title(title, max_cols);
+            let text_x = x0 + ((x1 - x0).saturating_sub(cols * cw)) / 2;
+            tabbar::draw_text(buffer, buf_width, buf_height, &mut self.font, &title_str, text_x, text_y, x1, text_color);
+
+            // Close button, only while the tab is hovered.
+            if show_close && hovered {
+                let (c0, c1) = tabbar::close_zone((x0, x1), close_w);
+                let close_hot = hover == Some(TabHit::Close(i));
+                if close_hot {
+                    let s = (ch + 2).min(c1 - c0).min(bar_height);
+                    let bx = c0 + (c1 - c0).saturating_sub(s) / 2;
+                    let by = bar_height.saturating_sub(s) / 2;
+                    crate::ui::fill_rect(buffer, buf_width, bx, by, s, s, pack_rgb(lighten(bar_bg, 40)));
                 }
+                let gx = c0 + (c1 - c0).saturating_sub(cw) / 2;
+                let color = if close_hot { active_text } else { dim(self.theme.fg, 0.6) };
+                tabbar::draw_text(buffer, buf_width, buf_height, &mut self.font, "\u{00d7}", gx, text_y, c1, color);
             }
+        }
 
-            // Title centered
-            let text_color = if *is_active { active_text } else { inactive_text };
-            let max_chars = ((x1 - x0) / cw).saturating_sub(2);
-            let title_str = truncate_str(title, max_chars);
-            let title_len = title_str.chars().count();
-            let text_total_w = title_len * cw;
-            let text_x = x0 + ((x1 - x0).saturating_sub(text_total_w)) / 2;
-
-            for (ci, c) in title_str.chars().enumerate() {
-                let gx = text_x + ci * cw;
-                if gx + cw > x1 || gx + cw > buf_width { break; }
-                if c == ' ' { continue; }
-                self.draw_char(buffer, buf_width, bar_height, c, gx, text_y, text_color);
+        // "+" new-tab button
+        {
+            let (p0, p1) = layout.plus;
+            let hot = hover == Some(TabHit::Plus);
+            let s = (ch + 2).min(p1 - p0).min(bar_height);
+            let bx = p0 + (p1 - p0).saturating_sub(s) / 2;
+            let by = bar_height.saturating_sub(s) / 2;
+            if hot {
+                crate::ui::fill_rect(buffer, buf_width, bx, by, s, s, hover_px);
             }
+            let gx = p0 + (p1 - p0).saturating_sub(cw) / 2;
+            let color = if hot { active_text } else { inactive_text };
+            tabbar::draw_text(buffer, buf_width, buf_height, &mut self.font, "+", gx, text_y, p1, color);
         }
 
         // Bottom border: 1px line under inactive regions only
@@ -522,7 +533,7 @@ impl Renderer {
         let (ax0, ax1) = match active_idx {
             Some(ai) => {
                 let m = 4;
-                (ai * tab_w + m, (if ai == tab_count - 1 { buf_width } else { (ai + 1) * tab_w }).saturating_sub(m))
+                (layout.tabs[ai].0 + m, layout.tabs[ai].1.saturating_sub(m))
             }
             None => (0, 0),
         };
@@ -616,7 +627,19 @@ impl Renderer {
         let cw = self.font.cell_width;
         let ch = self.font.cell_height;
 
-        let visible = terminal.visible_rows();
+        // Collapsed command blocks change which lines are shown (see
+        // blocks_ui::view); otherwise this is the plain screen / scrollback view.
+        let folded = crate::blocks_ui::view::folded_view(terminal);
+        let visible = match &folded {
+            Some(f) => f.cell_rows(terminal),
+            None => terminal.visible_rows(),
+        };
+        self.view_cursor_row = match &folded {
+            Some(f) => crate::blocks_ui::view::row_of_line(&f.rows, terminal.abs_cursor_line())
+                .unwrap_or(usize::MAX),
+            None => terminal.cursor_row,
+        };
+        let view_cursor_row = self.view_cursor_row;
         // Cursor blink: Bar and Underline blink at ~2Hz, Block stays solid
         let elapsed = self.start_time.elapsed().as_secs_f32();
         let cursor_blink_on = match terminal.cursor_style {
@@ -627,7 +650,7 @@ impl Renderer {
         // Kitty graphics placements are absolute grid coordinates that don't
         // track scrollback (see terminal::images module docs), so only blit
         // them while looking at the live screen.
-        let images_visible = !terminal.is_scrolled_back();
+        let images_visible = !terminal.is_scrolled_back() && folded.is_none();
         let has_images = images_visible && terminal.image_store.has_placements();
 
         // Scrollback indicator text (drawn over the first rows).
@@ -645,14 +668,13 @@ impl Renderer {
         let key = self.cur_pane;
         let use_cache = key != NO_CACHE && !self.full_frame;
         let old_hashes = if use_cache { self.pane_rows.remove(&key).unwrap_or_default() } else { Vec::new() };
-        let extra = self.row_extra.take();
         let nrows = visible.len();
         let mut new_hashes: Vec<u64> = Vec::with_capacity(nrows);
         let mut dirty = std::mem::take(&mut self.dirty_rows);
         dirty.clear();
         for (row, cells) in visible.iter().enumerate() {
             let mut h = hash_cells(mix(0, cells.len() as u64), cells);
-            if show_cursor && row == terminal.cursor_row {
+            if show_cursor && row == view_cursor_row {
                 h = mix(h, 1 << 40 | (terminal.cursor_col as u64) << 8 | terminal.cursor_style as u64);
             }
             if has_images {
@@ -670,9 +692,6 @@ impl Renderer {
                         }
                     }
                 }
-            }
-            if let Some(e) = &extra {
-                h = mix(h, e.get(row).copied().unwrap_or(0) as u64 + 0x200);
             }
             if row < ind_rows { h = mix(h, ind_hash); }
             // Edge rows may carry pane-border pixels that interior rows don't.
@@ -799,7 +818,7 @@ impl Renderer {
             if cell.c == '\0' { continue; }
 
             let is_cursor = show_cursor
-                && row == terminal.cursor_row
+                && row == self.view_cursor_row
                 && col == terminal.cursor_col;
 
             let has_glyph = cell.c != ' ' && !cell.attrs.hidden;
@@ -1074,67 +1093,6 @@ impl Renderer {
         self.draw_char_seq(buffer, buf_width, buf_height, label, x + 6, y + 2, self.theme.bg);
     }
 
-    /// Per visible row: 0 = no block, 1/2 = ok command/output line,
-    /// 3/4 = failed (exit != 0) command/output line, 5 = running block.
-    fn block_row_states(&self, terminal: &Terminal, blocks: &crate::tools::blocks::BlockManager) -> Vec<u8> {
-        let visible_len = terminal.visible_rows().len();
-        let scroll_top = terminal.scrollback.len().saturating_sub(terminal.scroll_offset);
-        (0..visible_len).map(|row| {
-            let abs_line = scroll_top + row;
-            match blocks.block_at_line(abs_line) {
-                Some((_, blk)) => {
-                    let is_cmd = abs_line >= blk.command_line && abs_line < blk.output_start;
-                    if blk.running {
-                        5
-                    } else if blk.exit_code.map_or(false, |c| c != 0) {
-                        if is_cmd { 3 } else { 4 }
-                    } else if is_cmd { 1 } else { 2 }
-                }
-                None => 0,
-            }
-        }).collect()
-    }
-
-    /// Warp-style command block indicators (left-side bar), drawn only on
-    /// rows that were just repainted (the rest still carry their bar).
-    fn draw_block_indicators(
-        &self,
-        states: &[u8],
-        dirty: &[bool],
-        buffer: &mut [u32],
-        buf_width: usize,
-        rect: PaneRect,
-    ) {
-        let ch = self.font.cell_height;
-        let bar_w = 3;
-        let bar_x = rect.x + 2;
-        let accent = self.theme.cursor;
-        let accent_px = pack(accent.0, accent.1, accent.2);
-        let dim_accent = dim(accent, 0.3);
-        let dim_px = pack(dim_accent.0, dim_accent.1, dim_accent.2);
-        let fail = (230u8, 70u8, 70u8);
-        let fail_px = pack(fail.0, fail.1, fail.2);
-        let dim_fail = dim(fail, 0.45);
-        let dim_fail_px = pack(dim_fail.0, dim_fail.1, dim_fail.2);
-
-        for (row, state) in states.iter().enumerate() {
-            if *state == 0 || !dirty.get(row).copied().unwrap_or(true) { continue; }
-            let px = match *state {
-                1 => accent_px,
-                3 => fail_px,
-                4 => dim_fail_px,
-                _ => dim_px,
-            };
-            let y0 = rect.y + row * ch;
-            for y in y0..(y0 + ch).min(rect.y + rect.height) {
-                for dx in 0..bar_w {
-                    let idx = y * buf_width + bar_x + dx;
-                    if idx < buffer.len() { buffer[idx] = px; }
-                }
-            }
-        }
-    }
-
     /// Render a snapshot grid (used by TimeWarp playback).
     pub fn render_snapshot(
         &mut self,
@@ -1211,6 +1169,7 @@ impl Renderer {
     pub fn render_selection(
         &self,
         sel: &crate::window::Selection,
+        row_abs: &[Option<usize>],
         buffer: &mut [u32],
         buf_width: usize,
         buf_height: usize,
@@ -1229,9 +1188,10 @@ impl Renderer {
         let max_row = buf_height.saturating_sub(offset_y) / ch.max(1);
         let max_col = buf_width.saturating_sub(offset_x) / cw.max(1);
 
-        for row in 0..max_row {
+        for row in 0..max_row.min(row_abs.len()) {
+            let Some(abs) = row_abs[row] else { continue };
             for col in 0..max_col {
-                if sel.contains(row, col) {
+                if sel.contains(abs, col) {
                     let x0 = offset_x + col * cw;
                     let y0 = offset_y + row * ch;
                     for cy in 0..ch {
@@ -1352,11 +1312,33 @@ fn blend(fg: Rgb, base: u32, alpha: u32) -> u32 {
     pack(r as u8, g as u8, b as u8)
 }
 
-fn truncate_str(s: &str, max_len: usize) -> &str {
-    if s.len() <= max_len { return s; }
-    let mut end = max_len;
-    while end > 0 && !s.is_char_boundary(end) { end -= 1; }
-    &s[..end]
+/// Ghostty-style tab shape: top-rounded rect, bottom flush, side margins for
+/// the gap between neighbours.
+fn fill_tab_shape(buffer: &mut [u32], buf_width: usize, x0: usize, x1: usize, bar_height: usize, px: u32) {
+    let margin = 4;
+    let top = 3;
+    let pl = x0 + margin;
+    let pr = x1.saturating_sub(margin);
+    let r = 8i32;
+    for y in top..bar_height {
+        let dy = (top as i32 + r) - y as i32;
+        let inset = if dy > 0 && dy <= r {
+            // Anti-aliased rounded corner
+            let exact = r as f32 - ((r * r - dy * dy) as f32).sqrt();
+            exact.round() as i32
+        } else {
+            0
+        };
+        let rl = (pl as i32 + inset).max(0) as usize;
+        let rr = (pr as i32 - inset).max(0) as usize;
+        if rl < rr && rl < buf_width {
+            let off = y * buf_width + rl;
+            let end = (off + rr - rl).min(buffer.len());
+            if off < buffer.len() {
+                buffer[off..end].fill(px);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1504,6 +1486,51 @@ mod tests {
         step(&mut r, &mut back, &t, false, false);
         t.scroll_offset = 0;
         step(&mut r, &mut back, &t, false, false);
+    }
+
+    #[test]
+    fn collapsed_block_view_matches_full_render() {
+        let mut r = test_renderer();
+        let (rc, w, h) = rect(&r);
+        let bg = pack(r.theme.bg.0, r.theme.bg.1, r.theme.bg.2);
+        let mut back = vec![bg; w * h];
+        let mut fr = test_renderer();
+        let mut t = make_terminal();
+        // Move 8 rows into scrollback so folds can pull older lines in.
+        for _ in 0..8 {
+            let first = t.grid.remove(0);
+            t.scrollback.push_back(first);
+            let mut last = vec![Cell::default(); COLS];
+            fill_row(&mut last, 777 + t.scrollback.len());
+            t.grid.push(last);
+        }
+        let base = t.scrollback.len();
+        t.blocks.on_prompt_start(base + 3);
+        t.blocks.on_command_start(base + 3, 0);
+        t.blocks.on_command_output(base + 4, "ls".into());
+        t.blocks.on_command_finished(base + 9, Some(0));
+
+        let mut first = true;
+        let mut step = |r: &mut Renderer, back: &mut Vec<u32>, t: &Terminal, label: &str| {
+            r.cur_pane = 0;
+            r.full_frame = first;
+            if first { r.pane_rows.clear(); }
+            first = false;
+            r.render_pane_inner(t, back, w, h, rc, true, false);
+            let fresh = render_fresh(&mut fr, t, false, r.start_time);
+            assert!(back.iter().zip(&fresh).all(|(a, b)| a == b), "diverged: {label}");
+        };
+        step(&mut r, &mut back, &t, "expanded");
+        t.blocks.toggle_collapse(0);
+        step(&mut r, &mut back, &t, "collapsed");
+        assert!(crate::blocks_ui::view::folded_view(&t).is_some());
+        t.cursor_col = 3;
+        step(&mut r, &mut back, &t, "cursor move while collapsed");
+        t.scroll_offset = 5;
+        step(&mut r, &mut back, &t, "scrolled while collapsed");
+        t.scroll_offset = 0;
+        t.blocks.toggle_collapse(0);
+        step(&mut r, &mut back, &t, "re-expanded");
     }
 
     /// Reference implementation of the pre-optimisation renderer for the

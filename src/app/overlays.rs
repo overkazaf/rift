@@ -4,7 +4,9 @@ use winit::keyboard::{Key, NamedKey};
 
 use crate::ai::{AiAction, AiPanelKey};
 use crate::tools::cicd::CicdKey;
-use crate::tools::command_palette::{PaletteAction, PaletteEffect, PaletteKey};
+use crate::tools::command_palette::{
+    parse_ssh_spec, shell_quote_path, PaletteAction, PaletteContext, PaletteKey, Preview, SshHostInfo,
+};
 use crate::tools::compare::CompareKey;
 use crate::tools::docker_panel::{DockerKey, DockerAction};
 use crate::tools::exec_preview::{ExecPreviewAction, ExecPreviewKey};
@@ -18,7 +20,7 @@ use crate::tools::process_tree::ProcTreeKey;
 use crate::tools::regex_playground::RegexKey;
 use crate::tools::search::{SearchKey, SearchAction};
 use crate::tools::system_info::SysInfoKey;
-use crate::ui::{MenuAction, PrefsAction, PrefsKey};
+use crate::ui::{PrefsAction, PrefsKey};
 use crate::network::{SshDialogKey, WvDialogKey};
 use crate::ui::WelcomeKey;
 
@@ -36,9 +38,24 @@ pub fn try_intercept(app: &mut App, event: &KeyEvent, event_loop: &ActiveEventLo
     if app.timewarp_browser.active {
         return handle_timewarp(app, event);
     }
+    // Right-click context menu and inline tab rename are modal for the keyboard.
+    if app.mui.menu.visible {
+        return super::mouse::handle_menu_key(app, event, event_loop);
+    }
+    if app.mui.tabs.editor.is_some() {
+        return super::tabs::handle_key(app, event);
+    }
     // WebView address bar editing
     if app.browser.editing {
         return crate::network::browser::handle_key(app, event);
+    }
+    // UI Gallery (visual QA page)
+    if crate::ui::kit::gallery::visible() {
+        if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
+            crate::ui::kit::gallery::set_visible(false);
+            app.request_redraw();
+        }
+        return true;
     }
     // Observer summary dismissal
     if app.observer_summary.is_some() {
@@ -367,7 +384,7 @@ fn handle_compare(app: &mut App, event: &KeyEvent) -> bool {
         Key::Named(NamedKey::Escape) => CompareKey::Escape,
         Key::Named(NamedKey::ArrowUp) => CompareKey::Up,
         Key::Named(NamedKey::ArrowDown) => CompareKey::Down,
-        _ => CompareKey::Escape,
+        _ => return true, // only Esc closes; other keys are swallowed
     };
     app.compare_view.handle_key(ck);
     app.request_redraw();
@@ -477,79 +494,201 @@ fn handle_history(app: &mut App, event: &KeyEvent) -> bool {
     true
 }
 
+/// Open the command palette with fresh dynamic entries (tabs, saved SSH hosts).
+pub fn open_command_palette(app: &mut App) {
+    let ctx = PaletteContext {
+        tabs: app.wm.tabs.iter().map(|t| t.display_title().to_string()).collect(),
+        active_tab: app.wm.active_tab,
+        ssh_hosts: app
+            .ssh_dialog
+            .saved_hosts()
+            .into_iter()
+            .map(|h| SshHostInfo { detail: format!("{}@{}:{}", h.user, h.host, h.port), alias: h.alias })
+            .collect(),
+        font_size: app.config.font_size,
+    };
+    app.command_palette.open(ctx);
+}
+
+/// Apply a pending theme live-preview (or rollback) requested by the palette.
+/// The committed theme stays in `app.config`, so a rollback just re-applies it.
+fn sync_palette_preview(app: &mut App) {
+    match app.command_palette.take_preview() {
+        Some(Preview::Theme(name)) => {
+            if let Some(theme) = crate::config::Config::theme_by_name(&name) {
+                app.renderer.set_theme(theme);
+            }
+        }
+        Some(Preview::Restore) => app.renderer.set_theme(app.config.theme.clone()),
+        None => {}
+    }
+}
+
 fn handle_command_palette(app: &mut App, event: &KeyEvent, event_loop: &ActiveEventLoop) -> bool {
+    let cmd = app.modifiers.super_key();
+    let ctrl = app.modifiers.control_key();
+    let alt = app.modifiers.alt_key();
+    let mut paste: Option<String> = None;
     let pk = match event.logical_key {
         Key::Named(NamedKey::Escape) => Some(PaletteKey::Escape),
+        Key::Named(NamedKey::Backspace) if cmd => Some(PaletteKey::DeleteToStart),
+        Key::Named(NamedKey::Backspace) if alt => Some(PaletteKey::DeleteWord),
         Key::Named(NamedKey::Backspace) => Some(PaletteKey::Backspace),
+        Key::Named(NamedKey::Delete) => Some(PaletteKey::Delete),
+        Key::Named(NamedKey::Enter) if cmd => Some(PaletteKey::EnterKeepOpen),
         Key::Named(NamedKey::Enter) => Some(PaletteKey::Enter),
+        Key::Named(NamedKey::Tab) => Some(PaletteKey::Tab),
         Key::Named(NamedKey::ArrowUp) => Some(PaletteKey::Up),
         Key::Named(NamedKey::ArrowDown) => Some(PaletteKey::Down),
+        Key::Named(NamedKey::ArrowLeft) if cmd => Some(PaletteKey::Home),
+        Key::Named(NamedKey::ArrowLeft) if alt => Some(PaletteKey::WordLeft),
+        Key::Named(NamedKey::ArrowLeft) => Some(PaletteKey::Left),
+        Key::Named(NamedKey::ArrowRight) if cmd => Some(PaletteKey::End),
+        Key::Named(NamedKey::ArrowRight) if alt => Some(PaletteKey::WordRight),
+        Key::Named(NamedKey::ArrowRight) => Some(PaletteKey::Right),
+        Key::Named(NamedKey::Home) => Some(PaletteKey::Home),
+        Key::Named(NamedKey::End) => Some(PaletteKey::End),
+        Key::Named(NamedKey::PageUp) => Some(PaletteKey::PageUp),
+        Key::Named(NamedKey::PageDown) => Some(PaletteKey::PageDown),
         Key::Named(NamedKey::Space) => Some(PaletteKey::Char(' ')),
+        Key::Character(ref s) if cmd => match s.to_ascii_lowercase().as_str() {
+            "p" => Some(PaletteKey::Escape), // Cmd+P again closes
+            "a" => Some(PaletteKey::Home),
+            "v" => {
+                paste = crate::window::selection::paste_from_clipboard();
+                None
+            }
+            _ => None,
+        },
+        Key::Character(ref s) if ctrl => match s.to_ascii_lowercase().as_str() {
+            "n" | "j" => Some(PaletteKey::Down),
+            "p" | "k" => Some(PaletteKey::Up),
+            "a" => Some(PaletteKey::Home),
+            "e" => Some(PaletteKey::End),
+            "b" => Some(PaletteKey::Left),
+            "f" => Some(PaletteKey::Right),
+            "u" => Some(PaletteKey::DeleteToStart),
+            "w" => Some(PaletteKey::DeleteWord),
+            _ => None,
+        },
         Key::Character(ref s) => s.chars().next().map(PaletteKey::Char),
         _ => None,
     };
+    if let Some(text) = paste {
+        // Single-line input: take the first line only.
+        for c in text.lines().next().unwrap_or("").chars() {
+            let _ = app.command_palette.handle_key(PaletteKey::Char(c));
+        }
+    }
     if let Some(k) = pk {
         if let Some(action) = app.command_palette.handle_key(k) {
             dispatch_palette_action(app, action, event_loop);
         }
-        app.request_redraw();
     }
+    sync_palette_preview(app);
+    app.request_redraw();
     true
 }
 
-/// Map a palette selection onto the existing feature it represents. Most
-/// actions have a 1:1 `MenuAction` equivalent, so we reuse
-/// `shortcuts::handle_menu_action` instead of duplicating its logic
-/// (pane sizing, resize-on-split, exit-on-last-tab-close, etc).
+/// Mouse hover over the palette: highlight the row under the cursor.
+pub fn palette_cursor_moved(app: &mut App) {
+    let (x, y) = (app.cursor_x, app.cursor_y);
+    if app.command_palette.mouse_move(x, y) {
+        sync_palette_preview(app);
+        app.request_redraw();
+    }
+}
+
+/// Left click: run the row under the cursor (Cmd+click keeps the palette
+/// open where sensible); clicking outside the panel closes it.
+pub fn palette_click(app: &mut App, event_loop: &ActiveEventLoop) {
+    let (x, y) = (app.cursor_x, app.cursor_y);
+    let keep = app.modifiers.super_key();
+    if let Some(action) = app.command_palette.mouse_click(x, y, keep) {
+        dispatch_palette_action(app, action, event_loop);
+    }
+    sync_palette_preview(app);
+    app.request_redraw();
+}
+
+/// Wheel over the palette scrolls its list; positive `lines` scrolls up.
+pub fn palette_wheel(app: &mut App, lines: i32) {
+    app.command_palette.scroll_lines(lines);
+    app.request_redraw();
+}
+
+/// Commit a theme: update renderer and the persisted config together.
+fn apply_theme(app: &mut App, name: &str) {
+    if let Some(theme) = crate::config::Config::theme_by_name(name) {
+        app.config.theme = theme.clone();
+        app.config.theme_name = name.to_string();
+        app.renderer.set_theme(theme);
+    }
+}
+
+/// Map a palette selection onto the existing feature it represents. Menu
+/// entries go through `shortcuts::handle_menu_action` instead of duplicating
+/// its logic (pane sizing, resize-on-split, exit-on-last-tab-close, etc).
 fn dispatch_palette_action(app: &mut App, action: PaletteAction, event_loop: &ActiveEventLoop) {
-    let menu_action = match action {
-        PaletteAction::NewTab => Some(MenuAction::NewTab),
-        PaletteAction::CloseTab => Some(MenuAction::CloseTab),
-        PaletteAction::SplitH => Some(MenuAction::SplitH),
-        PaletteAction::SplitV => Some(MenuAction::SplitV),
-        PaletteAction::Pane(cmd) => Some(MenuAction::Pane(cmd)),
-        PaletteAction::Search => Some(MenuAction::Find),
-        PaletteAction::Ssh => Some(MenuAction::SshConnect),
-        PaletteAction::Ai => Some(MenuAction::AiAssistant),
-        PaletteAction::Hud => Some(MenuAction::HudToggle),
-        PaletteAction::TimeWarp => Some(MenuAction::TimeWarp),
-        PaletteAction::Recording => Some(MenuAction::Recording),
-        PaletteAction::FileManager => Some(MenuAction::FileManager),
-        PaletteAction::GitPanel => Some(MenuAction::GitPanel),
-        PaletteAction::Docker => Some(MenuAction::DockerPanel),
-        PaletteAction::Cicd => Some(MenuAction::CicdPanel),
-        PaletteAction::Heatmap => Some(MenuAction::Heatmap),
-        PaletteAction::SecretMask => Some(MenuAction::SecretMask),
-        PaletteAction::AuditLog => Some(MenuAction::AuditLog),
-        PaletteAction::Teaching => Some(MenuAction::TeachingMode),
-        PaletteAction::Observer => Some(MenuAction::ObserverMode),
-        PaletteAction::Welcome => Some(MenuAction::Welcome),
-        PaletteAction::Prefs => Some(MenuAction::Preferences),
-        PaletteAction::NetworkMonitor => Some(MenuAction::NetworkMonitor),
-        PaletteAction::ProcessTree => Some(MenuAction::ProcessTree),
-        PaletteAction::SystemInfo => Some(MenuAction::SystemInfo),
-        PaletteAction::WebView => Some(MenuAction::WebView),
-        PaletteAction::Effect(e) => Some(match e {
-            PaletteEffect::Crt => MenuAction::CrtEffect,
-            PaletteEffect::Glitch => MenuAction::GlitchEffect,
-            PaletteEffect::Neon => MenuAction::NeonEffect,
-            PaletteEffect::Matrix => MenuAction::MatrixEffect,
-            PaletteEffect::Amber => MenuAction::AmberEffect,
-            PaletteEffect::Hologram => MenuAction::HologramEffect,
-            PaletteEffect::Pixelate => MenuAction::PixelateEffect,
-            PaletteEffect::Thermal => MenuAction::ThermalEffect,
-            PaletteEffect::Off => MenuAction::NoEffect,
-        }),
-        PaletteAction::Theme(name) => {
-            if let Some(theme) = crate::config::Config::theme_by_name(&name) {
-                app.renderer.set_theme(theme);
-                app.config.theme_name = name;
-            }
-            None
+    match action {
+        PaletteAction::Menu(m) => super::shortcuts::handle_menu_action(app, m, event_loop),
+        PaletteAction::Theme(name) => apply_theme(app, &name),
+        PaletteAction::FontSize(size) => {
+            app.config.font_size = size.clamp(8.0, 32.0);
+            super::shortcuts::reinit_font_from_config(app);
         }
-    };
-    if let Some(ma) = menu_action {
-        super::shortcuts::handle_menu_action(app, ma, event_loop);
+        PaletteAction::OpenUrl(input) => crate::network::browser::open(app, &input),
+        PaletteAction::Ssh(target) => {
+            let saved = app.ssh_dialog.saved_hosts().into_iter().find(|h| h.alias == target);
+            let req = saved.or_else(|| {
+                let (user, host, port) = parse_ssh_spec(&target)?;
+                let user = user
+                    .or_else(|| std::env::var("USER").ok())
+                    .unwrap_or_else(|| "root".to_string());
+                Some(crate::network::SshConnectRequest { alias: String::new(), host, port, user })
+            });
+            match req {
+                Some(req) => super::shortcuts::do_ssh_connect(app, req),
+                None => log::warn!("palette: unknown ssh target '{target}'"),
+            }
+        }
+        PaletteAction::Cd(path) => {
+            let line = format!("cd {}\n", shell_quote_path(&path));
+            app.wm.active_pane_mut().write(line.as_bytes());
+        }
+        PaletteAction::Shell(cmd) => {
+            app.wm.active_pane_mut().write(format!("{cmd}\n").as_bytes());
+        }
+        PaletteAction::AskAi(question) => {
+            // Prefill the AI panel with the question and submit it right away.
+            app.ai_panel.visible = true;
+            app.ai_panel.input = question.clone();
+            app.ai_panel.response = None;
+            app.ai_panel.error = None;
+            app.ai_panel.loading = true;
+            let ctx = crate::ai::context::TermContext::collect();
+            let rx = app.llm.ask(&question, ctx);
+            app.ai_panel.set_receiver(rx);
+            app.advisor.clear();
+        }
+        PaletteAction::SwitchTab(i) => {
+            if i < app.wm.tab_count() {
+                app.wm.switch_tab(i);
+                super::shortcuts::sync_webview_for_tab(app);
+                app.update_title();
+            }
+        }
+        PaletteAction::NextTab => {
+            app.wm.next_tab();
+            super::shortcuts::sync_webview_for_tab(app);
+            app.update_title();
+        }
+        PaletteAction::PrevTab => {
+            app.wm.prev_tab();
+            super::shortcuts::sync_webview_for_tab(app);
+            app.update_title();
+        }
+        PaletteAction::Template(_) => {}
     }
 }
 
@@ -618,7 +757,7 @@ fn handle_cicd(app: &mut App, event: &KeyEvent) -> bool {
 fn handle_heatmap(app: &mut App, event: &KeyEvent) -> bool {
     let hk = match event.logical_key {
         Key::Named(NamedKey::Escape) => HeatmapKey::Escape,
-        _ => HeatmapKey::Escape,
+        _ => return true, // only Esc closes; other keys are swallowed
     };
     app.heatmap.handle_key(hk);
     app.request_redraw();

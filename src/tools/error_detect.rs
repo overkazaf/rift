@@ -1,4 +1,4 @@
-use crate::config::{Rgb, Theme};
+use crate::config::Theme;
 use crate::renderer::font::FontManager;
 
 pub struct ErrorDetector {
@@ -190,91 +190,45 @@ impl ErrorNotification {
         font: &mut FontManager,
         theme: &Theme,
     ) {
+        use crate::ui::kit::{Ctx, Rect, Tokens, Tone};
         if !self.visible {
             return;
         }
         let Some(ref error) = self.error else {
             return;
         };
+        let tk = Tokens::new(theme, font.cell_width, font.cell_height);
+        let mut cx = Ctx::new(buffer, width, height, font, &tk);
 
-        let cw = font.cell_width;
-        let ch = font.cell_height;
-
-        let notif_w = (35 * cw).min(width / 2);
-        let notif_h = ch * 6 + 16;
-        let nx = width.saturating_sub(notif_w + 16);
-        let ny = height.saturating_sub(notif_h + 16);
-
-        // Dark red-tinted background
-        let bg_px = crate::ui::pack(40, 15, 15);
-        crate::ui::fill_rect(buffer, width, nx, ny, notif_w, notif_h, bg_px);
-
-        // Red left accent border (3px)
-        let red: Rgb = (243, 139, 168);
-        let red_px = crate::ui::pack(red.0, red.1, red.2);
-        for y in ny..ny + notif_h {
-            for dx in 0..3 {
-                crate::ui::set_px(buffer, width, y, nx + dx, red_px);
-            }
-        }
-
-        let mut ty = ny + 8;
-        let max_chars = (notif_w - 20) / cw;
-
-        // Error type header
-        let header = format!("! {}", error.error_type);
-        crate::ui::render_text(
-            buffer,
-            width,
-            font,
-            crate::ui::trunc(&header, max_chars),
-            nx + 12,
-            ty,
-            red,
+        let diag_lines: Vec<&str> = self.diagnosis.as_deref().map(|d| d.lines().take(3).collect()).unwrap_or_default();
+        let body_rows = 2 + diag_lines.len().max(1);
+        let w = (46 * tk.cw + 2 * tk.sp.lg).min(width.saturating_sub(2 * tk.sp.lg));
+        let h = body_rows * tk.row_h + 2 * tk.sp.sm + 2 * tk.sp.xs;
+        let rect = Rect::new(
+            width.saturating_sub(w + tk.sp.lg),
+            height.saturating_sub(h + tk.sp.lg),
+            w,
+            h,
         );
-        ty += ch + 4;
+        let inner = cx.float(rect);
+        // Danger accent bar down the left edge.
+        cx.fill_rrect(Rect::new(rect.x + tk.sp.sm, rect.y + tk.sp.sm, 3 * tk.scale, rect.h - 2 * tk.sp.sm), tk.scale + 1, tk.danger);
+        let x = inner.x + 3 * tk.scale + tk.sp.sm;
+        let avail = inner.right().saturating_sub(x);
+        let mut y = inner.y + tk.sp.xs;
 
-        // Error message (truncated)
-        crate::ui::render_text(
-            buffer,
-            width,
-            font,
-            crate::ui::trunc(&error.message, max_chars),
-            nx + 12,
-            ty,
-            theme.fg,
-        );
-        ty += ch + 4;
-
-        // Diagnosis (if available)
-        if let Some(ref diag) = self.diagnosis {
-            for line in diag.lines().take(3) {
-                if ty + ch >= ny + notif_h - 4 {
-                    break;
-                }
-                let green: Rgb = (166, 227, 161);
-                crate::ui::render_text(
-                    buffer,
-                    width,
-                    font,
-                    crate::ui::trunc(line, max_chars),
-                    nx + 12,
-                    ty,
-                    green,
-                );
-                ty += ch + 2;
+        // Error type badge
+        cx.badge_line(x, y, &error.error_type, Tone::Danger);
+        y += tk.row_h;
+        cx.line_fit(x, y, avail, &error.message, tk.text);
+        y += tk.row_h;
+        if self.diagnosis.is_some() {
+            for line in &diag_lines {
+                cx.line_fit(x, y, avail, line, tk.success);
+                y += tk.row_h;
             }
         } else {
-            let dim_text: Rgb = (108, 112, 134);
-            crate::ui::render_text(
-                buffer,
-                width,
-                font,
-                "analyzing...",
-                nx + 12,
-                ty,
-                dim_text,
-            );
+            cx.line_fit(x, y, avail, "analyzing...", tk.text_muted);
         }
     }
 }

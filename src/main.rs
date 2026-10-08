@@ -3,6 +3,7 @@
 extern crate objc;
 
 mod app;
+mod blocks_ui;
 mod config;
 mod input;
 mod pty;

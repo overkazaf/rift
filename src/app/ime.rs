@@ -44,6 +44,10 @@ pub fn handle_ime(app: &mut App, ime: Ime) {
 
 /// Route committed IME text to the topmost text-accepting overlay, or the PTY.
 fn commit_text(app: &mut App, text: &str) {
+    // The inline tab-rename field takes IME commits first.
+    if super::tabs::insert_text(app, text) {
+        return;
+    }
     // Modal overlays that sit above everything and take no free text: drop input.
     if app.exec_preview.visible
         || app.timewarp_browser.active
@@ -153,7 +157,13 @@ fn cursor_cell_rect(
         .map(|(_, r, _)| r)
         .unwrap_or(content_area);
     let term = &wm.active_pane().terminal;
-    (rect.x + term.cursor_col * cw, rect.y + term.cursor_row * ch, cw, ch)
+    // Fold- and scroll-aware: find the cursor's absolute line in the view.
+    let cursor_abs = term.scrollback.len() + term.cursor_row;
+    let screen_row = crate::blocks_ui::view::view_abs_rows(term)
+        .iter()
+        .position(|r| *r == Some(cursor_abs))
+        .unwrap_or(term.cursor_row);
+    (rect.x + term.cursor_col * cw, rect.y + screen_row * ch, cw, ch)
 }
 
 /// Tell the OS where the cursor is so the candidate window follows it.

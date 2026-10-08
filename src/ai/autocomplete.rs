@@ -293,98 +293,71 @@ impl Autocomplete {
         cursor_x: usize,
         cursor_y: usize,
     ) {
+        use crate::ui::kit::{scroll_into_view, Ctx, ListItem, Rect, Tokens, Tone};
         if !self.visible || self.suggestions.is_empty() { return; }
+        let tk = Tokens::new(theme, font.cell_width, font.cell_height);
+        let mut cx = Ctx::new(buffer, buf_width, buf_height, font, &tk);
 
-        let cw = font.cell_width;
-        let ch = font.cell_height;
-        let row_h = ch + 6;
         let max_items = 8.min(self.suggestions.len());
-        let popup_h = max_items * row_h + 8;
+        let popup_h = max_items * tk.row_h + 2 * tk.sp.sm;
 
-        let max_text_w = self.suggestions.iter()
-            .take(max_items)
-            .map(|s| s.text.len() + s.description.len() + 4)
+        // Width: widest "icon text   description" among the visible window.
+        let scroll = scroll_into_view(self.selected, 0, max_items);
+        let window = &self.suggestions[scroll..(scroll + max_items).min(self.suggestions.len())];
+        let want_cols = window.iter()
+            .map(|s| 2 + s.text.chars().count() + if s.description.is_empty() { 0 } else { 3 + s.description.chars().count() })
             .max()
             .unwrap_or(20);
-        let popup_w = (max_text_w * cw + 24).min(buf_width / 2);
+        let popup_w = (want_cols * tk.cw + 4 * tk.sp.md + 2 * tk.sp.sm)
+            .clamp(24 * tk.cw, (buf_width / 2).max(24 * tk.cw))
+            .min(buf_width);
 
         let px = cursor_x.min(buf_width.saturating_sub(popup_w));
-        let py = if cursor_y + ch + popup_h < buf_height {
-            cursor_y + ch + 2
+        let py = if cursor_y + tk.ch + popup_h + tk.sp.sm < buf_height {
+            cursor_y + tk.ch + tk.sp.xs
         } else {
-            cursor_y.saturating_sub(popup_h + 2)
+            cursor_y.saturating_sub(popup_h + tk.sp.xs)
         };
 
-        let bg = darken(theme.bg, 8);
-        let bg_px = pack_rgb(bg);
-        let border = lighten_rgb(bg, 20);
-        let border_px = pack_rgb(border);
-
-        for y in py..((py + popup_h).min(buf_height)) {
-            let off = y * buf_width + px;
-            let end = (off + popup_w).min(buffer.len());
-            if off < buffer.len() {
-                buffer[off..end].fill(bg_px);
-            }
-            if off < buffer.len() { buffer[off] = border_px; }
-            if end > 0 && end - 1 < buffer.len() { buffer[end - 1] = border_px; }
-        }
-        for x in px..((px + popup_w).min(buf_width)) {
-            let top = py * buf_width + x;
-            let bot = ((py + popup_h).min(buf_height) - 1) * buf_width + x;
-            if top < buffer.len() { buffer[top] = border_px; }
-            if bot < buffer.len() { buffer[bot] = border_px; }
-        }
-
-        for (i, suggestion) in self.suggestions.iter().take(max_items).enumerate() {
-            let iy = py + 4 + i * row_h;
-            let is_selected = i == self.selected;
-
-            if is_selected {
-                let hl = lighten_rgb(bg, 18);
-                let hl_px = pack_rgb(hl);
-                for y in iy..(iy + row_h).min(buf_height) {
-                    let off = y * buf_width + px + 2;
-                    let end = (off + popup_w - 4).min(buffer.len());
-                    if off < buffer.len() { buffer[off..end].fill(hl_px); }
-                }
-            }
-
-            let icon = match suggestion.kind {
+        let inner = cx.float(Rect::new(px, py, popup_w, popup_h));
+        let labels: Vec<String> = window.iter().map(|s| {
+            let icon = match s.kind {
                 SuggestionKind::Command => '>',
                 SuggestionKind::File => '-',
                 SuggestionKind::Directory => '/',
                 SuggestionKind::History => '*',
             };
-            let icon_color = dim_rgb(theme.cursor, 0.7);
-            render_char(buffer, buf_width, font, icon, px + 6, iy + 3, icon_color);
-
-            let text_color = if is_selected { theme.fg } else { dim_rgb(theme.fg, 0.75) };
-            let text_x = px + 6 + cw + 4;
-            for (ci, c) in suggestion.text.chars().enumerate() {
-                let gx = text_x + ci * cw;
-                if gx + cw >= px + popup_w - 8 { break; }
-                if c == ' ' { continue; }
-                render_char(buffer, buf_width, font, c, gx, iy + 3, text_color);
+            format!("{} {}", icon, s.text)
+        }).collect();
+        let items: Vec<ListItem> = window.iter().zip(&labels).map(|(s, l)| {
+            let it = ListItem::new(l).meta(&s.description);
+            match s.kind {
+                SuggestionKind::Directory => it.tone(Tone::Accent),
+                SuggestionKind::History => it.dim(),
+                _ => it,
             }
-
-            if !suggestion.description.is_empty() {
-                let desc_w = suggestion.description.len() * cw;
-                let desc_x = (px + popup_w).saturating_sub(desc_w + 10);
-                let desc_color = dim_rgb(theme.fg, 0.3);
-                for (ci, c) in suggestion.description.chars().enumerate() {
-                    let gx = desc_x + ci * cw;
-                    if gx + cw >= px + popup_w - 4 { break; }
-                    render_char(buffer, buf_width, font, c, gx, iy + 3, desc_color);
-                }
-            }
-        }
+        }).collect();
+        cx.list(inner, &items, Some(self.selected - scroll), 0, None);
     }
 }
 
-use crate::ui::{pack_rgb, darken, lighten as lighten_rgb, dim as dim_rgb};
+#[cfg(test)]
+mod qa_tests {
+    use super::*;
+    use crate::ui::kit::gallery::qa::each_theme;
 
-fn render_char(buffer: &mut [u32], buf_w: usize, font: &mut crate::renderer::font::FontManager, c: char, x: usize, y: usize, color: crate::config::Rgb) {
-    // Delegate to render_text for a single character
-    crate::ui::render_text(buffer, buf_w, font, &c.to_string(), x, y, color);
+    #[test]
+    fn renders_popup() {
+        let mut a = Autocomplete::new();
+        a.visible = true;
+        let mk = |t: &str, k: SuggestionKind, d: &str| Suggestion { text: t.into(), kind: k, description: d.into() };
+        a.suggestions = vec![
+            mk("git status", SuggestionKind::History, ""),
+            mk("grep", SuggestionKind::Command, "search text patterns"),
+            mk("src/", SuggestionKind::Directory, ""),
+            mk("Cargo.toml", SuggestionKind::File, "1.2K"),
+        ];
+        a.selected = 1;
+        each_theme("autocomplete", |b, w, h, f, t| a.render(b, w, h, f, t, 200, 300));
+    }
 }

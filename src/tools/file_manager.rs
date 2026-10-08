@@ -123,124 +123,53 @@ impl FileManager {
         font: &mut crate::renderer::font::FontManager,
         theme: &crate::config::Theme,
     ) {
+        use crate::ui::kit::{center_scroll, Ctx, ListItem, PanelSpec, Side, Tokens, Tone};
         if !self.visible {
             return;
         }
+        let tk = Tokens::new(theme, font.cell_width, font.cell_height);
+        let mut cx = Ctx::new(buffer, width, height, font, &tk);
 
-        let cw = font.cell_width;
-        let ch = font.cell_height;
-
-        let panel_w = (width * 3 / 10).max(20 * cw);
-        let panel_h = height;
-
-        let bg = crate::ui::darken(theme.bg, 10);
-        let bg_px = crate::ui::pack_rgb(bg);
-        crate::ui::fill_rect(buffer, width, 0, 0, panel_w, panel_h, bg_px);
-
-        let border = crate::ui::dim(theme.cursor, 0.3);
-        let border_px = crate::ui::pack_rgb(border);
-        for y in 0..panel_h {
-            crate::ui::set_px(buffer, width, y, panel_w - 1, border_px);
-        }
-
-        let pad = 8;
-        let max_chars = (panel_w - pad * 2) / cw;
-        let mut ty = 8;
-
+        let panel_w = (width * 3 / 10).max(28 * tk.cw);
+        let rect = cx.side_panel(Side::Left, panel_w).inset(tk.sp.sm, tk.sp.sm);
         let dir_name = self
             .cwd
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| self.cwd.display().to_string());
-        crate::ui::render_text(
-            buffer,
-            width,
-            font,
-            crate::ui::trunc(&dir_name, max_chars),
-            pad,
-            ty,
-            theme.cursor,
-        );
-        ty += ch + 6;
-
-        let sep_color = crate::ui::dim(theme.fg, 0.15);
-        let sep_px = crate::ui::pack_rgb(sep_color);
-        for x in pad..panel_w.saturating_sub(pad) {
-            crate::ui::set_px(buffer, width, ty, x, sep_px);
-        }
-        ty += 6;
-
-        for (i, entry) in self.entries.iter().enumerate() {
-            if ty + ch >= panel_h.saturating_sub(20) {
-                break;
-            }
-            let is_selected = i == self.selected;
-
-            if is_selected {
-                let hl = crate::ui::lighten(bg, 12);
-                let hl_px = crate::ui::pack_rgb(hl);
-                if ty >= 2 {
-                    crate::ui::fill_rect(buffer, width, 2, ty - 2, panel_w - 4, ch + 4, hl_px);
-                }
-                let accent_px = crate::ui::pack_rgb(theme.cursor);
-                for y in ty..ty + ch {
-                    crate::ui::set_px(buffer, width, y, 2, accent_px);
-                    crate::ui::set_px(buffer, width, y, 3, accent_px);
-                }
-            }
-
-            let (icon, icon_color) = if entry.is_dir {
-                ("/", theme.cursor)
-            } else {
-                let ext = entry.name.rsplit('.').next().unwrap_or("");
-                let color = match ext {
-                    "rs" => (243, 139, 168),
-                    "py" => (137, 180, 250),
-                    "js" | "ts" => (249, 226, 175),
-                    "md" => (148, 226, 213),
-                    "toml" | "json" | "yaml" => (166, 227, 161),
-                    _ => crate::ui::dim(theme.fg, 0.5),
-                };
-                ("-", color)
-            };
-            crate::ui::render_text(buffer, width, font, icon, pad, ty, icon_color);
-
-            let name_color = if is_selected {
-                theme.fg
-            } else {
-                crate::ui::dim(theme.fg, 0.7)
-            };
-            let name_display = crate::ui::trunc(&entry.name, max_chars.saturating_sub(4));
-            crate::ui::render_text(buffer, width, font, name_display, pad + 2 * cw, ty, name_color);
-
-            if !entry.is_dir && entry.size > 0 {
-                let size_str = format_size(entry.size);
-                let sx = panel_w.saturating_sub(size_str.len() * cw + pad);
-                crate::ui::render_text(
-                    buffer,
-                    width,
-                    font,
-                    &size_str,
-                    sx,
-                    ty,
-                    crate::ui::dim(theme.fg, 0.3),
-                );
-            }
-
-            ty += ch + 2;
-        }
-
         let count = format!("{} items", self.entries.len());
-        let count_y = panel_h.saturating_sub(ch + 8);
-        crate::ui::render_text(
-            buffer,
-            width,
-            font,
-            &count,
-            pad,
-            count_y,
-            crate::ui::dim(theme.fg, 0.3),
-        );
+        let spec = PanelSpec::new("Files")
+            .sub(&dir_name)
+            .badge(&count, Tone::Neutral)
+            .hints(&[("Up/Down", "move"), ("Enter", "open"), ("Esc", "close")]);
+        let body = cx.panel(rect, &spec);
+
+        if self.entries.is_empty() {
+            cx.empty_state(body, "Empty directory", "");
+            return;
+        }
+        let labels: Vec<String> = self
+            .entries
+            .iter()
+            .map(|e| if e.is_dir && e.name != ".." { format!("{}/", e.name) } else { e.name.clone() })
+            .collect();
+        let sizes: Vec<String> = self
+            .entries
+            .iter()
+            .map(|e| if !e.is_dir && e.size > 0 { format_size(e.size) } else { String::new() })
+            .collect();
+        let items: Vec<ListItem> = self
+            .entries
+            .iter()
+            .enumerate()
+            .map(|(i, e)| {
+                let it = ListItem::new(&labels[i]).meta(&sizes[i]);
+                if e.is_dir { it.tone(Tone::Accent) } else { it }
+            })
+            .collect();
+        let vis = cx.rows_fit(body.h);
+        let scroll = center_scroll(self.selected, items.len(), vis);
+        cx.list(body, &items, Some(self.selected), scroll, None);
     }
 }
 

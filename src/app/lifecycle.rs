@@ -246,7 +246,10 @@ pub fn redraw(app: &mut App) {
         dragging_border: app.dragging_border,
         zoomed: app.wm.active_tab().is_zoomed(),
     };
+    app.renderer.chrome = app.mui.chrome(std::time::Instant::now());
     app.renderer.render_tabbed_with_cmd(&app.wm, content_area, &mut buffer, width, height, cmd_held, &app.blocks, split_ui);
+    // Command-block chrome (gutter bars, chips, toolbar) on the output buffer
+    crate::blocks_ui::draw::draw(&app.wm, &mut app.renderer, &app.blocks_ui, &mut buffer, width, height, content_area);
     let t_overlays = std::time::Instant::now();
 
     // Selection highlight
@@ -256,15 +259,19 @@ pub fn redraw(app: &mut App) {
             .find(|(_, _, active)| *active)
             .map(|(_, r, _)| r)
             .unwrap_or(content_area);
+        let row_abs = crate::blocks_ui::view::view_abs_rows(&app.wm.active_pane().terminal);
         app.renderer.render_selection(
-            &app.selection, &mut buffer,
+            &app.selection, &row_abs, &mut buffer,
             width as usize, height as usize, sel_rect,
         );
     }
 
     // IME: position the OS candidate window and draw inline preedit text
-    super::ime::update_cursor_area(&app.wm, &app.renderer, window, &mut app.ime_area, content_area);
-    super::ime::render_preedit(&app.wm, &mut app.renderer, &app.ime_preedit, &mut buffer, width as usize, content_area);
+    // (While renaming a tab the preedit belongs to the rename field instead.)
+    if app.mui.tabs.editor.is_none() {
+        super::ime::update_cursor_area(&app.wm, &app.renderer, window, &mut app.ime_area, content_area);
+        super::ime::render_preedit(&app.wm, &mut app.renderer, &app.ime_preedit, &mut buffer, width as usize, content_area);
+    }
 
     // Search match highlights
     if app.search.visible && !app.search.matches.is_empty() {
@@ -272,22 +279,24 @@ pub fn redraw(app: &mut App) {
         let ch = app.renderer.cell_height();
         let w = width as usize;
         let terminal = &app.wm.active_pane().terminal;
-        let sb_len = terminal.scrollback.len();
-        let offset = terminal.scroll_offset;
         let accent = app.renderer.theme.cursor;
+        // Map absolute line -> on-screen row within the active pane (fold-aware)
+        let row_abs = crate::blocks_ui::view::view_abs_rows(terminal);
+        let pane_rect = app.wm.pane_layouts(content_area)
+            .into_iter()
+            .find(|(_, _, active)| *active)
+            .map(|(_, r, _)| r)
+            .unwrap_or(content_area);
+        let max_col = pane_rect.width / cw.max(1);
 
         for (i, m) in app.search.matches.iter().enumerate() {
-            // Convert scrollback-absolute row to visible row
-            let visible_start = sb_len.saturating_sub(offset);
-            let visible_end = visible_start + terminal.rows;
-            if m.row < visible_start || m.row >= visible_end { continue; }
-
-            let screen_row = m.row - visible_start;
-            let y0 = tbh + screen_row * ch;
+            let Some(screen_row) = row_abs.iter().position(|r| *r == Some(m.row)) else { continue };
+            let y0 = pane_rect.y + screen_row * ch;
+            if y0 + ch > pane_rect.y + pane_rect.height { continue; }
             let is_current = i == app.search.current_match;
 
-            for col in m.col_start..m.col_end {
-                let x0 = col * cw;
+            for col in m.col_start..m.col_end.min(max_col) {
+                let x0 = pane_rect.x + col * cw;
                 // Highlight: current match = accent bg, others = dim accent bg
                 let (hr, hg, hb) = if is_current { accent } else { crate::ui::dim(accent, 0.3) };
                 let alpha: u32 = if is_current { 120 } else { 60 };
@@ -646,51 +655,18 @@ pub fn redraw(app: &mut App) {
 
     // Observer summary overlay
     if let Some(ref summary) = app.observer_summary {
-        let w = width as usize;
-        let h = height as usize;
-        let cw = app.renderer.cell_width();
-        let ch = app.renderer.cell_height();
-        let theme = &app.renderer.theme;
+        crate::ui::observer_summary::render(
+            &mut buffer, width as usize, height as usize,
+            &mut app.renderer.font, &app.renderer.theme, summary, app.observer.enabled,
+        );
+    }
 
-        // Dim background
-        for px in buffer.iter_mut() {
-            let r = ((*px >> 16) & 0xff) / 3;
-            let g = ((*px >> 8) & 0xff) / 3;
-            let b = (*px & 0xff) / 3;
-            *px = (r << 16) | (g << 8) | b;
-        }
-
-        let lines: Vec<&str> = summary.lines().collect();
-        let panel_w = (50 * cw).min(w - 40);
-        let panel_h = ((lines.len() + 4) * (ch + 3) + 40).min(h - 40);
-        let px0 = (w - panel_w) / 2;
-        let py0 = (h - panel_h) / 2;
-
-        let bg = crate::ui::lighten(theme.bg, 6);
-        crate::ui::fill_rect(&mut buffer, w, px0, py0, panel_w, panel_h, crate::ui::pack_rgb(bg));
-        crate::ui::draw_border(&mut buffer, w, px0, py0, panel_w, panel_h,
-            crate::ui::pack_rgb(crate::ui::dim(theme.cursor, 0.4)));
-
-        let mut ty = py0 + 12;
-        let enabled_text = if app.observer.enabled { "ON" } else { "OFF" };
-        let title = format!("AI Observer [{}]", enabled_text);
-        crate::ui::render_text(&mut buffer, w, &mut app.renderer.font, &title, px0 + 16, ty, theme.cursor);
-        ty += ch + 8;
-
-        let max_chars = (panel_w - 32) / cw;
-        for line in &lines {
-            if ty + ch >= py0 + panel_h - ch - 10 { break; }
-            let color = if line.starts_with("##") { theme.cursor }
-                else if line.starts_with("  ") { crate::ui::dim(theme.fg, 0.7) }
-                else { theme.fg };
-            crate::ui::render_text(&mut buffer, w, &mut app.renderer.font,
-                crate::ui::trunc(line, max_chars), px0 + 16, ty, color);
-            ty += ch + 3;
-        }
-
-        let help = "Esc: close  V: toggle observer";
-        crate::ui::render_text(&mut buffer, w, &mut app.renderer.font, help,
-            px0 + 16, py0 + panel_h - ch - 10, crate::ui::dim(theme.fg, 0.3));
+    // UI Gallery (Help > UI Gallery, or RIFT_UI_GALLERY=1)
+    if crate::ui::kit::gallery::visible() {
+        crate::ui::kit::gallery::render(
+            &mut buffer, width as usize, height as usize,
+            &mut app.renderer.font, &app.renderer.theme,
+        );
     }
 
     // Smart History Search — full-width bottom panel, drawn after every other overlay.
@@ -701,44 +677,34 @@ pub fn redraw(app: &mut App) {
         );
     }
 
-    // Loading spinners for async operations
-    {
-        let w = width as usize;
-        let h = height as usize;
-        let ch = app.renderer.cell_height();
-        let cw = app.renderer.cell_width();
+    // Loading spinner for async operations (the AI panel animates its own).
+    if let Some(ref c) = app.ssh_connecting {
+        let msg = format!("Connecting to {}@{}:{}", c.req.user, c.req.host, c.req.port);
         let elapsed = app.renderer.start_time.elapsed().as_secs_f32();
-        let accent = app.renderer.theme.cursor;
-        let fg = app.renderer.theme.fg;
+        let tk = crate::ui::kit::Tokens::new(&app.renderer.theme, app.renderer.font.cell_width, app.renderer.font.cell_height);
+        let mut cx = crate::ui::kit::Ctx::new(&mut buffer, width as usize, height as usize, &mut app.renderer.font, &tk);
+        cx.spinner_toast(&msg, elapsed);
+    }
 
-        // SSH connecting spinner (bottom center)
-        if app.ssh_connecting.is_some() {
-            let msg = if let Some(ref c) = app.ssh_connecting {
-                format!("Connecting to {}@{}:{}", c.req.user, c.req.host, c.req.port)
-            } else { String::new() };
-
-            let bar_w = (msg.len() + 6) * cw;
-            let bar_x = (w.saturating_sub(bar_w)) / 2;
-            let bar_y = h.saturating_sub(ch * 2 + 20);
-
-            // Dark backdrop bar
-            let bar_bg = crate::ui::pack(20, 22, 35);
-            crate::ui::fill_rect(&mut buffer, w, bar_x.saturating_sub(8), bar_y.saturating_sub(4), bar_w + 16, ch + 8, bar_bg);
-            let border = crate::ui::dim(accent, 0.4);
-            crate::ui::draw_border(&mut buffer, w, bar_x.saturating_sub(8), bar_y.saturating_sub(4), bar_w + 16, ch + 8, crate::ui::pack_rgb(border));
-
-            crate::ui::render_spinner(&mut buffer, w, &mut app.renderer.font, bar_x, bar_y, &msg, accent, fg, elapsed);
+    // Inline tab rename field and the right-click menu sit above the overlays.
+    if let Some(ed) = &app.mui.tabs.editor {
+        let slot = crate::ui::tabbar::layout(width as usize, app.wm.tab_count(), tbh)
+            .tabs
+            .get(ed.idx)
+            .copied();
+        if let Some(slot) = slot {
+            crate::ui::tabbar::render_editor(
+                &mut buffer, width as usize, height as usize,
+                &mut app.renderer.font, &app.renderer.theme,
+                ed, &app.ime_preedit, slot, tbh,
+            );
         }
-
-        // AI thinking spinner (in AI panel area)
-        if app.ai_panel.visible && app.ai_panel.loading {
-            let panel_y = h.saturating_sub(h / 3);
-            let spinner_y = panel_y + ch * 3 + 16;
-            if spinner_y + ch < h {
-                crate::ui::render_spinner(&mut buffer, w, &mut app.renderer.font, 24, spinner_y, "Thinking", accent, crate::ui::dim(fg, 0.6), elapsed);
-                crate::ui::render_dots(&mut buffer, w, &mut app.renderer.font, 24 + 12 * cw, spinner_y, accent, elapsed);
-            }
-        }
+    }
+    if app.mui.menu.visible {
+        app.mui.menu.render(
+            &mut buffer, width as usize, height as usize,
+            &mut app.renderer.font, &app.renderer.theme,
+        );
     }
 
     // Preview-Then-Accept danger confirmation — drawn last, on top of every
@@ -1039,6 +1005,12 @@ pub fn about_to_wait(app: &mut App, event_loop: &ActiveEventLoop) {
         app.hud.update();
     }
 
+    // Scrollbar auto-hide, drag-select auto-scroll, tab-list bookkeeping.
+    if let Some(t) = super::mouse::tick(app) {
+        wake_at = wake_at.min(t);
+        event_loop.set_control_flow(ControlFlow::WaitUntil(wake_at));
+    }
+
     // Error notification auto-dismiss
     app.error_notif.tick();
 
@@ -1049,6 +1021,9 @@ pub fn about_to_wait(app: &mut App, event_loop: &ActiveEventLoop) {
     if app.notifier.check(app.window_focused) {
         crate::tools::notify::Notifier::send("rift", "Command completed");
     }
+
+    // Command blocks: running-block animation + toast expiry
+    crate::blocks_ui::tick(app, &mut wake_at);
 
     // Request redraw if anything needs it
     let ssh_pending = app.ssh_connecting.is_some();

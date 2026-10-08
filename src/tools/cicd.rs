@@ -160,90 +160,48 @@ impl CicdPanel {
         font: &mut crate::renderer::font::FontManager,
         theme: &crate::config::Theme,
     ) {
+        use crate::ui::kit::{center_scroll, Column, Ctx, PanelSpec, TableRow, Tokens, Tone, Width};
         if !self.visible {
             return;
         }
-        // Dim the background
-        for px in buffer.iter_mut() {
-            let r = ((*px >> 16) & 0xff) / 3;
-            let g = ((*px >> 8) & 0xff) / 3;
-            let b = (*px & 0xff) / 3;
-            *px = (r << 16) | (g << 8) | b;
-        }
+        let tk = Tokens::new(theme, font.cell_width, font.cell_height);
+        let mut cx = Ctx::new(buffer, width, height, font, &tk);
+        cx.backdrop(tk.backdrop);
 
-        let cw = font.cell_width;
-        let ch = font.cell_height;
-        let pw = (45 * cw).min(width.saturating_sub(40));
-        let item_h = ch + 4;
-        let ph = ((self.runs.len() + 5) * item_h + 40).min(height.saturating_sub(40));
-        let px = (width.saturating_sub(pw)) / 2;
-        let py = (height.saturating_sub(ph)) / 2;
-
-        let bg = crate::ui::lighten(theme.bg, 6);
-        crate::ui::fill_rect(buffer, width, px, py, pw, ph, crate::ui::pack_rgb(bg));
-        let border = crate::ui::dim(theme.cursor, 0.4);
-        crate::ui::draw_border(buffer, width, px, py, pw, ph, crate::ui::pack_rgb(border));
-
-        let mut ty = py + 12;
-        crate::ui::render_text(buffer, width, font, "CI/CD Runs", px + 16, ty, theme.cursor);
-        ty += ch + 10;
+        let want = cx.title_h() + cx.footer_h() + 2 * tk.sp.md + (self.runs.len().max(3) + 1) * tk.row_h;
+        let rect = cx.centered_cols(64, want.min(height * 3 / 4));
+        let count = format!("{} runs", self.runs.len());
+        let spec = PanelSpec::new("CI/CD")
+            .sub("recent pipeline runs")
+            .badge(&count, Tone::Neutral)
+            .hints(&[("Up/Down", "move"), ("r", "refresh"), ("Esc", "close")]);
+        let body = cx.panel(rect, &spec);
 
         if self.runs.is_empty() {
-            crate::ui::render_text(
-                buffer, width, font,
-                "No CI runs found (needs gh or glab CLI)",
-                px + 16, ty, crate::ui::dim(theme.fg, 0.5),
-            );
-        } else {
-            for (i, run) in self.runs.iter().enumerate() {
-                if ty + ch >= py + ph - 20 {
-                    break;
-                }
-                let selected = i == self.selected;
-                if selected {
-                    crate::ui::fill_rect(
-                        buffer, width,
-                        px + 4, ty.saturating_sub(2), pw.saturating_sub(8), ch + 4,
-                        crate::ui::pack_rgb(crate::ui::lighten(bg, 12)),
-                    );
-                }
-
-                let (icon, icon_color) = match run.status {
-                    CiStatus::Completed => ("v", (166u8, 227u8, 161u8)),
-                    CiStatus::Failed => ("x", (243, 139, 168)),
-                    CiStatus::InProgress => ("~", (249, 226, 175)),
-                    CiStatus::Queued => (".", (108, 112, 134)),
-                };
-                crate::ui::render_text(buffer, width, font, icon, px + 16, ty, icon_color);
-
-                let max_name = (pw / cw).saturating_sub(8);
-                let name = crate::ui::trunc(&run.name, max_name);
-                let tc = if selected {
-                    theme.fg
-                } else {
-                    crate::ui::dim(theme.fg, 0.7)
-                };
-                crate::ui::render_text(buffer, width, font, name, px + 16 + 3 * cw, ty, tc);
-
-                if !run.branch.is_empty() {
-                    let bx = px + pw.saturating_sub((run.branch.len() + 2) * cw);
-                    crate::ui::render_text(
-                        buffer, width, font,
-                        &run.branch, bx, ty,
-                        crate::ui::dim(theme.fg, 0.3),
-                    );
-                }
-
-                ty += item_h;
-            }
+            cx.empty_state(body, "No CI runs found", "Needs the gh or glab CLI");
+            return;
         }
-
-        let help = "r: refresh  Esc: close";
-        let help_y = py + ph.saturating_sub(ch + 10);
-        crate::ui::render_text(
-            buffer, width, font,
-            help, px + 16, help_y,
-            crate::ui::dim(theme.fg, 0.3),
+        let rows: Vec<TableRow> = self
+            .runs
+            .iter()
+            .map(|run| {
+                let (label, tone) = match run.status {
+                    CiStatus::Completed => ("passed", Tone::Success),
+                    CiStatus::Failed => ("failed", Tone::Danger),
+                    CiStatus::InProgress => ("running", Tone::Warning),
+                    CiStatus::Queued => ("queued", Tone::Neutral),
+                };
+                TableRow::new(vec![label.to_string(), run.name.clone(), run.branch.clone()]).tone(tone)
+            })
+            .collect();
+        let vis = cx.rows_fit(body.h.saturating_sub(tk.row_h));
+        let scroll = center_scroll(self.selected, rows.len(), vis);
+        cx.table(
+            body,
+            &[Column::new("Status", Width::Cols(8)), Column::new("Workflow", Width::Flex(2)), Column::new("Branch", Width::Flex(1))],
+            &rows,
+            Some(self.selected),
+            scroll,
         );
     }
 }
@@ -261,4 +219,22 @@ fn extract_json_str(json: &str, key: &str) -> Option<String> {
     let rest = &json[start..];
     let end = rest.find('"')?;
     Some(rest[..end].to_string())
+}
+
+#[cfg(test)]
+mod qa_tests {
+    use super::*;
+    use crate::ui::kit::gallery::qa::each_theme;
+
+    #[test]
+    fn renders_runs_and_empty() {
+        let mut c = CicdPanel::new();
+        c.visible = true;
+        let run = |n: &str, s: CiStatus| CiRun { name: n.into(), branch: "main".into(), status: s, conclusion: String::new(), duration: String::new(), started_at: String::new(), url: String::new() };
+        c.runs = vec![run("build", CiStatus::Completed), run("test-suite-with-long-name", CiStatus::Failed), run("deploy", CiStatus::InProgress), run("lint", CiStatus::Queued)];
+        c.selected = 1;
+        each_theme("cicd", |b, w, h, f, t| c.render(b, w, h, f, t));
+        c.runs.clear();
+        each_theme("cicd-empty", |b, w, h, f, t| c.render(b, w, h, f, t));
+    }
 }

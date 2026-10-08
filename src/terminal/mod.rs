@@ -150,7 +150,9 @@ impl Terminal {
             bracketed_paste: false,
             focus_reporting: false,
             insert_mode: false,
-            alt_scroll: false,
+            // DECSET 1007 defaults on (iTerm2 / Ghostty): the wheel scrolls
+            // full-screen apps with arrow keys until they opt out.
+            alt_scroll: true,
             g0_charset: Charset::Ascii,
             g1_charset: Charset::Ascii,
             active_charset: 0,
@@ -537,6 +539,40 @@ impl Terminal {
 
     pub fn is_scrolled_back(&self) -> bool {
         self.scroll_offset > 0
+    }
+
+    /// True while the alternate screen (vim, less, ...) is showing.
+    pub fn is_alt_screen(&self) -> bool {
+        self.using_alt_screen
+    }
+
+    /// Row `abs` of `scrollback ++ grid` (absolute line index).
+    pub fn abs_line(&self, abs: usize) -> Option<&[Cell]> {
+        let sb = self.scrollback.len();
+        if abs < sb {
+            self.scrollback.get(abs).map(|r| r.as_slice())
+        } else {
+            self.grid.get(abs - sb).map(|r| r.as_slice())
+        }
+    }
+
+    /// Absolute index of the first visible row for the current scroll offset.
+    pub fn view_top_abs(&self) -> usize {
+        self.scrollback.len().saturating_sub(self.scroll_offset)
+    }
+
+    /// Erase scrollback and the visible screen (Clear Buffer). The cursor
+    /// keeps its position; the shell is expected to redraw its prompt.
+    pub fn clear_buffer(&mut self) {
+        // Absolute line numbers (command blocks) shift down by what we drop.
+        let dropped = self.scrollback.len();
+        self.scrollback.clear();
+        self.scroll_offset = 0;
+        let blank = Cell::blank_with(self.fg, self.bg);
+        for row in &mut self.grid {
+            row.fill(blank);
+        }
+        self.blocks.shift_lines(dropped);
     }
 
     pub fn scrollback_len(&self) -> usize {

@@ -3,6 +3,14 @@ use winit::event_loop::EventLoopProxy;
 use super::pane::{Pane, PtyKind};
 use super::tab::{MinSize, PaneNode, PaneRect, SplitDir, Tab};
 
+/// A change to the tab list that outside indexes (e.g. the webview's tab)
+/// must follow. Drained with [`WindowManager::take_tab_events`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TabEvent {
+    Closed(usize),
+    Moved { from: usize, to: usize },
+}
+
 pub struct WindowManager {
     pub tabs: Vec<Tab>,
     pub active_tab: usize,
@@ -11,6 +19,7 @@ pub struct WindowManager {
     /// Content area from the last `resize_all`; used for geometric decisions
     /// (e.g. which pane takes focus after a close).
     last_area: PaneRect,
+    tab_events: Vec<TabEvent>,
 }
 
 impl WindowManager {
@@ -23,6 +32,7 @@ impl WindowManager {
             next_pane_id: 1,
             proxy,
             last_area: PaneRect { x: 0, y: 0, width: 0, height: 0 },
+            tab_events: Vec::new(),
         }
     }
 
@@ -65,17 +75,45 @@ impl WindowManager {
         }
     }
 
+    /// Set a custom title; an empty name restores the automatic "Tab N".
     pub fn rename_tab(&mut self, idx: usize, name: &str) {
+        let name = name.trim();
         if let Some(tab) = self.tabs.get_mut(idx) {
-            tab.title = name.to_string();
-            tab.custom_title = true;
+            if name.is_empty() {
+                tab.custom_title = false;
+                self.renumber_tabs();
+            } else {
+                tab.title = name.to_string();
+                tab.custom_title = true;
+            }
         }
+    }
+
+    /// Move tab `from` to position `to` (drag reorder). The active tab keeps
+    /// following its content. Returns false for out-of-range or no-op moves.
+    pub fn move_tab(&mut self, from: usize, to: usize) -> bool {
+        let n = self.tabs.len();
+        if from >= n || to >= n || from == to {
+            return false;
+        }
+        let tab = self.tabs.remove(from);
+        self.tabs.insert(to, tab);
+        self.active_tab = crate::ui::tabbar::remap_after_move(self.active_tab, from, to);
+        self.renumber_tabs();
+        self.tab_events.push(TabEvent::Moved { from, to });
+        true
+    }
+
+    /// Tab-list changes since the last call (oldest first).
+    pub fn take_tab_events(&mut self) -> Vec<TabEvent> {
+        std::mem::take(&mut self.tab_events)
     }
 
     pub fn close_current(&mut self) -> bool {
         let area = self.last_area;
         let should_close_tab = self.active_tab_mut().close_pane(area);
         if should_close_tab {
+            self.tab_events.push(TabEvent::Closed(self.active_tab));
             self.tabs.remove(self.active_tab);
             if self.tabs.is_empty() {
                 return true;
@@ -251,6 +289,7 @@ impl WindowManager {
         if self.tabs.len() <= 1 {
             return true;
         }
+        self.tab_events.push(TabEvent::Closed(idx));
         self.tabs.remove(idx);
         if self.active_tab >= self.tabs.len() {
             self.active_tab = self.tabs.len() - 1;

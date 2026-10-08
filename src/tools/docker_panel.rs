@@ -119,93 +119,82 @@ impl DockerPanel {
 
     pub fn render(&self, buffer: &mut [u32], width: usize, height: usize,
                   font: &mut crate::renderer::font::FontManager, theme: &crate::config::Theme) {
+        use crate::ui::kit::{center_scroll, Column, Ctx, PanelSpec, Rect, TableRow, Tokens, Tone, Width};
         if !self.visible { return; }
-        for px in buffer.iter_mut() {
-            let r = ((*px >> 16) & 0xff) / 3;
-            let g = ((*px >> 8) & 0xff) / 3;
-            let b = (*px & 0xff) / 3;
-            *px = (r << 16) | (g << 8) | b;
-        }
+        let tk = Tokens::new(theme, font.cell_width, font.cell_height);
+        let mut cx = Ctx::new(buffer, width, height, font, &tk);
+        cx.backdrop(tk.backdrop);
 
-        let cw = font.cell_width;
-        let ch = font.cell_height;
-        let pw = (50 * cw).min(width.saturating_sub(40));
         let items = if self.active_tab == 0 { self.containers.len() } else { self.images.len() };
-        let ph = ((items + 6) * (ch + 4) + 40).min(height.saturating_sub(40)).max(ch * 8);
-        let px = (width.saturating_sub(pw)) / 2;
-        let py = (height.saturating_sub(ph)) / 2;
+        let want = cx.title_h() + cx.footer_h() + 3 * tk.sp.md + (items.max(3) + 2) * tk.row_h;
+        let rect = cx.centered_cols(78, want.min(height * 3 / 4));
+        let running = self.containers.iter().filter(|c| c.running).count();
+        let badge = format!("{} running", running);
+        let spec = PanelSpec::new("Docker")
+            .sub(if self.active_tab == 0 { "containers" } else { "images" })
+            .badge(&badge, if running > 0 { Tone::Success } else { Tone::Neutral })
+            .hints(&[("Tab", "switch"), ("s", "start/stop"), ("l", "logs"), ("r", "refresh"), ("Esc", "close")]);
+        let body = cx.panel(rect, &spec);
 
-        let bg = crate::ui::lighten(theme.bg, 6);
-        crate::ui::fill_rect(buffer, width, px, py, pw, ph, crate::ui::pack_rgb(bg));
-        crate::ui::draw_border(buffer, width, px, py, pw, ph, crate::ui::pack_rgb(crate::ui::dim(theme.cursor, 0.4)));
+        cx.tabs(body.x, body.y, body.w, &["Containers", "Images"], self.active_tab);
+        cx.divider(body.x, body.y + tk.row_h, body.w);
+        let content = Rect::new(body.x, body.y + tk.row_h + tk.sp.sm, body.w, body.h.saturating_sub(tk.row_h + tk.sp.sm));
+        let vis = cx.rows_fit(content.h.saturating_sub(tk.row_h));
 
-        let mut ty = py + 12;
-        let max_chars = (pw.saturating_sub(32)) / cw.max(1);
-
-        // Title
-        crate::ui::render_text(buffer, width, font, "Docker", px + 16, ty, theme.cursor);
-        ty += ch + 8;
-
-        // Tab selector
-        let tabs = ["Containers", "Images"];
-        let mut tx = px + 16;
-        for (i, tab) in tabs.iter().enumerate() {
-            let color = if i == self.active_tab { theme.cursor } else { crate::ui::dim(theme.fg, 0.4) };
-            crate::ui::render_text(buffer, width, font, tab, tx, ty, color);
-            tx += (tab.len() + 2) * cw;
-        }
-        ty += ch + 8;
-
-        // Items
         if self.active_tab == 0 {
             if self.containers.is_empty() {
-                crate::ui::render_text(buffer, width, font, "No containers", px + 16, ty, crate::ui::dim(theme.fg, 0.4));
+                cx.empty_state(content, "No containers", "Is the Docker daemon running?");
+                return;
             }
-            for (i, c) in self.containers.iter().enumerate() {
-                if ty + ch >= py + ph.saturating_sub(30) { break; }
-                let sel = i == self.selected;
-                if sel {
-                    crate::ui::fill_rect(buffer, width, px + 4, ty.saturating_sub(2), pw.saturating_sub(8), ch + 4,
-                        crate::ui::pack_rgb(crate::ui::lighten(bg, 12)));
-                }
-                let icon_color = if c.running { (166, 227, 161) } else { (243, 139, 168) };
-                let icon = if c.running { ">" } else { "x" };
-                crate::ui::render_text(buffer, width, font, icon, px + 16, ty, icon_color);
-                let label = format!("{} ({})", c.name, crate::ui::trunc(&c.image, 20));
-                crate::ui::render_text(buffer, width, font,
-                    crate::ui::trunc(&label, max_chars.saturating_sub(4)),
-                    px + 16 + 3 * cw, ty,
-                    if sel { theme.fg } else { crate::ui::dim(theme.fg, 0.7) });
-                ty += ch + 4;
-            }
+            let rows: Vec<TableRow> = self.containers.iter().map(|c| {
+                TableRow::new(vec![
+                    if c.running { "running".to_string() } else { "stopped".to_string() },
+                    c.name.clone(), c.image.clone(), c.ports.clone(),
+                ]).tone(if c.running { Tone::Success } else { Tone::Danger })
+            }).collect();
+            let scroll = center_scroll(self.selected, rows.len(), vis);
+            cx.table(content, &[
+                Column::new("State", Width::Cols(8)), Column::new("Name", Width::Flex(2)),
+                Column::new("Image", Width::Flex(2)), Column::new("Ports", Width::Flex(2)),
+            ], &rows, Some(self.selected), scroll);
         } else {
             if self.images.is_empty() {
-                crate::ui::render_text(buffer, width, font, "No images", px + 16, ty, crate::ui::dim(theme.fg, 0.4));
+                cx.empty_state(content, "No images", "");
+                return;
             }
-            for (i, img) in self.images.iter().enumerate() {
-                if ty + ch >= py + ph.saturating_sub(30) { break; }
-                let sel = i == self.selected;
-                if sel {
-                    crate::ui::fill_rect(buffer, width, px + 4, ty.saturating_sub(2), pw.saturating_sub(8), ch + 4,
-                        crate::ui::pack_rgb(crate::ui::lighten(bg, 12)));
-                }
-                let label = format!("{}:{} ({})", img.repo, img.tag, img.size);
-                crate::ui::render_text(buffer, width, font,
-                    crate::ui::trunc(&label, max_chars),
-                    px + 16, ty,
-                    if sel { theme.fg } else { crate::ui::dim(theme.fg, 0.7) });
-                ty += ch + 4;
-            }
+            let rows: Vec<TableRow> = self.images.iter().map(|i| {
+                TableRow::new(vec![format!("{}:{}", i.repo, i.tag), i.id.clone(), i.size.clone()])
+            }).collect();
+            let scroll = center_scroll(self.selected, rows.len(), vis);
+            cx.table(content, &[
+                Column::new("Repository", Width::Flex(3)), Column::new("ID", Width::Cols(13)),
+                Column::new("Size", Width::Cols(9)).right(),
+            ], &rows, Some(self.selected), scroll);
         }
-
-        // Help
-        let help = "Tab:switch s:start/stop l:logs r:refresh Esc:close";
-        crate::ui::render_text(buffer, width, font,
-            crate::ui::trunc(help, max_chars),
-            px + 16, py + ph.saturating_sub(ch + 10),
-            crate::ui::dim(theme.fg, 0.3));
     }
 }
 
 pub enum DockerKey { Up, Down, Tab, Escape, Char(char) }
 pub enum DockerAction { RunCommand(String) }
+
+#[cfg(test)]
+mod qa_tests {
+    use super::*;
+    use crate::ui::kit::gallery::qa::each_theme;
+
+    #[test]
+    fn renders_tabs_and_empty() {
+        let mut d = DockerPanel::new();
+        d.visible = true;
+        d.containers = vec![
+            Container { id: "abc".into(), name: "web".into(), image: "nginx:latest".into(), status: "Up 2h".into(), ports: "0.0.0.0:80->80/tcp".into(), running: true },
+            Container { id: "def".into(), name: "db".into(), image: "postgres:16".into(), status: "Exited".into(), ports: String::new(), running: false },
+        ];
+        d.images = vec![DockerImage { id: "1234567890ab".into(), repo: "nginx".into(), tag: "latest".into(), size: "187MB".into() }];
+        each_theme("docker-containers", |b, w, h, f, t| d.render(b, w, h, f, t));
+        d.active_tab = 1;
+        each_theme("docker-images", |b, w, h, f, t| d.render(b, w, h, f, t));
+        d.images.clear();
+        each_theme("docker-empty", |b, w, h, f, t| d.render(b, w, h, f, t));
+    }
+}

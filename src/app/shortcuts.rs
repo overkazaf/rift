@@ -42,6 +42,11 @@ pub fn handle_key(app: &mut App, event: &KeyEvent, event_loop: &ActiveEventLoop)
         return;
     }
 
+    // 1b. Command blocks: Cmd+Shift+Up/Down/C, Cmd+C on a selected block
+    if crate::blocks_ui::on_key(app, event) {
+        return;
+    }
+
     // 2. Cmd+C / Cmd+V (copy/paste) — macOS super key
     if app.modifiers.super_key() {
         let is_copy = matches!(&event.logical_key, Key::Character(s) if s.eq_ignore_ascii_case("c"));
@@ -50,10 +55,8 @@ pub fn handle_key(app: &mut App, event: &KeyEvent, event_loop: &ActiveEventLoop)
 
         if is_copy {
             if app.selection.active {
-                let text = app.selection.extract_text(&app.wm.active_pane().terminal.grid);
-                if !text.is_empty() {
-                    crate::window::selection::copy_to_clipboard(&text);
-                    log::info!("Copied {} chars", text.len());
+                if super::mouse::copy_selection(app) {
+                    log::info!("Copied selection");
                 }
                 app.selection.clear();
                 app.request_redraw();
@@ -61,26 +64,11 @@ pub fn handle_key(app: &mut App, event: &KeyEvent, event_loop: &ActiveEventLoop)
             return;
         }
         if is_paste {
-            if let Some(text) = crate::window::selection::paste_from_clipboard() {
-                let pane = app.wm.active_pane_mut();
-                if pane.terminal.bracketed_paste {
-                    pane.write(b"\x1b[200~");
-                    pane.write(text.as_bytes());
-                    pane.write(b"\x1b[201~");
-                } else {
-                    pane.write(text.as_bytes());
-                }
-            }
+            super::mouse::paste_clipboard(app);
             return;
         }
         if is_select_all {
-            let terminal = &app.wm.active_pane().terminal;
-            app.selection.start_at(0, 0);
-            let last_row = terminal.rows.saturating_sub(1);
-            let last_col = terminal.cols.saturating_sub(1);
-            app.selection.extend_to(last_row, last_col);
-            app.selection.finish();
-            app.request_redraw();
+            super::mouse::select_all(app);
             return;
         }
     }
@@ -157,7 +145,7 @@ pub fn handle_key(app: &mut App, event: &KeyEvent, event_loop: &ActiveEventLoop)
                 return;
             }
             if s.eq_ignore_ascii_case("p") && !event.repeat {
-                app.command_palette.toggle();
+                super::overlays::open_command_palette(app);
                 app.request_redraw();
                 return;
             }
@@ -349,12 +337,11 @@ pub fn handle_key(app: &mut App, event: &KeyEvent, event_loop: &ActiveEventLoop)
 // ── Mouse ──
 
 pub fn handle_click(app: &mut App, event_loop: &ActiveEventLoop) {
-    let x = app.cursor_x;
     let y = app.cursor_y;
     let tbh = app.tab_bar_height();
 
     if y < tbh {
-        handle_tab_bar_click(app, x, y, event_loop);
+        super::tabs::press(app, event_loop);
     }
     app.request_redraw();
 }
@@ -414,8 +401,10 @@ pub fn handle_menu_action(app: &mut App, action: MenuAction, event_loop: &Active
         // UI panels
         MenuAction::Preferences => app.prefs.toggle(),
         MenuAction::Welcome => app.welcome.toggle(),
+        MenuAction::UiGallery => crate::ui::kit::gallery::toggle(),
         MenuAction::WebView => crate::network::browser::toggle(app),
         MenuAction::Browser(cmd) => crate::network::browser::run_command(app, cmd),
+        MenuAction::ClearBuffer => super::mouse::clear_buffer(app),
         MenuAction::Find => {
             app.search.toggle();
             if app.search.visible {
@@ -608,33 +597,7 @@ fn handle_mod_shift(app: &mut App, key: &str, event_loop: &ActiveEventLoop) -> b
     }
 }
 
-fn handle_tab_bar_click(app: &mut App, x: usize, _y: usize, event_loop: &ActiveEventLoop) {
-    let Some(window) = &app.window else { return };
-    let buf_width = window.inner_size().width as usize;
-    let cw = app.renderer.cell_width();
-    let tab_count = app.wm.tab_count().max(1);
-    let tab_w = buf_width / tab_count;
-
-    // Tabs fill the full width — no empty area to trigger new tab via click
-
-    let tab_idx = (x / tab_w).min(tab_count - 1);
-
-    let tab_right = if tab_idx == tab_count - 1 { buf_width } else { (tab_idx + 1) * tab_w };
-    let close_zone = tab_right.saturating_sub(cw * 2 + 4);
-    if tab_count > 1 && x >= close_zone {
-        if app.wm.close_tab_at(tab_idx) {
-            event_loop.exit();
-        }
-        app.update_title();
-        return;
-    }
-
-    app.wm.switch_tab(tab_idx);
-    sync_webview_for_tab(app);
-    app.update_title();
-}
-
-fn sync_webview_for_tab(app: &mut App) {
+pub(super) fn sync_webview_for_tab(app: &mut App) {
     if let Some(wv) = &mut app.webview {
         let should_show = app.webview_tab == Some(app.wm.active_tab);
         if wv.visible != should_show {
@@ -692,7 +655,7 @@ fn reset_font(app: &mut App) {
     reinit_font_from_config(app);
 }
 
-fn reinit_font_from_config(app: &mut App) {
+pub(super) fn reinit_font_from_config(app: &mut App) {
     if let Some(window) = &app.window {
         let scale = window.scale_factor();
         let physical = app.config.font_size * scale as f32;

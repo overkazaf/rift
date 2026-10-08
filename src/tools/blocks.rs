@@ -103,6 +103,21 @@ impl BlockManager {
         }
     }
 
+    /// Block by index as used by `block_at_line`: finished blocks first, the
+    /// currently running OSC 133 block (if any) at `blocks().len()`.
+    pub fn get(&self, index: usize) -> Option<&CommandBlock> {
+        match self.blocks.get(index) {
+            Some(b) => Some(b),
+            None if index == self.blocks.len() => self.osc.running.as_ref().map(|(b, _)| b),
+            None => None,
+        }
+    }
+
+    /// Elapsed milliseconds of the running OSC 133 block (live duration).
+    pub fn running_osc_elapsed_ms(&self) -> Option<u64> {
+        self.osc.running.as_ref().map(|(_, t)| t.elapsed().as_millis() as u64)
+    }
+
     pub fn block_count(&self) -> usize {
         self.blocks.len() + self.osc.running.is_some() as usize
     }

@@ -70,108 +70,78 @@ impl Heatmap {
         font: &mut FontManager,
         theme: &Theme,
     ) {
-        if !self.visible || self.data.is_empty() {
+        use crate::ui::kit::{mix, Ctx, PanelSpec, Rect, Tokens, Tone};
+        if !self.visible {
+            return;
+        }
+        let tk = Tokens::new(theme, font.cell_width, font.cell_height);
+        let mut cx = Ctx::new(buffer, width, height, font, &tk);
+        cx.backdrop(tk.backdrop);
+
+        let weeks = (self.data.len() + 6) / 7;
+        let gap = 2 * tk.scale;
+        let cell = 12 * tk.scale;
+        let grid_w = weeks.max(8) * (cell + gap);
+        let grid_h = 7 * (cell + gap);
+        let want_h = cx.title_h() + cx.footer_h() + 2 * tk.sp.md + grid_h + 3 * tk.row_h;
+        let rect = cx.centered_px(grid_w.max(48 * tk.cw) + 2 * tk.sp.lg + 2, want_h);
+
+        let total: u32 = self.data.iter().map(|(_, c)| *c).sum();
+        let info = format!("{} commands in {} days", total, self.data.len());
+        let spec = PanelSpec::new("Command Heatmap")
+            .sub(if self.data.is_empty() { "" } else { &info })
+            .hints(&[("Esc", "close")]);
+        let body = cx.panel(rect, &spec);
+        if self.data.is_empty() {
+            cx.empty_state(body, "No history found", "Needs zsh extended history (~/.zsh_history)");
             return;
         }
 
-        // Dim backdrop
-        for px in buffer.iter_mut() {
-            let r = ((*px >> 16) & 0xff) / 3;
-            let g = ((*px >> 8) & 0xff) / 3;
-            let b = (*px & 0xff) / 3;
-            *px = (r << 16) | (g << 8) | b;
-        }
-
-        let cw = font.cell_width;
-        let ch = font.cell_height;
-        let cell_size = (cw * 2 / 3).max(6);
-        let gap = 2;
-        let weeks = (self.data.len() + 6) / 7;
-
-        let pw = (weeks * (cell_size + gap) + 80).min(width.saturating_sub(40));
-        let ph = (7 * (cell_size + gap) + ch * 3 + 40).min(height.saturating_sub(40));
-        let px = (width.saturating_sub(pw)) / 2;
-        let py = (height.saturating_sub(ph)) / 2;
-
-        let bg = crate::ui::lighten(theme.bg, 6);
-        crate::ui::fill_rect(buffer, width, px, py, pw, ph, crate::ui::pack_rgb(bg));
-        let border = crate::ui::dim(theme.cursor, 0.4);
-        crate::ui::draw_border(buffer, width, px, py, pw, ph, crate::ui::pack_rgb(border));
-
-        // Title
-        crate::ui::render_text(
-            buffer, width, font, "Command Heatmap", px + 16, py + 10, theme.cursor,
-        );
-
-        // Stats
-        let total: u32 = self.data.iter().map(|(_, c)| *c).sum();
-        let info = format!("{} commands in {} days", total, self.data.len());
-        crate::ui::render_text(
-            buffer, width, font, &info, px + 16, py + 10 + ch + 4,
-            crate::ui::dim(theme.fg, 0.5),
-        );
-
-        let grid_x = px + 40;
-        let grid_y = py + ch * 2 + 30;
-
-        // GitHub-style color scale
-        let colors: [(u8, u8, u8); 5] = [
-            crate::ui::darken(theme.bg, 5),
-            crate::ui::dim(theme.cursor, 0.2),
-            crate::ui::dim(theme.cursor, 0.4),
-            crate::ui::dim(theme.cursor, 0.7),
-            theme.cursor,
+        // 5-step intensity ramp from surface to accent.
+        let ramp: [_; 5] = [
+            tk.border,
+            mix(tk.surface, tk.accent, 0.30),
+            mix(tk.surface, tk.accent, 0.55),
+            mix(tk.surface, tk.accent, 0.80),
+            tk.accent,
         ];
 
+        // Cells shrink to fit when the window is narrower than the grid.
+        let cell = ((body.w.saturating_sub(weeks * gap)) / weeks.max(1)).min(cell).max(3);
+        let grid_y = body.y + tk.row_h;
+        cx.section(body.x, body.y, body.w, "Daily activity");
         for (i, (_, count)) in self.data.iter().enumerate() {
             let week = i / 7;
             let day = i % 7;
-            let cx = grid_x + week * (cell_size + gap);
-            let cy = grid_y + day * (cell_size + gap);
-            if cx + cell_size >= px + pw || cy + cell_size >= py + ph {
+            let x = body.x + week * (cell + gap);
+            let y = grid_y + day * (cell + gap);
+            if x + cell > body.right() || y + cell > body.bottom() {
                 continue;
             }
-
-            let intensity = if self.max_count == 0 {
+            let level = if self.max_count == 0 {
                 0
             } else {
                 ((*count as f32 / self.max_count as f32) * 4.0).ceil() as usize
             };
-            let color = colors[intensity.min(4)];
-            crate::ui::fill_rect(
-                buffer, width, cx, cy, cell_size, cell_size,
-                crate::ui::pack_rgb(color),
-            );
+            cx.fill_rrect(Rect::new(x, y, cell, cell), tk.scale.max(1), ramp[level.min(4)]);
         }
 
         // Legend
-        let legend_y = py + ph - ch - 10;
-        crate::ui::render_text(
-            buffer, width, font, "Less", px + 16, legend_y,
-            crate::ui::dim(theme.fg, 0.4),
-        );
-        let lx = px + 16 + 5 * cw;
-        for (i, color) in colors.iter().enumerate() {
-            crate::ui::fill_rect(
-                buffer, width,
-                lx + i * (cell_size + 2), legend_y + 2,
-                cell_size, cell_size,
-                crate::ui::pack_rgb(*color),
-            );
+        let ly = (grid_y + grid_h + tk.sp.sm).min(body.bottom().saturating_sub(tk.row_h));
+        let mut x = body.x;
+        cx.line(x, ly, "Less", tk.text_muted);
+        x += cx.tw("Less") + tk.sp.sm;
+        for c in ramp {
+            cx.fill_rrect(Rect::new(x, ly + (tk.row_h - cell) / 2, cell, cell), tk.scale.max(1), c);
+            x += cell + gap;
         }
-        crate::ui::render_text(
-            buffer, width, font, "More",
-            lx + 5 * (cell_size + 2) + 4, legend_y,
-            crate::ui::dim(theme.fg, 0.4),
-        );
-
-        // Help
-        let help_x = pw.saturating_sub(12 * cw);
-        crate::ui::render_text(
-            buffer, width, font, "Esc: close",
-            px + help_x, legend_y,
-            crate::ui::dim(theme.fg, 0.3),
-        );
+        x += tk.sp.sm;
+        cx.line(x, ly, "More", tk.text_muted);
+        let busiest = format!("busiest day: {} commands", self.max_count);
+        let bw = cx.tw(&busiest);
+        if body.right() > x + cx.tw("More") + bw + tk.sp.lg {
+            cx.badge_line(body.right() - cx.badge_w(&busiest), ly, &busiest, Tone::Neutral);
+        }
     }
 
     pub fn handle_key(&mut self, key: HeatmapKey) {
@@ -203,4 +173,21 @@ fn days_to_ymd(days: u64) -> (u64, u64, u64) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
     (y, m, d)
+}
+
+#[cfg(test)]
+mod qa_tests {
+    use super::*;
+    use crate::ui::kit::gallery::qa::each_theme;
+
+    #[test]
+    fn renders_grid_and_empty() {
+        let mut hm = Heatmap::new();
+        hm.visible = true;
+        hm.data = (0..200).map(|i| (format!("d{i}"), (i * 7 % 23) as u32)).collect();
+        hm.max_count = 22;
+        each_theme("heatmap", |b, w, h, f, t| hm.render(b, w, h, f, t));
+        hm.data.clear();
+        each_theme("heatmap-empty", |b, w, h, f, t| hm.render(b, w, h, f, t));
+    }
 }

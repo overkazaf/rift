@@ -66,31 +66,33 @@ impl ProcessTree {
         &self, buffer: &mut [u32], width: usize, height: usize,
         font: &mut crate::renderer::font::FontManager, theme: &crate::config::Theme,
     ) {
+        use crate::ui::kit::{Column, Ctx, PanelSpec, TableRow, Tokens, Tone, Width};
         if !self.visible { return; }
-        crate::ui::dim_backdrop(buffer, 3);
-        let cw = font.cell_width;
-        let ch = font.cell_height;
-        let pw = (45 * cw).min(width - 40);
-        let ph = ((self.entries.len() + 4) * (ch + 4) + 40).min(height - 40).max(ch * 6);
-        let px = (width - pw) / 2;
-        let py = (height - ph) / 2;
+        let tk = Tokens::new(theme, font.cell_width, font.cell_height);
+        let mut cx = Ctx::new(buffer, width, height, font, &tk);
+        cx.backdrop(tk.backdrop);
 
-        crate::ui::fill_rect(buffer, width, px, py, pw, ph, crate::ui::pack_rgb(crate::ui::lighten(theme.bg, 6)));
-        crate::ui::draw_border(buffer, width, px, py, pw, ph, crate::ui::pack_rgb(crate::ui::dim(theme.cursor, 0.4)));
-
-        let mut ty = py + 12;
-        crate::ui::render_text(buffer, width, font, "Process Tree", px + 16, ty, theme.cursor);
-        ty += ch + 8;
-
-        for proc in &self.entries {
-            if ty + ch >= py + ph - 20 { break; }
-            let indent = "  ".repeat(proc.depth);
-            let line = format!("{}{} [{}] cpu:{} mem:{}", indent, proc.name, proc.pid, proc.cpu, proc.mem);
-            crate::ui::render_text(buffer, width, font, crate::ui::trunc(&line, (pw - 32) / cw), px + 16, ty, crate::ui::dim(theme.fg, 0.7));
-            ty += ch + 4;
+        let want = cx.title_h() + cx.footer_h() + 2 * tk.sp.md + (self.entries.len().max(3) + 1) * tk.row_h;
+        let rect = cx.centered_cols(64, want.min(height * 3 / 4));
+        let count = format!("{} processes", self.entries.len());
+        let spec = PanelSpec::new("Process Tree")
+            .badge(&count, Tone::Neutral)
+            .hints(&[("r", "refresh"), ("Esc", "close")]);
+        let body = cx.panel(rect, &spec);
+        if self.entries.is_empty() {
+            cx.empty_state(body, "No child processes", "");
+            return;
         }
-
-        crate::ui::render_text(buffer, width, font, "r: refresh  Esc: close", px + 16, py + ph - ch - 10, crate::ui::dim(theme.fg, 0.3));
+        let rows: Vec<TableRow> = self.entries.iter().map(|p| {
+            TableRow::new(vec![
+                format!("{}{}", "  ".repeat(p.depth), p.name),
+                p.pid.to_string(), format!("{}%", p.cpu), format!("{}%", p.mem),
+            ])
+        }).collect();
+        cx.table(body, &[
+            Column::new("Process", Width::Flex(1)), Column::new("PID", Width::Cols(7)).right(),
+            Column::new("CPU", Width::Cols(6)).right(), Column::new("Mem", Width::Cols(6)).right(),
+        ], &rows, None, 0);
     }
 }
 

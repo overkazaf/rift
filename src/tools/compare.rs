@@ -1,4 +1,4 @@
-use crate::config::{Rgb, Theme};
+use crate::config::Theme;
 use crate::renderer::font::FontManager;
 use crate::tools::diff::{diff, DiffLine, DiffResult};
 use crate::window::pane::Pane;
@@ -61,94 +61,67 @@ impl CompareView {
         font: &mut FontManager,
         theme: &Theme,
     ) {
+        use crate::ui::kit::{Ctx, PanelSpec, Rect, Tokens, Tone};
         if !self.visible { return; }
+        let tk = Tokens::new(theme, font.cell_width, font.cell_height);
+        let mut cx = Ctx::new(buffer, width, height, font, &tk);
+        cx.backdrop(tk.backdrop);
 
-        let cw = font.cell_width;
-        let ch = font.cell_height;
-
-        for px in buffer.iter_mut() {
-            let r = ((*px >> 16) & 0xff) / 3;
-            let g = ((*px >> 8) & 0xff) / 3;
-            let b = (*px & 0xff) / 3;
-            *px = (r << 16) | (g << 8) | b;
-        }
-
-        let pad = 16;
-        let panel_w = width.saturating_sub(pad * 2);
-        let panel_h = height.saturating_sub(pad * 2);
-        let px0 = pad;
-        let py0 = pad;
-
-        let bg = lighten(theme.bg, 6);
-        fill_rect(buffer, width, px0, py0, panel_w, panel_h, pack(bg.0, bg.1, bg.2));
-
-        let border = dim(theme.cursor, 0.4);
-        let bp = pack(border.0, border.1, border.2);
-        for x in px0..px0 + panel_w { set_px(buffer, width, py0, x, bp); set_px(buffer, width, py0 + panel_h - 1, x, bp); }
-        for y in py0..py0 + panel_h { set_px(buffer, width, y, px0, bp); set_px(buffer, width, y, px0 + panel_w - 1, bp); }
-
-        let mut cy = py0 + 10;
-        render_text(buffer, width, font, "Output Compare", px0 + 16, cy, theme.cursor);
-        cy += ch + 8;
+        let rect = cx.centered(96, usize::MAX / 4, 94);
+        let total = self.diff_result.as_ref().map(|d| d.lines.len()).unwrap_or(0);
+        let changed = self.diff_result.as_ref().map(|d| d.lines.iter().filter(|l| !matches!(l, DiffLine::Same(_))).count()).unwrap_or(0);
+        let badge = format!("{} changed", changed);
+        let spec = PanelSpec::new("Output Compare")
+            .sub("pane A vs pane B")
+            .badge(&badge, if changed > 0 { Tone::Warning } else { Tone::Success })
+            .hints(&[("Up/Down", "scroll"), ("Esc", "close")]);
+        let body = cx.panel(rect, &spec);
 
         if self.panels.len() < 2 {
-            render_text(buffer, width, font, "Need 2+ panes to compare (Ctrl+Shift+D to split)", px0 + 16, cy, dim(theme.fg, 0.5));
-            let hy = py0 + panel_h - ch - 10;
-            render_text(buffer, width, font, "Esc: close", px0 + 16, hy, dim(theme.fg, 0.3));
+            cx.empty_state(body, "Need 2+ panes to compare", "Split the window with Ctrl+Shift+D");
             return;
         }
 
-        let half = (panel_w - 32) / 2;
-        let left_x = px0 + 16;
-        let right_x = px0 + 16 + half + 8;
+        let gap = tk.sp.lg;
+        let half = body.w.saturating_sub(gap) / 2;
+        let left_x = body.x;
+        let right_x = body.x + half + gap;
+        cx.line_fit(left_x, body.y, half, &self.panels[0].title, tk.accent);
+        cx.line_fit(right_x, body.y, half, &self.panels[1].title, tk.accent);
+        cx.divider(body.x, body.y + tk.row_h, body.w);
 
-        render_text(buffer, width, font, trunc(&self.panels[0].title, half / cw), left_x, cy, theme.cursor);
-        render_text(buffer, width, font, trunc(&self.panels[1].title, half / cw), right_x, cy, theme.cursor);
-        cy += ch + 4;
-
-        let sep_px = pack(dim(theme.fg, 0.15).0, dim(theme.fg, 0.15).1, dim(theme.fg, 0.15).2);
-        for x in (px0 + 12)..(px0 + panel_w - 12) { set_px(buffer, width, cy, x, sep_px); }
-        cy += 6;
-
+        let list = Rect::new(body.x, body.y + tk.row_h + tk.sp.xs, body.w, body.h.saturating_sub(tk.row_h + tk.sp.xs));
+        cx.vdivider(body.x + half + gap / 2, list.y, list.h);
         if let Some(ref dr) = self.diff_result {
-            let max_vis = (panel_h - (cy - py0) - ch - 20) / (ch + 2);
-            let total = dr.lines.len();
+            // Line height is tight (one text line plus 2px) so more of the diff fits.
+            let line_h = tk.ch + 2 * tk.scale;
+            let max_vis = (list.h / line_h).max(1);
             let scroll = self.scroll.min(total.saturating_sub(max_vis));
-            let max_chars = half / cw;
+            let max_chars = half.saturating_sub(tk.sp.sm) / tk.cw;
 
-            for line in dr.lines.iter().skip(scroll).take(max_vis) {
-                if cy + ch >= py0 + panel_h - ch - 10 { break; }
+            for (n, line) in dr.lines.iter().skip(scroll).take(max_vis).enumerate() {
+                let y = list.y + n * line_h;
+                let ty = y + tk.scale;
                 match line {
                     DiffLine::Same(s) => {
-                        let t = trunc(s, max_chars);
-                        render_text(buffer, width, font, t, left_x, cy, dim(theme.fg, 0.5));
-                        render_text(buffer, width, font, t, right_x, cy, dim(theme.fg, 0.5));
+                        let t = crate::ui::kit::ellipsize(s, max_chars);
+                        cx.text(left_x + tk.sp.xs, ty, &t, tk.text_muted);
+                        cx.text(right_x + tk.sp.xs, ty, &t, tk.text_muted);
                     }
                     DiffLine::Removed(s) => {
-                        let red: Rgb = (240, 80, 80);
-                        fill_rect(buffer, width, left_x - 4, cy, half, ch, pack(60, 20, 20));
-                        render_text(buffer, width, font, &format!("- {}", trunc(s, max_chars.saturating_sub(2))), left_x, cy, red);
+                        cx.fill_a(Rect::new(left_x, y, half, line_h), tk.danger, 40);
+                        let t = crate::ui::kit::ellipsize(&format!("- {}", s), max_chars);
+                        cx.text(left_x + tk.sp.xs, ty, &t, tk.danger);
                     }
                     DiffLine::Added(s) => {
-                        let green: Rgb = (80, 240, 80);
-                        fill_rect(buffer, width, right_x - 4, cy, half, ch, pack(20, 50, 20));
-                        render_text(buffer, width, font, &format!("+ {}", trunc(s, max_chars.saturating_sub(2))), right_x, cy, green);
+                        cx.fill_a(Rect::new(right_x, y, half, line_h), tk.success, 40);
+                        let t = crate::ui::kit::ellipsize(&format!("+ {}", s), max_chars);
+                        cx.text(right_x + tk.sp.xs, ty, &t, tk.success);
                     }
                 }
-                cy += ch + 2;
             }
-
-            if total > max_vis {
-                let info = format!("{}/{}", scroll + 1, total);
-                render_text(buffer, width, font, &info, px0 + panel_w - 16 - info.len() * cw, py0 + 10, dim(theme.fg, 0.3));
-            }
+            cx.scrollbar(list, total, max_vis, scroll);
         }
-
-        let div_x = px0 + 16 + half + 2;
-        let dv_px = pack(dim(theme.cursor, 0.3).0, dim(theme.cursor, 0.3).1, dim(theme.cursor, 0.3).2);
-        for y in (py0 + ch + 20)..(py0 + panel_h - ch - 10) { set_px(buffer, width, y, div_x, dv_px); }
-
-        render_text(buffer, width, font, "Up/Down: scroll  Esc: close", px0 + 16, py0 + panel_h - ch - 10, dim(theme.fg, 0.3));
     }
 }
 
@@ -162,4 +135,25 @@ fn extract_lines(terminal: &crate::terminal::Terminal, max_lines: usize) -> Vec<
         .collect()
 }
 
-use crate::ui::{render_text, set_px, fill_rect, pack, lighten, dim, trunc};
+
+#[cfg(test)]
+mod qa_tests {
+    use super::*;
+    use crate::ui::kit::gallery::qa::each_theme;
+
+    #[test]
+    fn renders_diff_and_needs_two_panes() {
+        let a = "one\ntwo\nthree\nsame";
+        let b = "one\nTWO\nthree\nsame";
+        let mut c = CompareView::new();
+        c.visible = true;
+        c.panels = vec![
+            PaneOutput { title: "zsh - left".into(), lines: vec![] },
+            PaneOutput { title: "zsh - right".into(), lines: vec![] },
+        ];
+        c.diff_result = Some(diff(a, b));
+        each_theme("compare", |b, w, h, f, t| c.render(b, w, h, f, t));
+        c.panels.truncate(1);
+        each_theme("compare-one", |b, w, h, f, t| c.render(b, w, h, f, t));
+    }
+}

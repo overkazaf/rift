@@ -82,202 +82,89 @@ impl GitPanel {
         font: &mut crate::renderer::font::FontManager,
         theme: &crate::config::Theme,
     ) {
+        use crate::ui::kit::{Column, Ctx, ListItem, PanelSpec, Tokens, Tone, TableRow, Width};
         if !self.visible {
             return;
         }
+        let tk = Tokens::new(theme, font.cell_width, font.cell_height);
+        let mut cx = Ctx::new(buffer, width, height, font, &tk);
+        cx.backdrop(tk.backdrop);
         let Some(ref info) = self.info else {
+            let rect = cx.centered_cols(48, cx.title_h() + cx.footer_h() + 2 * tk.sp.md + 4 * tk.row_h);
+            let body = cx.panel(rect, &PanelSpec::new("Git").sub("not available").hints(&[("r", "refresh")]));
+            cx.empty_state(body, "Not a git repository", "Run from inside a repo, then press r");
             return;
         };
 
-        // Dim backdrop
-        for px in buffer.iter_mut() {
-            let r = ((*px >> 16) & 0xff) / 3;
-            let g = ((*px >> 8) & 0xff) / 3;
-            let b = (*px & 0xff) / 3;
-            *px = (r << 16) | (g << 8) | b;
-        }
+        let rect = cx.centered_cols(64, height * 3 / 4);
+        let title_sub = format!("on {}", info.branch);
+        let (badge, tone) = if info.is_dirty { ("dirty", Tone::Warning) } else { ("clean", Tone::Success) };
+        let spec = PanelSpec::new("Git")
+            .sub(&title_sub)
+            .badge(badge, tone)
+            .hints(&[("Tab", "section"), ("Up/Down", "scroll"), ("r", "refresh"), ("Esc", "close")]);
+        let body = cx.panel(rect, &spec);
 
-        let cw = font.cell_width;
-        let ch = font.cell_height;
-        let panel_w = (50 * cw).min(width.saturating_sub(40));
-        let panel_h = (height * 3 / 4).min(height.saturating_sub(40));
-        let px = (width.saturating_sub(panel_w)) / 2;
-        let py = (height.saturating_sub(panel_h)) / 2;
+        cx.tabs(body.x, body.y, body.w, &["Status", "Log", "Branches"], self.active_section);
+        cx.divider(body.x, body.y + tk.row_h, body.w);
+        let content = crate::ui::kit::Rect::new(body.x, body.y + tk.row_h + tk.sp.sm, body.w, body.h.saturating_sub(tk.row_h + tk.sp.sm));
+        let vis_rows = cx.rows_fit(content.h);
 
-        let bg = crate::ui::lighten(theme.bg, 6);
-        crate::ui::fill_rect(buffer, width, px, py, panel_w, panel_h, crate::ui::pack_rgb(bg));
-        let border = crate::ui::dim(theme.cursor, 0.4);
-        crate::ui::draw_border(
-            buffer,
-            width,
-            px,
-            py,
-            panel_w,
-            panel_h,
-            crate::ui::pack_rgb(border),
-        );
-
-        let content_x = px + 16;
-        let mut cy = py + 12;
-        let max_chars = (panel_w.saturating_sub(32)) / cw.max(1);
-
-        // Title
-        let dirty = if info.is_dirty { "*" } else { "" };
-        let title = format!("Git: {}{}", info.branch, dirty);
-        crate::ui::render_text(buffer, width, font, &title, content_x, cy, theme.cursor);
-        cy += ch + 8;
-
-        // Section tabs
-        let sections = ["Status", "Log", "Branches"];
-        let mut tx = content_x;
-        for (i, name) in sections.iter().enumerate() {
-            let color = if i == self.active_section {
-                theme.cursor
-            } else {
-                crate::ui::dim(theme.fg, 0.4)
-            };
-            crate::ui::render_text(buffer, width, font, name, tx, cy, color);
-            if i == self.active_section {
-                let uw = name.len() * cw;
-                for x in tx..tx + uw {
-                    crate::ui::set_px(
-                        buffer,
-                        width,
-                        cy + ch + 2,
-                        x,
-                        crate::ui::pack_rgb(theme.cursor),
-                    );
-                }
-            }
-            tx += name.len() * cw + 20;
-        }
-        cy += ch + 8;
-
-        // Separator
-        let sep = crate::ui::dim(theme.fg, 0.1);
-        let sep_end = (content_x + panel_w).saturating_sub(48);
-        for x in content_x..sep_end.min(width) {
-            crate::ui::set_px(buffer, width, cy, x, crate::ui::pack_rgb(sep));
-        }
-        cy += 8;
-
-        // Content
-        let bottom_limit = py + panel_h - ch * 2;
         match self.active_section {
             0 => {
                 if info.status.is_empty() {
-                    crate::ui::render_text(
-                        buffer,
-                        width,
-                        font,
-                        "Clean working tree",
-                        content_x,
-                        cy,
-                        crate::ui::dim(theme.fg, 0.5),
-                    );
+                    cx.empty_state(content, "Clean working tree", "Nothing to commit");
                 } else {
-                    for file in info.status.iter().skip(self.scroll) {
-                        if cy + ch >= bottom_limit {
-                            break;
-                        }
-                        let state_color = match file.state {
-                            'M' => (255, 180, 60),
-                            'A' => (80, 200, 120),
-                            'D' => (255, 80, 80),
-                            '?' => (120, 120, 140),
-                            _ => theme.fg,
-                        };
-                        let state_str = format!("{} ", file.state);
-                        crate::ui::render_text(
-                            buffer,
-                            width,
-                            font,
-                            &state_str,
-                            content_x,
-                            cy,
-                            state_color,
-                        );
-                        let path_trunc =
-                            crate::ui::trunc(&file.path, max_chars.saturating_sub(3));
-                        crate::ui::render_text(
-                            buffer,
-                            width,
-                            font,
-                            path_trunc,
-                            content_x + 3 * cw,
-                            cy,
-                            crate::ui::dim(theme.fg, 0.7),
-                        );
-                        cy += ch + 2;
-                    }
+                    let rows: Vec<TableRow> = info
+                        .status
+                        .iter()
+                        .map(|f| {
+                            let t = match f.state {
+                                'M' => Tone::Warning,
+                                'A' => Tone::Success,
+                                'D' => Tone::Danger,
+                                '?' => Tone::Neutral,
+                                _ => Tone::Accent,
+                            };
+                            TableRow::new(vec![f.state.to_string(), f.path.clone()]).tone(t)
+                        })
+                        .collect();
+                    let scroll = self.scroll.min(rows.len().saturating_sub(vis_rows.saturating_sub(1)));
+                    cx.table(content, &[Column::new("St", Width::Cols(2)), Column::new("Path", Width::Flex(1))], &rows, None, scroll);
                 }
             }
             1 => {
-                for commit in info.log.iter().skip(self.scroll) {
-                    if cy + ch >= bottom_limit {
-                        break;
-                    }
-                    let graph_color = crate::ui::dim(theme.cursor, 0.6);
-                    crate::ui::render_text(
-                        buffer,
-                        width,
-                        font,
-                        &commit.graph,
-                        content_x,
-                        cy,
-                        graph_color,
-                    );
-
-                    let hash_x = content_x + (commit.graph.len() + 1) * cw;
-                    crate::ui::render_text(
-                        buffer,
-                        width,
-                        font,
-                        &commit.hash,
-                        hash_x,
-                        cy,
-                        (255, 180, 60),
-                    );
-
-                    let msg_x = hash_x + 9 * cw;
-                    let max_msg = max_chars.saturating_sub(commit.graph.len() + 10);
-                    let msg = crate::ui::trunc(&commit.message, max_msg);
-                    crate::ui::render_text(buffer, width, font, msg, msg_x, cy, theme.fg);
-                    cy += ch + 2;
+                if info.log.is_empty() {
+                    cx.empty_state(content, "No commits", "");
+                } else {
+                    let gw = info.log.iter().map(|c| c.graph.chars().count()).max().unwrap_or(0);
+                    let rows: Vec<TableRow> = info
+                        .log
+                        .iter()
+                        .map(|c| TableRow::new(vec![format!("{}{}", c.graph, c.hash), c.message.clone()]).tone(Tone::Warning))
+                        .collect();
+                    let scroll = self.scroll.min(rows.len().saturating_sub(vis_rows.saturating_sub(1)));
+                    cx.table(content, &[Column::new("Graph / Hash", Width::Cols(gw + 8)), Column::new("Message", Width::Flex(1))], &rows, None, scroll);
                 }
             }
-            2 => {
-                for branch in info.branches.iter().skip(self.scroll) {
-                    if cy + ch >= bottom_limit {
-                        break;
-                    }
-                    let is_current = branch.starts_with('*');
-                    let color = if is_current {
-                        theme.cursor
-                    } else {
-                        crate::ui::dim(theme.fg, 0.7)
-                    };
-                    let display = crate::ui::trunc(branch, max_chars);
-                    crate::ui::render_text(buffer, width, font, display, content_x, cy, color);
-                    cy += ch + 2;
+            _ => {
+                if info.branches.is_empty() {
+                    cx.empty_state(content, "No branches", "");
+                } else {
+                    let labels: Vec<String> = info.branches.iter().map(|b| b.trim_start_matches('*').trim().to_string()).collect();
+                    let items: Vec<ListItem> = info
+                        .branches
+                        .iter()
+                        .zip(&labels)
+                        .map(|(b, l)| {
+                            if b.starts_with('*') { ListItem::new(l).meta("current").tone(Tone::Accent) } else { ListItem::new(l) }
+                        })
+                        .collect();
+                    let scroll = self.scroll.min(items.len().saturating_sub(vis_rows));
+                    cx.list(content, &items, None, scroll, None);
                 }
             }
-            _ => {}
         }
-
-        // Help
-        let help = "Tab: section  Up/Down: scroll  r: refresh  Esc: close";
-        let help_y = py + panel_h - ch - 10;
-        let help_trunc = crate::ui::trunc(help, max_chars);
-        crate::ui::render_text(
-            buffer,
-            width,
-            font,
-            help_trunc,
-            content_x,
-            help_y,
-            crate::ui::dim(theme.fg, 0.3),
-        );
     }
 }
 
@@ -340,5 +227,32 @@ fn run_git(args: &[&str]) -> Option<String> {
         Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod qa_tests {
+    use super::*;
+    use crate::ui::kit::gallery::qa::each_theme;
+
+    #[test]
+    fn renders_all_sections_and_empty() {
+        let info = || GitInfo {
+            branch: "main".into(),
+            status: vec![
+                FileStatus { state: 'M', path: "src/main.rs".into() },
+                FileStatus { state: 'A', path: "src/ui/kit/mod.rs".into() },
+                FileStatus { state: '?', path: "notes.txt".into() },
+            ],
+            log: vec![CommitInfo { hash: "a1b2c3d".into(), message: "feat: ui kit".into(), graph: "* ".into() }],
+            branches: vec!["* main".into(), "dev".into()],
+            is_dirty: true,
+        };
+        for section in 0..3 {
+            let g = GitPanel { visible: true, info: Some(info()), active_section: section, scroll: 0 };
+            each_theme(&format!("git{section}"), |b, w, h, f, t| g.render(b, w, h, f, t));
+        }
+        let none = GitPanel { visible: true, info: None, active_section: 0, scroll: 0 };
+        each_theme("git-none", |b, w, h, f, t| none.render(b, w, h, f, t));
     }
 }

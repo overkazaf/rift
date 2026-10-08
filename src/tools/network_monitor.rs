@@ -56,42 +56,38 @@ impl NetworkMonitor {
         &self, buffer: &mut [u32], width: usize, height: usize,
         font: &mut crate::renderer::font::FontManager, theme: &crate::config::Theme,
     ) {
+        use crate::ui::kit::{Column, Ctx, PanelSpec, TableRow, Tokens, Tone, Width};
         if !self.visible { return; }
-        crate::ui::dim_backdrop(buffer, 3);
-        let cw = font.cell_width;
-        let ch = font.cell_height;
-        let pw = (55 * cw).min(width - 40);
+        let tk = Tokens::new(theme, font.cell_width, font.cell_height);
+        let mut cx = Ctx::new(buffer, width, height, font, &tk);
+        cx.backdrop(tk.backdrop);
+
         let items = self.connections.len().min(20);
-        let ph = ((items + 4) * (ch + 3) + 40).min(height - 40).max(ch * 6);
-        let px = (width - pw) / 2;
-        let py = (height - ph) / 2;
-
-        crate::ui::fill_rect(buffer, width, px, py, pw, ph, crate::ui::pack_rgb(crate::ui::lighten(theme.bg, 6)));
-        crate::ui::draw_border(buffer, width, px, py, pw, ph, crate::ui::pack_rgb(crate::ui::dim(theme.cursor, 0.4)));
-
-        let mut ty = py + 12;
-        let total = format!("Network ({} connections)", self.connections.len());
-        crate::ui::render_text(buffer, width, font, &total, px + 16, ty, theme.cursor);
-        ty += ch + 8;
-
-        for conn in self.connections.iter().take(items) {
-            if ty + ch >= py + ph - 20 { break; }
-            let color = match conn.state.as_str() {
-                "ESTABLISHED" => (166, 227, 161),
-                "LISTEN" => (137, 180, 250),
-                "TIME_WAIT" => (108, 112, 134),
-                _ => crate::ui::dim(theme.fg, 0.5),
-            };
-            let line = format!("{:<5} {:<22} {:<22} {}",
-                conn.protocol,
-                crate::ui::trunc(&conn.local_addr, 20),
-                crate::ui::trunc(&conn.remote_addr, 20),
-                conn.state);
-            crate::ui::render_text(buffer, width, font, crate::ui::trunc(&line, (pw - 32) / cw), px + 16, ty, color);
-            ty += ch + 3;
+        let want = cx.title_h() + cx.footer_h() + 2 * tk.sp.md + (items.max(3) + 1) * tk.row_h;
+        let rect = cx.centered_cols(80, want.min(height * 3 / 4));
+        let count = format!("{} connections", self.connections.len());
+        let spec = PanelSpec::new("Network")
+            .sub("netstat")
+            .badge(&count, Tone::Neutral)
+            .hints(&[("r", "refresh"), ("Esc", "close")]);
+        let body = cx.panel(rect, &spec);
+        if self.connections.is_empty() {
+            cx.empty_state(body, "No connections", "netstat returned nothing");
+            return;
         }
-
-        crate::ui::render_text(buffer, width, font, "r: refresh  Esc: close", px + 16, py + ph - ch - 10, crate::ui::dim(theme.fg, 0.3));
+        let rows: Vec<TableRow> = self.connections.iter().map(|c| {
+            let tone = match c.state.as_str() {
+                "ESTABLISHED" => Tone::Success,
+                "LISTEN" => Tone::Accent,
+                "TIME_WAIT" | "CLOSE_WAIT" => Tone::Neutral,
+                _ => Tone::Warning,
+            };
+            TableRow::new(vec![c.state.clone(), c.protocol.clone(), c.local_addr.clone(), c.remote_addr.clone()]).tone(tone)
+        }).collect();
+        cx.table(body, &[
+            Column::new("State", Width::Cols(12)), Column::new("Proto", Width::Cols(5)),
+            Column::new("Local", Width::Flex(1)), Column::new("Remote", Width::Flex(1)),
+        ], &rows, None, 0);
     }
 }
 
