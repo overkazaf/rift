@@ -1,0 +1,226 @@
+src/tools/session.rs
+  46dcc8959d90ad53 1-506
+src/renderer/mod.rs
+  46dcc8959d90ad53 10,50,52,63-64,77-78,84,87-96,111-112,127,129,136-137,145-148,151,154-161,174,190-196,198-208,289-292,314-327,393,396-397,399,401,403-405,480,486-487,489-490,493-494,513-547,626,631-636,639,644,652,717,719-785,789-791
+src/tools/compare.rs
+  46dcc8959d90ad53 28
+src/tools/history.rs
+  46dcc8959d90ad53 1-594
+src/ui/menubar.rs
+  46dcc8959d90ad53 53-54,61,84,86-88,90-93,212,244-245,258-259,268,270,279,282-283
+src/terminal/images.rs
+  46dcc8959d90ad53 1-717
+src/app/lifecycle.rs
+  46dcc8959d90ad53 24-31,128-129,132,137-140,145-146,151-152,180-187,191,241,245-249,252,495-500,550-579,606-699,706-713,770-777,818-826,913-923,927-928,939-944,987-1004,1012-1013,1019-1034,1040,1103,1110-1114,1116,1124-1163
+src/tools/exec_preview.rs
+  46dcc8959d90ad53 1-15,17-18,20-36,39-41,43-69,73-88,92-93,95-105,107-117,119-155,157-179,185-216,218-221,223-281,284,286-297,299,301-308,310-320,322-323,325-374,376-392,394-407,409-410,412-431,433,435-439,442-458,460-464,466-467,469-471,473-475,477-483,485-501,503-504,506-519,521-532,535-536,538-545,548-561,563-564,566-659,661,663-698,700-710,712-716,719,735
+src/tools/regex_playground.rs
+  46dcc8959d90ad53 1-1284
+src/window/pane.rs
+  46dcc8959d90ad53 79-83
+src/tools/command_palette.rs
+  46dcc8959d90ad53 1-451
+src/app/shortcuts.rs
+  46dcc8959d90ad53 6,29,145-149,161-171,213,269-282,284,286-309,311-320,330,336-341,365,390,421-434,447-450,466-469,488-489,535-536,538-539,542,544,546,557-562,564-590,602,625-630,663-664,680,700,702,704,706,717,721-726,730-733
+Cargo.toml
+  46dcc8959d90ad53 5,8-9,39,41-46
+src/tools/error_detect.rs
+  46dcc8959d90ad53 100-103
+src/ai/panel.rs
+  46dcc8959d90ad53 93-98,103-106,118
+scripts/bundle_macos.sh
+  46dcc8959d90ad53 1-72
+src/network/webview.rs
+  46dcc8959d90ad53 31,80-85,89-95
+scripts/gen_icon.py
+  46dcc8959d90ad53 1-101
+src/terminal/ansi.rs
+  46dcc8959d90ad53 13-19
+src/ai/backend.rs
+  46dcc8959d90ad53 28-43,142
+src/tools/port_dashboard.rs
+  46dcc8959d90ad53 1-462
+src/window/tab.rs
+  46dcc8959d90ad53 3-8,11,19-219,224-225,233-234,239-241,243-247,250-263,265,269-270,274-276,279,281,284,286,289-294,298,300,303-304,308-313,315-317,322-324,331-350
+src/config/mod.rs
+  46dcc8959d90ad53 7-10
+src/terminal/mod.rs
+  46dcc8959d90ad53 3,7,41-55,99-102,149-151,532-590
+src/window/manager.rs
+  46dcc8959d90ad53 50,53-68,81,121,132,154-157,168,199
+src/ai/mod.rs
+  46dcc8959d90ad53 1,10
+src/ai/advisor.rs
+  46dcc8959d90ad53 1-399
+src/app/mod.rs
+  46dcc8959d90ad53 13,21,25,29,31,33-34,36,38,59-61,64,76,80-83,88,100-105,107,124,129-133,146-148,151,163,167-170,187-193,245-246,252-255,257-275,278-294,306,308-310,325-350,371-394,397-409,412-420,422-430,436-439,523-525
+src/tools/mod.rs
+  46dcc8959d90ad53 3,8,36-38
+src/app/overlays.rs
+  46dcc8959d90ad53 2,7,10,14-18,20-21,29-34,39-42,66-69,88-102,106-108,115-144,246-271,312-315,452-554,650-825
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.8-ntes.9",
+  "base_commit_sha": "ddb7a2c2ab563901d0c569a58420fdf4d82373b6",
+  "prompts": {
+    "46dcc8959d90ad53": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6fa63a6e-29eb-4ea1-9d68-d297cc1526ef",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "nongjiawu",
+      "messages": [],
+      "total_additions": 7900,
+      "total_deletions": 1338,
+      "accepted_lines": 7053,
+      "overriden_lines": 2,
+      "per_file_stats": {
+        "src/window/pane.rs": {
+          "additions": 5,
+          "accepted_lines": 5
+        },
+        "src/tools/error_detect.rs": {
+          "additions": 4,
+          "accepted_lines": 4
+        },
+        "src/tools/command_palette.rs": {
+          "additions": 451,
+          "accepted_lines": 451
+        },
+        "src/ai/mod.rs": {
+          "additions": 3,
+          "deletions": 1,
+          "accepted_lines": 2
+        },
+        "src/renderer/mod.rs": {
+          "additions": 246,
+          "deletions": 125,
+          "accepted_lines": 211
+        },
+        "src/app/shortcuts.rs": {
+          "additions": 204,
+          "deletions": 78,
+          "accepted_lines": 172,
+          "overriden_lines": 2
+        },
+        "src/terminal/mod.rs": {
+          "additions": 84,
+          "deletions": 1,
+          "accepted_lines": 83
+        },
+        "src/app/mod.rs": {
+          "additions": 241,
+          "deletions": 85,
+          "accepted_lines": 185
+        },
+        "src/tools/mod.rs": {
+          "additions": 5,
+          "accepted_lines": 5
+        },
+        "src/window/manager.rs": {
+          "additions": 28,
+          "deletions": 14,
+          "accepted_lines": 27
+        },
+        "src/tools/exec_preview.rs": {
+          "additions": 684,
+          "deletions": 176,
+          "accepted_lines": 682
+        },
+        "assets/icon.png": {
+          "additions": 21,
+          "accepted_lines": 21
+        },
+        "src/tools/session.rs": {
+          "additions": 506,
+          "accepted_lines": 506
+        },
+        "src/window/tab.rs": {
+          "additions": 908,
+          "deletions": 701,
+          "accepted_lines": 307
+        },
+        "src/tools/history.rs": {
+          "additions": 594,
+          "accepted_lines": 594
+        },
+        "src/app/lifecycle.rs": {
+          "additions": 343,
+          "deletions": 73,
+          "accepted_lines": 293
+        },
+        "scripts/gen_icon.py": {
+          "additions": 101,
+          "accepted_lines": 101
+        },
+        "src/terminal/images.rs": {
+          "additions": 727,
+          "deletions": 10,
+          "accepted_lines": 717
+        },
+        "src/ui/menubar.rs": {
+          "additions": 41,
+          "deletions": 30,
+          "accepted_lines": 22
+        },
+        "src/tools/regex_playground.rs": {
+          "additions": 1290,
+          "deletions": 6,
+          "accepted_lines": 1284
+        },
+        "src/config/mod.rs": {
+          "additions": 5,
+          "deletions": 1,
+          "accepted_lines": 4
+        },
+        "src/ai/panel.rs": {
+          "additions": 11,
+          "deletions": 1,
+          "accepted_lines": 11
+        },
+        "src/terminal/ansi.rs": {
+          "additions": 7,
+          "accepted_lines": 7
+        },
+        "src/tools/port_dashboard.rs": {
+          "additions": 462,
+          "accepted_lines": 462
+        },
+        "src/app/overlays.rs": {
+          "additions": 412,
+          "deletions": 33,
+          "accepted_lines": 381
+        },
+        "Cargo.toml": {
+          "additions": 12,
+          "deletions": 1,
+          "accepted_lines": 11
+        },
+        "src/tools/compare.rs": {
+          "additions": 1,
+          "deletions": 1,
+          "accepted_lines": 1
+        },
+        "scripts/bundle_macos.sh": {
+          "additions": 72,
+          "accepted_lines": 72
+        },
+        "src/ai/backend.rs": {
+          "additions": 17,
+          "deletions": 1,
+          "accepted_lines": 17
+        },
+        "src/ai/advisor.rs": {
+          "additions": 399,
+          "accepted_lines": 399
+        },
+        "src/network/webview.rs": {
+          "additions": 16,
+          "accepted_lines": 16
+        }
+      }
+    }
+  }
+}
