@@ -1,0 +1,257 @@
+src/app/overlays.rs
+  46dcc8959d90ad53 40-41,510
+src/terminal/mod.rs
+  46dcc8959d90ad53 4,9,86,102-108,144,158-160,419,421-422
+src/network/browser/field.rs
+  46dcc8959d90ad53 1-224,226-435
+src/app/mod.rs
+  46dcc8959d90ad53 1,4,84-87,89-92,178-179,181-182,337-340,345-346,361-365,390-392,394,401-402,409,411-416,426-431,447-450,466,522,525-528
+src/shell_integration/fish/rift.fish
+  46dcc8959d90ad53 1-38
+src/network/browser/smart_url.rs
+  46dcc8959d90ad53 1-192
+src/tools/blocks.rs
+  46dcc8959d90ad53 6-9,12-13,25-26,29-39,48,89,94-96,107,112-116,118,135-153,156-157,160-226,233-234,237,300-329
+src/terminal/images.rs
+  46dcc8959d90ad53 121-126
+src/network/mod.rs
+  46dcc8959d90ad53 1
+src/ui/menubar.rs
+  46dcc8959d90ad53 3,46,69,197-226,229-243,253,256-260,391-395
+src/tools/search.rs
+  46dcc8959d90ad53 83
+src/main.rs
+  46dcc8959d90ad53 9
+src/shell_integration/zsh/zshenv
+  46dcc8959d90ad53 1-28
+src/shell_integration/mod.rs
+  46dcc8959d90ad53 1-164
+src/tools/exec_preview.rs
+  46dcc8959d90ad53 87-100,474-478,696-709,712,722,738
+src/terminal/semantic.rs
+  46dcc8959d90ad53 1-11,13-23,26-27,29-300
+src/network/webview.rs
+  46dcc8959d90ad53 2,5-6,8-37,42-44,46-50,54-55,62-63,65-75,77-81,85,88-105,109,112,114-118,127-128,134-179,182,187-208,211,214,216-230,233-234,237,241-246,263,273-278
+src/renderer/font.rs
+  46dcc8959d90ad53 1-15,17-124,126-188,191-192,194,199-209,235-251,254-274,276-279,281-287,289-296,298-312,315-528
+src/tools/session.rs
+  46dcc8959d90ad53 13-14,33-36,51-58,121,125,134-178,187,191,208-211,342-345,347,374-376,383-403,405-424,618-691
+src/shell_integration/bash/rift.bash
+  46dcc8959d90ad53 1-78
+src/window/tab.rs
+  46dcc8959d90ad53 11-45,57-88,92-97,99-101,103-104,108-109,115-121,146-214,218-234,243,254,295,303,313,348-413,416-418,423,425-426,428-429,434-442,444-500,527-537,544,546-547,557,595-596,599-620,623-624,627-634,637-642,645-647,657-658,662-664,677,685,690-737,744,748-749,757-1004
+src/network/browser/chrome.rs
+  46dcc8959d90ad53 1-540
+src/window/pane.rs
+  46dcc8959d90ad53 57-64
+src/shell_integration/zsh/rift-integration.zsh
+  46dcc8959d90ad53 1-83
+src/app/panes.rs
+  46dcc8959d90ad53 1-205
+src/app/ime.rs
+  46dcc8959d90ad53 1-13,17-57,60-142,146-159,162,168,170,172-173,175-182,186-187,189,191-192,195-207,209-218
+src/app/shortcuts.rs
+  46dcc8959d90ad53 12,14,30-39,96-98,147,265,298,308-311,388-390,417-418,518,539-540,544,573,642-646,648,678
+src/app/lifecycle.rs
+  46dcc8959d90ad53 23-24,243-250,265,765-767,775,783-795,866-885,892-894,960,963-964,982-984,1079-1106,1108-1126,1129
+src/tools/command_palette.rs
+  46dcc8959d90ad53 2,49,323-339
+src/network/browser/input.rs
+  46dcc8959d90ad53 1-268
+src/terminal/ansi.rs
+  46dcc8959d90ad53 203-211
+src/window/manager.rs
+  46dcc8959d90ad53 3-4,11-13,25,76-77,103-120,122-158,203-204,206-215
+src/network/browser/mod.rs
+  46dcc8959d90ad53 1-377
+src/renderer/mod.rs
+  46dcc8959d90ad53 5-7,12-13,17-199,206-226,229-240,252-266,273-290,306,318,320,323,330-347,349-350,353-357,359-373,376-388,391-397,401,404-406,409-420,422,428,597-605,631,633-635,637,639-642,644-652,654-659,661-662,664-669,673-682,684-686,692-699,716-726,730-732,734-738,740-768,770-783,785,787,789-796,798-816,818-820,822-824,826-842,848-852,858-860,862-871,873-897,899-900,902-921,926-943,961-963,971,973-1020,1022-1051,1058-1074,1077-1078,1086-1091,1115-1118,1122-1127,1198,1270,1414,1449-1450,1460,1462,1490
+src/pty.rs
+  46dcc8959d90ad53 5,16-20,26-31
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.8-ntes.9",
+  "base_commit_sha": "46488bdf5a894b777f878e758936dcb9f54a7685",
+  "prompts": {
+    "46dcc8959d90ad53": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6fa63a6e-29eb-4ea1-9d68-d297cc1526ef",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "nongjiawu",
+      "messages": [],
+      "total_additions": 5939,
+      "total_deletions": 676,
+      "accepted_lines": 5845,
+      "overriden_lines": 32,
+      "per_file_stats": {
+        "src/network/browser/mod.rs": {
+          "additions": 393,
+          "deletions": 16,
+          "accepted_lines": 377
+        },
+        "src/window/tab.rs": {
+          "additions": 701,
+          "deletions": 47,
+          "accepted_lines": 699
+        },
+        "src/app/overlays.rs": {
+          "additions": 3,
+          "deletions": 77,
+          "accepted_lines": 3
+        },
+        "src/pty.rs": {
+          "additions": 13,
+          "deletions": 5,
+          "accepted_lines": 12
+        },
+        "src/network/browser/input.rs": {
+          "additions": 268,
+          "accepted_lines": 268
+        },
+        "src/terminal/mod.rs": {
+          "additions": 17,
+          "deletions": 4,
+          "accepted_lines": 17
+        },
+        "src/app/lifecycle.rs": {
+          "additions": 110,
+          "deletions": 7,
+          "accepted_lines": 108,
+          "overriden_lines": 2
+        },
+        "src/shell_integration/fish/rift.fish": {
+          "additions": 38,
+          "accepted_lines": 38
+        },
+        "src/tools/exec_preview.rs": {
+          "additions": 37,
+          "deletions": 4,
+          "accepted_lines": 37
+        },
+        "src/app/shortcuts.rs": {
+          "additions": 43,
+          "deletions": 117,
+          "accepted_lines": 42
+        },
+        "src/shell_integration/zsh/zshenv": {
+          "additions": 28,
+          "accepted_lines": 28
+        },
+        "src/window/manager.rs": {
+          "additions": 76,
+          "deletions": 15,
+          "accepted_lines": 75
+        },
+        "src/app/panes.rs": {
+          "additions": 205,
+          "accepted_lines": 205
+        },
+        "src/renderer/font.rs": {
+          "additions": 491,
+          "deletions": 37,
+          "accepted_lines": 491
+        },
+        "src/network/browser/chrome.rs": {
+          "additions": 540,
+          "deletions": 14,
+          "accepted_lines": 540
+        },
+        "src/tools/blocks.rs": {
+          "additions": 156,
+          "deletions": 4,
+          "accepted_lines": 155,
+          "overriden_lines": 1
+        },
+        "src/ui/menubar.rs": {
+          "additions": 80,
+          "deletions": 20,
+          "accepted_lines": 60
+        },
+        "src/tools/session.rs": {
+          "additions": 196,
+          "deletions": 9,
+          "accepted_lines": 196
+        },
+        "src/network/webview.rs": {
+          "additions": 205,
+          "deletions": 23,
+          "accepted_lines": 205
+        },
+        "src/app/ime.rs": {
+          "additions": 205,
+          "accepted_lines": 192,
+          "overriden_lines": 21
+        },
+        "src/window/pane.rs": {
+          "additions": 12,
+          "accepted_lines": 12
+        },
+        "src/shell_integration/mod.rs": {
+          "additions": 164,
+          "accepted_lines": 164
+        },
+        "src/tools/command_palette.rs": {
+          "additions": 19,
+          "accepted_lines": 19
+        },
+        "src/terminal/ansi.rs": {
+          "additions": 9,
+          "accepted_lines": 9
+        },
+        "src/network/mod.rs": {
+          "additions": 1,
+          "accepted_lines": 1
+        },
+        "src/app/mod.rs": {
+          "additions": 59,
+          "deletions": 35,
+          "accepted_lines": 55
+        },
+        "src/tools/search.rs": {
+          "additions": 1,
+          "deletions": 1,
+          "accepted_lines": 1
+        },
+        "src/terminal/semantic.rs": {
+          "additions": 299,
+          "deletions": 2,
+          "accepted_lines": 296,
+          "overriden_lines": 2
+        },
+        "src/main.rs": {
+          "additions": 1,
+          "accepted_lines": 1
+        },
+        "src/network/browser/field.rs": {
+          "additions": 442,
+          "accepted_lines": 434
+        },
+        "src/network/browser/smart_url.rs": {
+          "additions": 192,
+          "accepted_lines": 192
+        },
+        "src/shell_integration/bash/rift.bash": {
+          "additions": 78,
+          "accepted_lines": 78
+        },
+        "src/shell_integration/zsh/rift-integration.zsh": {
+          "additions": 83,
+          "accepted_lines": 83
+        },
+        "src/terminal/images.rs": {
+          "additions": 6,
+          "accepted_lines": 6
+        },
+        "src/renderer/mod.rs": {
+          "additions": 768,
+          "deletions": 239,
+          "accepted_lines": 746,
+          "overriden_lines": 6
+        }
+      }
+    }
+  }
+}
