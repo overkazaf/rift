@@ -22,12 +22,17 @@ mod tools;
 #[allow(dead_code)]
 mod plugin;
 mod platform;
+mod screenshot;
 
 use winit::event_loop::EventLoop;
 
 fn main() {
     // CLI argument parsing (no external crate)
     let args: Vec<String> = std::env::args().collect();
+    // Headless scene renderer: no window, no event loop, no shell.
+    if args.iter().any(|a| a == "--screenshot") {
+        std::process::exit(screenshot::run(&args[1..]));
+    }
     for arg in &args[1..] {
         match arg.as_str() {
             "--version" | "-V" => {
@@ -83,6 +88,8 @@ fn print_help() {
     println!("  -h, --help       Print this help message");
     println!("  -V, --version    Print version");
     println!("  --config PATH    Use custom config file");
+    println!("  --screenshot SCENE|all --out DIR [--width 1600 --height 1000 --theme NAME]");
+    println!("                   Render product screenshots offscreen (no window)");
     println!();
     println!("CONFIG: ~/.config/rift/config.toml");
     println!();

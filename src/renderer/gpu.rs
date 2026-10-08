@@ -299,6 +299,180 @@ impl GpuPipeline {
     }
 }
 
+// ── Offscreen rendering (headless screenshots) ──
+
+/// Run the effect shader (or a plain blit when `effect` is `None`) over
+/// `pixels` (0x00RRGGBB, `width * height`) on the GPU without any window or
+/// surface, and read the result back. Same shader, texture formats and
+/// uniforms as [`GpuPipeline::render_frame`], so the output matches what the
+/// app shows with the GPU renderer.
+pub fn render_offscreen(
+    pixels: &[u32],
+    width: u32,
+    height: u32,
+    effect: Option<ActiveEffect>,
+    time: f32,
+) -> Result<Vec<u32>, String> {
+    if width == 0 || height == 0 || pixels.len() < (width * height) as usize {
+        return Err("bad frame size".into());
+    }
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::all(),
+        flags: wgpu::InstanceFlags::empty(),
+        memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
+        backend_options: wgpu::BackendOptions::default(),
+        display: None,
+    });
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+        .map_err(|e| format!("No GPU adapter: {e}"))?;
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        label: Some("rift-offscreen"),
+        ..Default::default()
+    }))
+    .map_err(|e| format!("request_device: {e}"))?;
+
+    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+    let input = create_texture(&device, width, height);
+    let input_view = input.create_view(&Default::default());
+    let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+    for &px in pixels.iter().take((width * height) as usize) {
+        rgba.extend_from_slice(&[(px >> 16) as u8, (px >> 8) as u8, px as u8, 255]);
+    }
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &input,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &rgba,
+        wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4 * width), rows_per_image: Some(height) },
+        wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+    );
+
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        ..Default::default()
+    });
+    let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("fx_uniforms"),
+        size: std::mem::size_of::<FxUniforms>() as u64,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let (pipeline, bind_group) = if let Some(fx) = effect.as_ref() {
+        queue.write_buffer(&uniforms, 0, bytemuck::bytes_of(&FxUniforms::new(fx, time, width, height)));
+        let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("fx_bgl"),
+            entries: &[tex_entry(0), sampler_entry(1), uniform_entry(2)],
+        });
+        let bg = make_fx_bg(&device, &bgl, &input_view, &sampler, &uniforms);
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("fx_shader"),
+            source: wgpu::ShaderSource::Wgsl(FX_WGSL.into()),
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("fx_layout"),
+            bind_group_layouts: &[Some(&bgl)],
+            immediate_size: 0,
+        });
+        (create_pipeline(&device, &layout, &module, format, "fx"), bg)
+    } else {
+        let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("blit_bgl"),
+            entries: &[tex_entry(0), sampler_entry(1)],
+        });
+        let bg = make_blit_bg(&device, &bgl, &input_view, &sampler);
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("blit_shader"),
+            source: wgpu::ShaderSource::Wgsl(BLIT_WGSL.into()),
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("blit_layout"),
+            bind_group_layouts: &[Some(&bgl)],
+            immediate_size: 0,
+        });
+        (create_pipeline(&device, &layout, &module, format, "blit"), bg)
+    };
+
+    let extent = wgpu::Extent3d { width, height, depth_or_array_layers: 1 };
+    let target = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("offscreen_target"),
+        size: extent,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let target_view = target.create_view(&Default::default());
+    let bytes_per_row = (4 * width).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+    let readback = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("offscreen_readback"),
+        size: (bytes_per_row * height) as u64,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("offscreen_enc") });
+    {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("offscreen_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &target_view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.draw(0..3, 0..1);
+    }
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture: &target,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &readback,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(bytes_per_row),
+                rows_per_image: Some(height),
+            },
+        },
+        extent,
+    );
+    queue.submit(std::iter::once(encoder.finish()));
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    readback.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+        let _ = tx.send(r);
+    });
+    device
+        .poll(wgpu::PollType::Wait { submission_index: None, timeout: None })
+        .map_err(|e| format!("poll: {e}"))?;
+    rx.recv().map_err(|e| e.to_string())?.map_err(|e| format!("map: {e}"))?;
+    let data = readback.slice(..).get_mapped_range().map_err(|e| format!("mapped range: {e}"))?;
+    let mut out = Vec::with_capacity((width * height) as usize);
+    for row in 0..height as usize {
+        let line = &data[row * bytes_per_row as usize..row * bytes_per_row as usize + 4 * width as usize];
+        out.extend(line.chunks_exact(4).map(|p| (p[0] as u32) << 16 | (p[1] as u32) << 8 | p[2] as u32));
+    }
+    drop(data);
+    readback.unmap();
+    Ok(out)
+}
+
 // ── Helpers ──
 
 fn make_blit_bg(

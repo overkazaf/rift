@@ -51,7 +51,7 @@ pub fn save_session(wm: &WindowManager) -> Result<(), String> {
             layout: (tab.pane_count() > 1).then(|| {
                 tab.root.map_leaves(&mut |pane| match pane.pty {
                     // A remote shell's cwd means nothing locally.
-                    PtyKind::Ssh(_) => None,
+                    PtyKind::Ssh(_) | PtyKind::Inert => None,
                     PtyKind::Local(_) => Some(detect_working_dir(&pane.terminal)).filter(|d| d != "~"),
                 })
             }),

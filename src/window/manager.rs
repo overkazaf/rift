@@ -15,7 +15,8 @@ pub struct WindowManager {
     pub tabs: Vec<Tab>,
     pub active_tab: usize,
     next_pane_id: usize,
-    proxy: EventLoopProxy<()>,
+    /// `None` for headless managers (screenshots): panes are inert.
+    proxy: Option<EventLoopProxy<()>>,
     /// Content area from the last `resize_all`; used for geometric decisions
     /// (e.g. which pane takes focus after a close).
     last_area: PaneRect,
@@ -30,9 +31,30 @@ impl WindowManager {
             tabs: vec![tab],
             active_tab: 0,
             next_pane_id: 1,
-            proxy,
+            proxy: Some(proxy),
             last_area: PaneRect { x: 0, y: 0, width: 0, height: 0 },
             tab_events: Vec::new(),
+        }
+    }
+
+    /// Manager without an event loop: every pane is an inert scripted pane
+    /// (see [`Pane::scripted`]). Used by the headless screenshot renderer.
+    pub fn headless(cols: usize, rows: usize) -> Self {
+        Self {
+            tabs: vec![Tab::new(Pane::scripted(0, cols, rows))],
+            active_tab: 0,
+            next_pane_id: 1,
+            proxy: None,
+            last_area: PaneRect { x: 0, y: 0, width: 0, height: 0 },
+            tab_events: Vec::new(),
+        }
+    }
+
+    /// Spawn a shell pane, or an inert one when headless.
+    fn make_pane(&self, id: usize, cols: usize, rows: usize, cwd: Option<&str>) -> Pane {
+        match &self.proxy {
+            Some(p) => Pane::new_in(id, cols, rows, p.clone(), cwd),
+            None => Pane::scripted(id, cols, rows),
         }
     }
 
@@ -60,7 +82,7 @@ impl WindowManager {
 
     pub fn new_tab(&mut self, cols: usize, rows: usize) {
         let id = self.alloc_id();
-        let pane = Pane::new(id, cols, rows, self.proxy.clone());
+        let pane = self.make_pane(id, cols, rows, None);
         let tab = Tab::new(pane);
         self.tabs.push(tab);
         self.active_tab = self.tabs.len() - 1;
@@ -151,7 +173,7 @@ impl WindowManager {
         let (cols, rows, cwd) = {
             let p = self.tabs[idx].active_pane();
             let cwd = match p.pty {
-                PtyKind::Local(_) => p.terminal.cwd.clone(),
+                PtyKind::Local(_) | PtyKind::Inert => p.terminal.cwd.clone(),
                 PtyKind::Ssh(_) => None, // remote path is meaningless locally
             };
             (p.terminal.cols, p.terminal.rows, cwd)
@@ -161,7 +183,7 @@ impl WindowManager {
             SplitDir::Horizontal => ((cols / 2).max(1), rows),
             SplitDir::Vertical => (cols, (rows / 2).max(1)),
         };
-        let pane = Pane::new_in(id, c, r, self.proxy.clone(), cwd.as_deref());
+        let pane = self.make_pane(id, c, r, cwd.as_deref());
         self.tabs[idx].split(dir, pane);
         true
     }
@@ -170,6 +192,7 @@ impl WindowManager {
     /// layout. The existing pane becomes the first leaf; every other leaf is
     /// spawned in its saved working directory.
     pub fn restore_layout(&mut self, tab_idx: usize, layout: &PaneNode<Option<String>>, active: usize) {
+        let headless = self.proxy.is_none();
         let proxy = self.proxy.clone();
         let mut next = self.next_pane_id;
         let Some(tab) = self.tabs.get_mut(tab_idx) else { return };
@@ -188,7 +211,10 @@ impl WindowManager {
             None => {
                 let id = next;
                 next += 1;
-                Pane::new_in(id, (cols / 2).max(1), rows, proxy.clone(), cwd.as_deref())
+                match &proxy {
+                    Some(p) if !headless => Pane::new_in(id, (cols / 2).max(1), rows, p.clone(), cwd.as_deref()),
+                    _ => Pane::scripted(id, (cols / 2).max(1), rows),
+                }
             }
         });
         tab.active = active.min(tab.pane_count().saturating_sub(1));
@@ -268,7 +294,7 @@ impl WindowManager {
     }
 
     pub fn get_proxy(&self) -> EventLoopProxy<()> {
-        self.proxy.clone()
+        self.proxy.clone().expect("headless WindowManager has no event loop")
     }
 
     pub fn alloc_pane_id(&mut self) -> usize {

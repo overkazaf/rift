@@ -75,6 +75,22 @@ impl Hud {
         hud
     }
 
+    /// A HUD showing fixed data and history instead of live system stats
+    /// (headless screenshots). Never refreshes from the OS.
+    pub fn with_data(data: HudData, cpu_hist: &[f32], mem_hist: &[f32]) -> Self {
+        Self {
+            last_update: Instant::now(),
+            update_interval: Duration::from_secs(u64::MAX / 4),
+            mem_used_mb: 0,
+            mem_total_mb: 0,
+            cpu_usage: data.cpu_pct,
+            cached: data,
+            static_inited: true,
+            cpu_hist: cpu_hist.iter().copied().collect(),
+            mem_hist: mem_hist.iter().copied().collect(),
+        }
+    }
+
     pub fn needs_update(&self) -> bool {
         self.last_update.elapsed() >= self.update_interval
     }
@@ -441,8 +457,15 @@ pub fn draw(cx: &mut Ctx, hud: &Hud, y0: usize, height: usize) {
     cx.text(x, row3, &data.disk_label, tk.text);
     x += (data.disk_label.chars().count()) * cw;
     x = sep(cx, x, row3);
-    cx.text(x, row3, &format!("LOAD {}", data.load_avg), tk.text_faint);
-    cx.text_right(right, row3, &format!("PID {} | {}", data.pid, data.rust_version), tk.text_faint);
+    let load = format!("LOAD {}", data.load_avg);
+    cx.text(x, row3, &load, tk.text_faint);
+    x += load.chars().count() * cw;
+    // The right-aligned PID / version tag is dropped when the left side
+    // already reaches it (narrow windows or large fonts).
+    let tag = format!("PID {} | {}", data.pid, data.rust_version);
+    if x + 2 * cw <= right.saturating_sub(tag.chars().count() * cw) {
+        cx.text_right(right, row3, &tag, tk.text_faint);
+    }
 }
 
 #[cfg(test)]

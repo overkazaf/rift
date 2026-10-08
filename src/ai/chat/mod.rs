@@ -166,6 +166,12 @@ impl ChatUi {
         }
     }
 
+    /// Show the "answering" state without a network stream (screenshots).
+    pub fn show_streaming(&mut self) {
+        self.stream = Some(stream::StreamHandle::detached());
+        self.started = Instant::now();
+    }
+
     pub fn is_streaming(&self) -> bool {
         self.stream.is_some()
     }

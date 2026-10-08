@@ -324,6 +324,16 @@ fn fit(chars: &[char], cols: usize) -> String {
     s
 }
 
+/// What the toolbar shows about the page (a `WebViewPane` snapshot, which
+/// the headless screenshot renderer can build without a native webview).
+pub struct PageInfo<'a> {
+    pub url: &'a str,
+    pub title: &'a str,
+    pub loading: bool,
+    pub can_back: bool,
+    pub can_forward: bool,
+}
+
 /// Draw the gutter, toolbar, address field and progress bar.
 #[allow(clippy::too_many_arguments)]
 pub fn render(
@@ -333,6 +343,29 @@ pub fn render(
     layout: &BrowserLayout,
     ui: &mut BrowserUi,
     pane: &WebViewPane,
+    maximized: bool,
+    font: &mut FontManager,
+    theme: &Theme,
+) {
+    let info = PageInfo {
+        url: &pane.url,
+        title: &pane.title,
+        loading: pane.loading,
+        can_back: pane.can_back,
+        can_forward: pane.can_forward,
+    };
+    render_page(buf, bw, bh, layout, ui, &info, maximized, font, theme);
+}
+
+/// [`render`] with the page state passed explicitly.
+#[allow(clippy::too_many_arguments)]
+pub fn render_page(
+    buf: &mut [u32],
+    bw: usize,
+    bh: usize,
+    layout: &BrowserLayout,
+    ui: &mut BrowserUi,
+    pane: &PageInfo,
     maximized: bool,
     font: &mut FontManager,
     theme: &Theme,

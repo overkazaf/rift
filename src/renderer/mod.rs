@@ -837,7 +837,7 @@ impl Renderer {
 
             if has_glyph && !wide && !is_cursor {
                 // Fast path: one pre-blended (glyph, fg, bg) tile, copied row-wise.
-                let under = if cell.bg != Color::Default { bg } else { self.theme.bg };
+                let under = if cell.bg != Color::Default || cell.attrs.reverse { bg } else { self.theme.bg };
                 let fg_px = pack(fg.0, fg.1, fg.2);
                 let bg_px = pack(under.0, under.1, under.2);
                 let tkey = (cell.c, fg_px, bg_px);
@@ -915,7 +915,7 @@ impl Renderer {
         } else { cw };
 
         // Background fill
-        if cell.bg != Color::Default || (is_cursor && cursor_style == crate::terminal::CursorStyle::Block) {
+        if cell.bg != Color::Default || cell.attrs.reverse || (is_cursor && cursor_style == crate::terminal::CursorStyle::Block) {
             let fill = if is_cursor && cursor_style == crate::terminal::CursorStyle::Block {
                 self.theme.cursor
             } else { bg };
@@ -1134,7 +1134,7 @@ impl Renderer {
                 let is_cursor = row == cursor_row && col == cursor_col;
 
                 let fill = if is_cursor { self.theme.cursor } else { bg };
-                if is_cursor || cell.bg != Color::Default {
+                if is_cursor || cell.bg != Color::Default || cell.attrs.reverse {
                     let px = pack(fill.0, fill.1, fill.2);
                     for cy in 0..ch {
                         let offset = (y0 + cy) * buf_width + x0;
@@ -1555,7 +1555,7 @@ mod tests {
                 let (x0, y0) = (col * cw, row * ch);
                 let (mut fg, mut cbg) = (r.resolve(cell.fg, true), r.resolve(cell.bg, false));
                 if cell.attrs.reverse { std::mem::swap(&mut fg, &mut cbg); }
-                if cell.bg != Color::Default {
+                if cell.bg != Color::Default || cell.attrs.reverse {
                     let px = pack(cbg.0, cbg.1, cbg.2);
                     for cy in 0..ch {
                         let o = (y0 + cy) * w + x0;
@@ -1647,4 +1647,32 @@ mod tests {
         println!("new    cat flood (3 lines/frame) + memcpy  : {cat:8.3} ms");
         println!("       (memcpy of back buffer alone        : {copy:8.3} ms)");
     }
+
+    /// SGR 7 on a default-background cell must paint the swapped background;
+    /// otherwise the glyph is drawn in the bg color on a bg-colored cell and
+    /// vanishes (zsh highlights pasted text with reverse video).
+    #[test]
+    fn reverse_video_on_default_bg_is_visible() {
+        let path = crate::config::resolve_font_path(&crate::config::Config::default());
+        if !std::path::Path::new(&path).exists() {
+            return;
+        }
+        let mut r = Renderer::new(&path, 16.0, crate::config::Theme::catppuccin_mocha());
+        let (cw, ch) = (r.cell_width(), r.cell_height());
+        let mut t = Terminal::new(4, 1);
+        t.grid[0][0].c = 'X';
+        t.grid[0][0].attrs.reverse = true;
+        t.grid[0][1].attrs.reverse = true; // reversed blank
+        let (w, h) = (cw * 4, ch);
+        let mut buf = vec![0u32; w * h];
+        let rect = PaneRect { x: 0, y: 0, width: w, height: h };
+        r.render_pane_inner(&t, &mut buf, w, h, rect, false, false);
+        let fg = r.theme.fg;
+        let fg_px = pack(fg.0, fg.1, fg.2);
+        // The reversed blank cell is filled with the old foreground color.
+        assert_eq!(buf[(ch / 2) * w + cw + cw / 2], fg_px);
+        // The reversed 'X' cell has a foreground-colored background somewhere.
+        assert!((0..ch).any(|y| (0..cw).any(|x| buf[y * w + x] == fg_px)));
+    }
+
 }

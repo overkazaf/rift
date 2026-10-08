@@ -569,7 +569,7 @@ impl CommandPalette {
         Self::with_parts(history, history_path())
     }
 
-    fn with_parts(history: History, history_file: Option<PathBuf>) -> Self {
+    pub(crate) fn with_parts(history: History, history_file: Option<PathBuf>) -> Self {
         let mut p = Self {
             visible: false,
             query: String::new(),
@@ -861,7 +861,7 @@ impl CommandPalette {
 
     // ── editing ──
 
-    fn set_query(&mut self, q: &str) {
+    pub(crate) fn set_query(&mut self, q: &str) {
         self.query = q.to_string();
         self.cursor = self.query.chars().count();
         self.on_query_changed();

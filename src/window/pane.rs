@@ -7,6 +7,10 @@ use winit::event_loop::EventLoopProxy;
 pub enum PtyKind {
     Local(Pty),
     Ssh(SshPty),
+    /// No process behind the pane: reads yield nothing and writes are dropped.
+    /// Used by the headless screenshot renderer, which feeds bytes via
+    /// [`Pane::feed`].
+    Inert,
 }
 
 impl PtyKind {
@@ -14,6 +18,7 @@ impl PtyKind {
         match self {
             PtyKind::Local(p) => p.try_read(),
             PtyKind::Ssh(s) => s.try_read(),
+            PtyKind::Inert => None,
         }
     }
 
@@ -21,6 +26,7 @@ impl PtyKind {
         match self {
             PtyKind::Local(p) => p.write(data),
             PtyKind::Ssh(s) => s.write(data),
+            PtyKind::Inert => {}
         }
     }
 
@@ -28,6 +34,7 @@ impl PtyKind {
         match self {
             PtyKind::Local(p) => p.resize(cols, rows, 0, 0),
             PtyKind::Ssh(s) => s.resize(cols, rows),
+            PtyKind::Inert => {}
         }
     }
 }
@@ -78,23 +85,41 @@ impl Pane {
         }
     }
 
+    /// Pane with no process behind it (see [`PtyKind::Inert`]). Content is
+    /// supplied with [`Pane::feed`]; anything written to it is dropped.
+    pub fn scripted(id: usize, cols: usize, rows: usize) -> Self {
+        Self {
+            id,
+            terminal: Terminal::new(cols, rows),
+            pty: PtyKind::Inert,
+            vt_parser: vte::Parser::new(),
+            recorder: None,
+            label: None,
+        }
+    }
+
+    /// Run `data` through the VT parser exactly as PTY output would be.
+    pub fn feed(&mut self, data: &[u8]) {
+        let terminal = &mut self.terminal;
+        let parser = &mut self.vt_parser;
+        let mut handler = AnsiHandler::new(terminal);
+        for &byte in data {
+            // Kitty graphics protocol data travels inside an APC string
+            // (`ESC _ ... ST`), which `vte`'s Perform trait has no
+            // callback for. Scan for it in parallel — see
+            // AnsiHandler::feed_apc_byte for details.
+            handler.feed_apc_byte(byte);
+            parser.advance(&mut handler, byte);
+        }
+    }
+
     pub fn process_output(&mut self) -> bool {
         let mut changed = false;
         while let Some(data) = self.pty.try_read() {
             if let Some(rec) = &mut self.recorder {
                 rec.record_output(&data);
             }
-            let terminal = &mut self.terminal;
-            let parser = &mut self.vt_parser;
-            let mut handler = AnsiHandler::new(terminal);
-            for &byte in &data {
-                // Kitty graphics protocol data travels inside an APC string
-                // (`ESC _ ... ST`), which `vte`'s Perform trait has no
-                // callback for. Scan for it in parallel — see
-                // AnsiHandler::feed_apc_byte for details.
-                handler.feed_apc_byte(byte);
-                parser.advance(&mut handler, byte);
-            }
+            self.feed(&data);
             changed = true;
         }
         changed

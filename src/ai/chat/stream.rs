@@ -64,6 +64,13 @@ impl StreamHandle {
         self.cancel.store(true, Ordering::Relaxed);
     }
 
+    /// A handle with no worker behind it: the chat UI shows its "answering"
+    /// state. Used by the headless screenshot renderer, which never polls it.
+    pub fn detached() -> StreamHandle {
+        let (_tx, rx) = channel();
+        StreamHandle { rx, cancel: Arc::new(AtomicBool::new(false)) }
+    }
+
     /// A handle fed by hand (tests / replaying fixtures).
     #[cfg(test)]
     pub fn manual() -> (std::sync::mpsc::Sender<StreamEvent>, StreamHandle) {

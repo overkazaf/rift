@@ -84,6 +84,12 @@ impl BlockManager {
         self.blocks.last()
     }
 
+    /// Mutable access to the finished blocks (the headless screenshot
+    /// renderer sets timing fields directly instead of waiting in real time).
+    pub fn blocks_mut(&mut self) -> &mut [CommandBlock] {
+        &mut self.blocks
+    }
+
     /// Is a command currently running?
     pub fn is_running(&self) -> bool {
         self.current.is_some() || self.osc.running.is_some()

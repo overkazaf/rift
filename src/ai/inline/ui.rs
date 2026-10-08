@@ -15,27 +15,37 @@ const ASK_KEY: &str = "Super+K";
 /// Top y of a bar of height `bar_h` for a prompt on screen row `cur_row`:
 /// in the (blank) row below the prompt when there is room, otherwise in the
 /// row above it. `None` when neither exists.
+///
+/// A bar taller than a text row (HiDPI: kit paddings scale with the font, so
+/// `bar_h` can be ~2 rows) is aligned to the *far* edge of its row instead of
+/// centred on it, so it never covers the prompt line itself: below the prompt
+/// it starts at the top of the row under it, above the prompt it ends at the
+/// prompt's top edge. A bar that is not taller than a row stays centred.
 pub(crate) fn bar_top(rect_y: usize, rect_h: usize, ch: usize, bar_h: usize, cur_row: usize, below_blank: bool) -> Option<usize> {
-    let centered = |row: usize| {
-        let mid = (rect_y + row * ch + ch / 2) as isize;
-        (mid - (bar_h / 2) as isize).max(rect_y as isize) as usize
-    };
-    if below_blank && (cur_row + 2) * ch <= rect_h {
-        Some(centered(cur_row + 1))
-    } else if cur_row >= 1 {
-        Some(centered(cur_row - 1))
-    } else {
-        None
+    let slack = ch.saturating_sub(bar_h) / 2; // > 0 only when the bar is shorter than a row
+    if below_blank {
+        let top = rect_y + (cur_row + 1) * ch + slack;
+        if top + bar_h <= rect_y + rect_h {
+            return Some(top);
+        }
     }
+    if cur_row >= 1 {
+        let prompt_top = rect_y + cur_row * ch;
+        let top = if bar_h > ch { prompt_top.saturating_sub(bar_h) } else { prompt_top - ch + slack };
+        return Some(top.max(rect_y));
+    }
+    None
 }
 
-/// Top y of the popover: just below `anchor_row` when it fits, else above.
+/// Top y of the popover: directly under `anchor_row` when it fits, else
+/// directly above it. The popover is a whole number of rows tall (see `draw`)
+/// and starts/ends on a row boundary, so it never cuts a text row in half.
 pub(crate) fn popover_top(rect_y: usize, rect_h: usize, ch: usize, pop_h: usize, anchor_row: usize) -> usize {
-    let below = rect_y + (anchor_row + 1) * ch + ch / 2;
+    let below = rect_y + (anchor_row + 1) * ch;
     if below + pop_h <= rect_y + rect_h {
         return below;
     }
-    let above = (rect_y + anchor_row * ch).saturating_sub(pop_h + ch / 2);
+    let above = (rect_y + anchor_row * ch).saturating_sub(pop_h);
     above.max(rect_y)
 }
 
@@ -228,7 +238,10 @@ pub fn draw(
     if let Some(pop) = &ai.popover {
         let pad = tk.sp.sm;
         let pw = (64 * tk.cw).min(rect.width.saturating_sub(2 * tk.sp.md)).max(24 * tk.cw.min(rect.width / 24 + 1));
-        let ph = 2 * pad + tk.row_h + tk.input_h + tk.row_h;
+        // Round up to whole terminal rows so the edges fall between text rows;
+        // the spare pixels are split between top and bottom padding.
+        let raw_ph = 2 * pad + tk.row_h + tk.input_h + tk.row_h;
+        let ph = raw_ph.div_ceil(ch) * ch;
         let anchor_row = pop
             .resolved
             .anchor_line()
@@ -238,7 +251,8 @@ pub fn draw(
         let py = popover_top(rect.y, rect.height, ch, ph, anchor_row);
         let px = (rect.x + 2 * tk.cw).min((rect.x + rect.width).saturating_sub(pw + tk.sp.md)).max(rect.x);
         let r = Rect::new(px, py, pw, ph);
-        let inner = cx.float(r);
+        let float_inner = cx.float(r);
+        let inner = Rect::new(float_inner.x, float_inner.y + (ph - raw_ph) / 2, float_inner.w, float_inner.h);
 
         // Header: badge + what "this" is.
         let (title, tone) = match &pop.mode {
@@ -293,24 +307,32 @@ mod tests {
 
     #[test]
     fn bar_prefers_blank_row_below_prompt() {
-        // ch=20, bar_h=28, prompt on row 3, room below.
+        // ch=20, bar_h=28 (taller than a row), prompt on row 3, room below:
+        // the bar starts at the top of row 4, never covering the prompt row.
         let y = bar_top(40, 400, 20, 28, 3, true).unwrap();
-        assert_eq!(y, 40 + 4 * 20 + 10 - 14);
-        // No blank row below: use the row above.
+        assert_eq!(y, 40 + 4 * 20);
+        // No blank row below: it ends at the prompt's top edge.
         let y = bar_top(40, 400, 20, 28, 3, false).unwrap();
-        assert_eq!(y, 40 + 2 * 20 + 10 - 14);
+        assert_eq!(y + 28, 40 + 3 * 20);
+        // A bar shorter than a row is centred in the row it uses.
+        let y = bar_top(40, 400, 20, 12, 3, true).unwrap();
+        assert_eq!(y, 40 + 4 * 20 + 4);
+        let y = bar_top(40, 400, 20, 12, 3, false).unwrap();
+        assert_eq!(y, 40 + 2 * 20 + 4);
         // Prompt on the first row with nothing below: nowhere to go.
         assert_eq!(bar_top(40, 400, 20, 28, 0, false), None);
         // Never above the pane top.
         assert_eq!(bar_top(40, 400, 20, 60, 1, false), Some(40));
-        // Prompt on the last row: below does not fit.
-        assert!(bar_top(0, 100, 20, 28, 4, true).unwrap() < 4 * 20);
+        // Prompt on the last row: below does not fit, so it goes above.
+        assert!(bar_top(0, 100, 20, 28, 4, true).unwrap() + 28 <= 4 * 20);
+        // A tall bar needs its whole height inside the pane to go below.
+        assert!(bar_top(0, 100, 20, 28, 3, true).unwrap() + 28 <= 3 * 20);
     }
 
     #[test]
     fn popover_flips_above_near_the_bottom() {
-        // Plenty of room: just below the anchor row.
-        assert_eq!(popover_top(40, 400, 20, 100, 2), 40 + 3 * 20 + 10);
+        // Plenty of room: directly under the anchor row (on a row boundary).
+        assert_eq!(popover_top(40, 400, 20, 100, 2), 40 + 3 * 20);
         // Anchor near the bottom: sits above it.
         let y = popover_top(40, 400, 20, 100, 17);
         assert!(y + 100 <= 40 + 17 * 20, "{y}");

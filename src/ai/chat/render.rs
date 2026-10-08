@@ -599,6 +599,17 @@ impl ChatUi {
                     let label = if lang.is_empty() { "shell" } else { lang.as_str() };
                     let ty = hdr_y + ((ms.code_hdr - ms.ch) / 2) as isize;
                     let lw = put(cx, label, x0 + ms.sm, ty, right, tk.text_muted);
+                    let armed = self.confirm_run == Some((*msg, *block));
+                    let run_label = if armed { "Confirm" } else { "Run" };
+                    // Space the buttons will take on the right; the advisor
+                    // badge must not run underneath them in a narrow sidebar.
+                    let btn_labels: &[&str] = match (*closed, *runnable) {
+                        (false, _) => &[],
+                        (true, false) => &["Copy"],
+                        (true, true) => &["Copy", "Insert", run_label],
+                    };
+                    let btns_w: usize = btn_labels.iter().map(|l| l.chars().count() * ms.cw + 3 * ms.sm + ms.xs).sum();
+                    let badge_limit = right.saturating_sub(ms.sm + btns_w);
                     // Advisor verdict next to the language label.
                     let mut bx = lw + ms.sm;
                     match adv {
@@ -611,7 +622,7 @@ impl ChatUi {
                                 RiskLevel::Caution => Tone::Warning,
                                 RiskLevel::Danger => Tone::Danger,
                             };
-                            if hdr_y >= 0 {
+                            if hdr_y >= 0 && bx + cx.badge_w(risk.label()) <= badge_limit {
                                 bx += cx.badge(bx, hdr_y as usize, risk.label(), tone, ms.code_hdr);
                             }
                         }
@@ -620,8 +631,6 @@ impl ChatUi {
                     let _ = bx;
                     // Buttons, right to left: Copy, Insert, Run.
                     if *closed && hdr_y >= 0 {
-                        let armed = self.confirm_run == Some((*msg, *block));
-                        let run_label = if armed { "Confirm" } else { "Run" };
                         let mut names: Vec<(&str, Target)> = vec![("Copy", Target::Copy(*msg, *block))];
                         if *runnable {
                             names.push(("Insert", Target::Insert(*msg, *block)));
