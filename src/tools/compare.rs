@@ -25,7 +25,7 @@ impl CompareView {
         }
     }
 
-    pub fn collect_and_compare(&mut self, panes: &[Pane]) {
+    pub fn collect_and_compare(&mut self, panes: &[&Pane]) {
         self.panels.clear();
         self.diff_result = None;
         self.scroll = 0;

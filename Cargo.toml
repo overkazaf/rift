@@ -2,8 +2,11 @@
 name = "rift"
 version = "0.3.0"
 edition = "2021"
+authors = ["overkazaf <jjccddeeajoh@gmail.com>"]
 description = "A cyberpunk terminal emulator with AI, SSH, time travel, and 32 built-in developer tools"
 license = "MIT"
+repository = "https://github.com/overkazaf/rift"
+homepage = "https://github.com/overkazaf/rift"
 keywords = ["terminal", "emulator", "cyberpunk", "ai", "ssh"]
 categories = ["command-line-utilities"]
 
@@ -33,6 +36,14 @@ muda = "0.21"
 ureq = "3"
 unicode-width = "0.2"
 bytemuck = { version = "1", features = ["derive"], optional = true }
+flate2 = "1"
+
+# Optimize even in debug mode — pixel-level rendering is 10-50x slower at opt-level 0
+[profile.dev]
+opt-level = 2
+
+[profile.dev.package."*"]
+opt-level = 2
 
 [target.'cfg(target_os = "macos")'.dependencies]
 cocoa = "0.26"

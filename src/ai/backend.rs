@@ -25,6 +25,22 @@ pub fn complete(
     }
 }
 
+/// Single-turn completion with a caller-supplied prompt and no terminal
+/// context wrapping. Used by features that build their own full prompt —
+/// e.g. the Advisor safety reviewer — instead of the main assistant's
+/// terminal-aware system prompt.
+pub fn complete_simple(config: &LlmConfig, prompt: &str) -> Result<String, String> {
+    let messages = vec![Message {
+        role: "user",
+        content: prompt.to_string(),
+    }];
+
+    match config.provider.as_str() {
+        "ollama" => call_ollama(config, &messages),
+        _ => call_openai_compat(config, &messages),
+    }
+}
+
 fn call_ollama(config: &LlmConfig, messages: &[Message]) -> Result<String, String> {
     let url = format!("{}/api/chat", config.api_url);
     let body = format!(
@@ -123,7 +139,7 @@ fn escape_json(s: &str) -> String {
         .replace('\t', "\\t")
 }
 
-fn extract_json_string(json: &str, key: &str) -> Option<String> {
+pub(crate) fn extract_json_string(json: &str, key: &str) -> Option<String> {
     let pattern = format!("\"{}\"", key);
     let pos = json.find(&pattern)?;
     let after_key = &json[pos + pattern.len()..];

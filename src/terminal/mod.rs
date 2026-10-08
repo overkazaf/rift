@@ -1,8 +1,10 @@
 mod ansi;
 pub mod grid;
+pub mod images;
 
 pub use ansi::AnsiHandler;
 pub use grid::{Attrs, Cell, Color};
+pub use images::{ImageCell, ImageStore, TermImage};
 
 #[derive(PartialEq, Eq, Clone, Copy)]
 pub enum MouseMode {
@@ -34,6 +36,21 @@ pub enum Charset {
 pub enum ClipboardRequest {
     Set(String),
     Query,
+}
+
+/// Tracks framing of an SOS/PM/APC string (`ESC X`/`ESC ^`/`ESC _` ... ST)
+/// at the raw-byte level. This exists because `vte`'s state machine has no
+/// `Perform` callback for this content — unlike DCS, which gets
+/// `hook`/`put`/`unhook`, bytes inside one of these strings are silently
+/// discarded by `vte`'s state table. We track the framing ourselves, in
+/// parallel with (and harmlessly alongside) the normal `vte` feed, purely so
+/// we can recover Kitty graphics protocol commands (`ESC _ G ... ST`).
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum ApcScan {
+    Idle,
+    Esc,
+    Apc,
+    ApcEsc,
 }
 
 pub struct Terminal {
@@ -79,6 +96,10 @@ pub struct Terminal {
     pub g1_charset: Charset,
     pub active_charset: usize,
     pub clipboard_request: Option<ClipboardRequest>,
+
+    pub image_store: ImageStore,
+    apc_scan: ApcScan,
+    apc_buffer: Vec<u8>,
 }
 
 impl Terminal {
@@ -125,6 +146,9 @@ impl Terminal {
             g1_charset: Charset::Ascii,
             active_charset: 0,
             clipboard_request: None,
+            image_store: ImageStore::new(),
+            apc_scan: ApcScan::Idle,
+            apc_buffer: Vec::new(),
         }
     }
 
@@ -504,6 +528,65 @@ impl Terminal {
 
     pub fn scrollback_len(&self) -> usize {
         self.scrollback.len()
+    }
+
+    // ── Kitty graphics (APC) ──
+
+    /// Feed one raw PTY byte to the out-of-band APC scanner. See [`ApcScan`]
+    /// for why this has to happen outside of `vte`'s `Perform` callbacks.
+    /// Safe (and meant) to call on every byte unconditionally, independently
+    /// of also feeding the same byte to the `vte` parser — a well-formed
+    /// `ESC _ ... ST` run is a no-op as far as `vte`/`Perform` is concerned.
+    pub fn feed_apc_byte(&mut self, byte: u8) {
+        const MAX_APC_LEN: usize = 64 * 1024 * 1024;
+        match self.apc_scan {
+            ApcScan::Idle => {
+                if byte == 0x1b {
+                    self.apc_scan = ApcScan::Esc;
+                }
+            }
+            ApcScan::Esc => {
+                if byte == b'_' {
+                    self.apc_buffer.clear();
+                    self.apc_scan = ApcScan::Apc;
+                } else {
+                    self.apc_scan = ApcScan::Idle;
+                }
+            }
+            ApcScan::Apc => match byte {
+                0x1b => self.apc_scan = ApcScan::ApcEsc,
+                // Lenient: accept BEL as a terminator too, in addition to ST.
+                0x07 => {
+                    self.dispatch_apc();
+                    self.apc_scan = ApcScan::Idle;
+                }
+                _ => {
+                    if self.apc_buffer.len() < MAX_APC_LEN {
+                        self.apc_buffer.push(byte);
+                    }
+                }
+            },
+            ApcScan::ApcEsc => {
+                if byte == b'\\' {
+                    self.dispatch_apc();
+                    self.apc_scan = ApcScan::Idle;
+                } else if byte != 0x1b {
+                    // Not a valid ST after all — abandon this APC string.
+                    self.apc_buffer.clear();
+                    self.apc_scan = ApcScan::Idle;
+                }
+                // else: a stray extra ESC — keep waiting for `\`.
+            }
+        }
+    }
+
+    fn dispatch_apc(&mut self) {
+        if self.apc_buffer.first() == Some(&b'G') {
+            let payload = self.apc_buffer[1..].to_vec();
+            let (row, col) = (self.cursor_row, self.cursor_col);
+            self.image_store.handle_kitty_command(row, col, &payload);
+        }
+        self.apc_buffer.clear();
     }
 }
 

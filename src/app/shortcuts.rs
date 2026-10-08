@@ -3,6 +3,7 @@ use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 
 use crate::input;
+use crate::tools::exec_preview::ExecPreview;
 use crate::ui::MenuAction;
 use crate::effects::{CrtParams, GlitchParams, MatrixParams, NeonParams, ShaderEffect,
                      AmberParams, HologramParams, PixelateParams, ThermalParams,
@@ -25,7 +26,7 @@ fn cmd_or_ctrl(modifiers: &ModifiersState) -> bool {
 
 pub fn handle_key(app: &mut App, event: &KeyEvent, event_loop: &ActiveEventLoop) {
     // 1. Overlay interception (priority order)
-    if overlays::try_intercept(app, event) {
+    if overlays::try_intercept(app, event, event_loop) {
         return;
     }
 
@@ -141,6 +142,11 @@ pub fn handle_key(app: &mut App, event: &KeyEvent, event_loop: &ActiveEventLoop)
                 app.request_redraw();
                 return;
             }
+            if s.eq_ignore_ascii_case("p") && !event.repeat {
+                app.command_palette.toggle();
+                app.request_redraw();
+                return;
+            }
         }
     }
 
@@ -149,6 +155,17 @@ pub fn handle_key(app: &mut App, event: &KeyEvent, event_loop: &ActiveEventLoop)
         if let Key::Named(NamedKey::Space) = event.logical_key {
             trigger_autocomplete(app);
             return;
+        }
+    }
+
+    // 2c2. Ctrl+R → Smart History Search (fzf/atuin-style reverse search)
+    if app.modifiers.control_key() && !app.modifiers.shift_key() {
+        if let Key::Character(ref s) = event.logical_key {
+            if s.eq_ignore_ascii_case("r") && !event.repeat {
+                app.history.toggle();
+                app.request_redraw();
+                return;
+            }
         }
     }
 
@@ -193,6 +210,7 @@ pub fn handle_key(app: &mut App, event: &KeyEvent, event_loop: &ActiveEventLoop)
                 } else {
                     app.wm.next_tab();
                 }
+                sync_webview_for_tab(app);
                 app.update_title();
                 app.request_redraw();
             }
@@ -248,21 +266,58 @@ pub fn handle_key(app: &mut App, event: &KeyEvent, event_loop: &ActiveEventLoop)
     // 7. Normal input → active pane (or broadcast to all panes)
     let app_cursor = app.wm.active_pane().terminal.app_cursor_keys;
     if let Some(bytes) = input::encode_key(event, app.modifiers, app_cursor) {
-        // Observer: detect Enter key → extract current command line
-        if app.observer.enabled && bytes == b"\r" {
-            let term = &app.wm.active_pane().terminal;
-            let row = term.cursor_row.min(term.grid.len().saturating_sub(1));
-            let line: String = term.grid[row].iter().map(|c| c.c).collect();
-            let trimmed = line.trim();
-            if !trimmed.is_empty() {
-                // Strip common shell prompts ($ or %) to get the command
-                let cmd = if let Some(pos) = trimmed.rfind(|c| c == '$' || c == '%') {
-                    trimmed[pos + 1..].trim()
+        // Enter key: feed observer + block tracking
+        if bytes == b"\r" {
+            let (cmd_opt, scrollback_line) = {
+                let term = &app.wm.active_pane().terminal;
+                let row = term.cursor_row.min(term.grid.len().saturating_sub(1));
+                let line: String = term.grid[row].iter().map(|c| c.c).collect();
+                let trimmed = line.trim();
+                let cmd = if !trimmed.is_empty() {
+                    let c = if let Some(pos) = trimmed.rfind(|c| c == '$' || c == '%') {
+                        trimmed[pos + 1..].trim()
+                    } else {
+                        trimmed
+                    };
+                    if c.is_empty() { None } else { Some(c.to_string()) }
                 } else {
-                    trimmed
+                    None
                 };
-                if !cmd.is_empty() {
-                    app.observer.on_command(cmd);
+                (cmd, term.scrollback.len() + row)
+            };
+
+            if let Some(cmd) = cmd_opt {
+                // Preview-Then-Accept: dangerous commands are intercepted
+                // here, before their trailing Enter ever reaches the PTY.
+                // The command's characters were already streamed to the PTY
+                // as the user typed them (this terminal has no local-echo
+                // buffer of its own), so they're already sitting uncommitted
+                // in the shell's line editor — confirming later just needs
+                // to submit that buffer (see overlays::handle_exec_preview).
+                if let Some(preview) = ExecPreview::check_command(&cmd) {
+                    app.exec_preview = preview;
+                    app.exec_preview.visible = true;
+                    app.request_redraw();
+                    return;
+                }
+
+                if app.observer.enabled {
+                    app.observer.on_command(&cmd);
+                }
+                app.blocks.on_input(&cmd, scrollback_line);
+                if app.audit.enabled {
+                    app.audit.log_command(&cmd, 0);
+                }
+                // Teaching mode: ask LLM to explain the command
+                if app.teaching.enabled {
+                    let prompt = crate::tools::teaching::TeachingMode::explain_prompt(&cmd);
+                    let config = app.llm.config.clone();
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    std::thread::spawn(move || {
+                        let result = crate::ai::backend::complete_simple(&config, &prompt);
+                        let _ = tx.send(result);
+                    });
+                    app.teaching.set_receiver(rx);
                 }
             }
         }
@@ -272,12 +327,18 @@ pub fn handle_key(app: &mut App, event: &KeyEvent, event_loop: &ActiveEventLoop)
         }
         if app.broadcast {
             let tab = app.wm.active_tab_mut();
-            for pane in &mut tab.panes {
+            for pane in tab.panes_mut() {
                 pane.write(&bytes);
             }
         } else {
             app.wm.active_pane_mut().write(&bytes);
         }
+
+        // Immediately poll PTY for echo — eliminates 1-2 frame latency
+        if app.wm.process_all_output() {
+            app.wm.flush_all_responses();
+        }
+        app.request_redraw();
     }
 }
 
@@ -301,6 +362,7 @@ pub fn handle_menu_action(app: &mut App, action: MenuAction, event_loop: &Active
         MenuAction::NewTab => {
             let (c, r) = pane_size(app);
             app.wm.new_tab(c, r);
+            sync_webview_for_tab(app);
             app.update_title();
         }
         MenuAction::CloseTab => {
@@ -325,6 +387,7 @@ pub fn handle_menu_action(app: &mut App, action: MenuAction, event_loop: &Active
             resize_from_window(app);
         }
         MenuAction::SplitV => {
+            log::info!("MenuAction::SplitV triggered");
             let (c, r) = pane_size(app);
             app.wm.split_v(c, r);
             resize_from_window(app);
@@ -355,7 +418,20 @@ pub fn handle_menu_action(app: &mut App, action: MenuAction, event_loop: &Active
         // UI panels
         MenuAction::Preferences => app.prefs.toggle(),
         MenuAction::Welcome => app.welcome.toggle(),
-        MenuAction::WebView => app.webview_dialog.toggle(),
+        MenuAction::WebView => {
+            if let Some(wv) = &mut app.webview {
+                if wv.visible {
+                    wv.set_visible(false);
+                    resize_from_window(app);
+                    if let Some(w) = &app.window { w.focus_window(); }
+                } else {
+                    wv.set_visible(true);
+                    resize_from_window(app);
+                }
+            } else {
+                app.webview_dialog.toggle();
+            }
+        }
         MenuAction::Find => {
             app.search.toggle();
             if app.search.visible {
@@ -368,9 +444,11 @@ pub fn handle_menu_action(app: &mut App, action: MenuAction, event_loop: &Active
         MenuAction::GitPanel => app.git_panel.toggle(),
         MenuAction::DockerPanel => app.docker.toggle(),
         MenuAction::CicdPanel => app.cicd.toggle(),
-        MenuAction::NetworkMonitor => {} // TODO: integrate
-        MenuAction::ProcessTree => {}    // TODO: integrate
-        MenuAction::SystemInfo => {}     // TODO: integrate
+        MenuAction::NetworkMonitor => app.network_monitor.toggle(),
+        MenuAction::ProcessTree => app.process_tree.toggle(),
+        MenuAction::SystemInfo => app.system_info.toggle(),
+        MenuAction::PortDashboard => app.port_dashboard.toggle(),
+        MenuAction::RegexPlayground => app.regex_playground.toggle(),
         MenuAction::Heatmap => app.heatmap.toggle(),
         MenuAction::SecretMask => app.secret_mask.toggle(),
         MenuAction::AuditLog => app.audit.toggle(),
@@ -384,6 +462,10 @@ pub fn handle_menu_action(app: &mut App, action: MenuAction, event_loop: &Active
             } else {
                 log::info!("Observer: disabled");
             }
+        }
+        MenuAction::AdvisorMode => {
+            app.advisor.toggle();
+            log::info!("Advisor: {}", if app.advisor.enabled { "enabled" } else { "disabled" });
         }
         // Terminal
         MenuAction::HudToggle => {
@@ -403,8 +485,8 @@ pub fn handle_menu_action(app: &mut App, action: MenuAction, event_loop: &Active
             app.update_title();
         }
         MenuAction::CompareOutput => {
-            let panes = &app.wm.active_tab().panes;
-            app.compare_view.collect_and_compare(panes);
+            let panes = app.wm.active_tab().panes();
+            app.compare_view.collect_and_compare(&panes);
         }
     }
     app.request_redraw();
@@ -450,16 +532,18 @@ pub fn do_ssh_connect(app: &mut App, req: SshConnectRequest) {
 
 pub fn open_webview(app: &mut App, url: &str) {
     if let Some(window) = &app.window {
-        let size = window.inner_size();
-        let scale = window.scale_factor();
-        let w = size.width as f64 / scale / 2.0;
-        let h = (size.height as f64 / scale).max(1.0);
+        let _scale = window.scale_factor();
+        let (x, y, w, h) = webview_bounds(app, window);
 
+        app.webview_tab = Some(app.wm.active_tab);
+        app.webview_pane = Some(app.wm.active_tab().active);
         if let Some(wv) = &mut app.webview {
             wv.navigate(url);
+            wv.url = url.to_string();
             wv.set_visible(true);
+            wv.set_bounds(x, y, w, h);
         } else {
-            match WebViewPane::new(window, url, w as i32, 0, w as u32, h as u32) {
+            match WebViewPane::new(window, url, x, y, w, h) {
                 Ok(wv) => {
                     log::info!("WebView opened: {url}");
                     app.webview = Some(wv);
@@ -467,6 +551,43 @@ pub fn open_webview(app: &mut App, url: &str) {
                 Err(e) => log::error!("WebView failed: {e}"),
             }
         }
+    }
+}
+
+pub fn toggle_webview_maximize(app: &mut App) {
+    app.webview_maximized = !app.webview_maximized;
+    if let (Some(wv), Some(window)) = (&app.webview, &app.window) {
+        if wv.visible {
+            let (x, y, w, h) = webview_bounds(app, window);
+            wv.set_bounds(x, y, w, h);
+        }
+    }
+    app.request_redraw();
+}
+
+pub fn webview_bounds(app: &App, window: &std::sync::Arc<winit::window::Window>) -> (i32, i32, u32, u32) {
+    let size = window.inner_size();
+    let scale = window.scale_factor();
+    let tab_bar_logical = app.tab_bar_height() as f64 / scale;
+    let addr_bar_h = 32.0;
+
+    if app.webview_maximized {
+        let lw = (size.width as f64 / scale).max(1.0);
+        let lh = (size.height as f64 / scale).max(1.0);
+        let x = 0i32;
+        let y = (tab_bar_logical + addr_bar_h) as i32;
+        let w = lw as u32;
+        let h = (lh - tab_bar_logical - addr_bar_h).max(1.0) as u32;
+        (x, y, w, h)
+    } else {
+        // Position in the right half of the window (default split view)
+        let lw = (size.width as f64 / scale).max(1.0);
+        let lh = (size.height as f64 / scale).max(1.0);
+        let x = (lw / 2.0) as i32;
+        let y = (tab_bar_logical + addr_bar_h) as i32;
+        let w = (lw / 2.0) as u32;
+        let h = (lh - tab_bar_logical - addr_bar_h).max(1.0) as u32;
+        (x, y, w, h)
     }
 }
 
@@ -478,6 +599,7 @@ fn handle_mod_shift(app: &mut App, key: &str, event_loop: &ActiveEventLoop) -> b
         "t" | "T" => {
             let (c, r) = pane_size(app);
             app.wm.new_tab(c, r);
+            sync_webview_for_tab(app);
             app.update_title();
             true
         }
@@ -500,8 +622,12 @@ fn handle_mod_shift(app: &mut App, key: &str, event_loop: &ActiveEventLoop) -> b
         }
         // Effects moved to Ctrl+Shift+1-8 (avoids macOS screenshot conflict)
         "," | "<" => { app.prefs.toggle(); true }
-        "[" | "{" => { app.wm.prev_tab(); app.update_title(); true }
-        "]" | "}" => { app.wm.next_tab(); app.update_title(); true }
+        "[" | "{" => {
+            app.wm.prev_tab(); sync_webview_for_tab(app); app.update_title(); true
+        }
+        "]" | "}" => {
+            app.wm.next_tab(); sync_webview_for_tab(app); app.update_title(); true
+        }
         "?" | "/" => { app.welcome.toggle(); true }
         "z" | "Z" => {
             if app.timewarp_browser.active {
@@ -534,8 +660,8 @@ fn handle_mod_shift(app: &mut App, key: &str, event_loop: &ActiveEventLoop) -> b
             true
         }
         "k" | "K" => {
-            let panes = &app.wm.active_tab().panes;
-            app.compare_view.collect_and_compare(panes);
+            let panes = app.wm.active_tab().panes();
+            app.compare_view.collect_and_compare(&panes);
             true
         }
         "f" | "F" => {
@@ -551,6 +677,7 @@ fn handle_mod_shift(app: &mut App, key: &str, event_loop: &ActiveEventLoop) -> b
         "l" | "L" => { app.teaching.toggle(); true }
         "y" | "Y" => { app.heatmap.toggle(); true }
         "o" | "O" => { app.docker.toggle(); true }
+        "x" | "X" => { app.regex_playground.toggle(); true }
         "m" | "M" => { app.secret_mask.toggle(); true }
         "u" | "U" => { app.audit.toggle(); true }
         // "v" removed — Cmd+Shift+V intercepted by macOS "Paste and Match Style"
@@ -570,20 +697,13 @@ fn handle_tab_bar_click(app: &mut App, x: usize, _y: usize, event_loop: &ActiveE
     let buf_width = window.inner_size().width as usize;
     let cw = app.renderer.cell_width();
     let tab_count = app.wm.tab_count().max(1);
-    let tab_w = (buf_width / tab_count).min(300).max(60);
+    let tab_w = buf_width / tab_count;
 
-    let tabs_end = tab_count * tab_w;
-    if x >= tabs_end {
-        let (c, r) = pane_size(app);
-        app.wm.new_tab(c, r);
-        app.update_title();
-        return;
-    }
+    // Tabs fill the full width — no empty area to trigger new tab via click
 
-    let tab_idx = x / tab_w;
-    if tab_idx >= tab_count { return; }
+    let tab_idx = (x / tab_w).min(tab_count - 1);
 
-    let tab_right = (tab_idx + 1) * tab_w;
+    let tab_right = if tab_idx == tab_count - 1 { buf_width } else { (tab_idx + 1) * tab_w };
     let close_zone = tab_right.saturating_sub(cw * 2 + 4);
     if tab_count > 1 && x >= close_zone {
         if app.wm.close_tab_at(tab_idx) {
@@ -594,7 +714,21 @@ fn handle_tab_bar_click(app: &mut App, x: usize, _y: usize, event_loop: &ActiveE
     }
 
     app.wm.switch_tab(tab_idx);
+    sync_webview_for_tab(app);
     app.update_title();
+}
+
+fn sync_webview_for_tab(app: &mut App) {
+    if let Some(wv) = &mut app.webview {
+        let should_show = app.webview_tab == Some(app.wm.active_tab);
+        if wv.visible != should_show {
+            wv.set_visible(should_show);
+            resize_from_window(app);
+            if !should_show {
+                if let Some(w) = &app.window { w.focus_window(); }
+            }
+        }
+    }
 }
 
 fn trigger_autocomplete(app: &mut App) {

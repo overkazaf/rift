@@ -4,6 +4,10 @@ pub mod toml;
 pub const VERSION: &str = "0.3.0";
 #[allow(dead_code)]
 pub const APP_NAME: &str = "rift";
+#[allow(dead_code)]
+pub const AUTHOR: &str = "overkazaf";
+#[allow(dead_code)]
+pub const REPO_URL: &str = "https://github.com/overkazaf/rift";
 
 pub fn mod_key() -> &'static str {
     #[cfg(target_os = "macos")]

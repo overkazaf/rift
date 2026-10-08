@@ -97,6 +97,10 @@ impl ErrorDetector {
         }
     }
 
+    pub fn matches_any(&self, line: &str) -> bool {
+        self.patterns.iter().any(|p| (p.detector)(line))
+    }
+
     pub fn check_line(
         &self,
         line: &str,

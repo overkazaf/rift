@@ -90,11 +90,20 @@ impl AiPanel {
         }
     }
 
-    pub fn poll(&mut self) {
+    /// Poll for a completed AI response. Returns the suggested command
+    /// (first line of a fresh, successful response) so callers can trigger
+    /// follow-up work — e.g. an Advisor Mode safety review — exactly once
+    /// per new response, without re-triggering on every subsequent poll.
+    pub fn poll(&mut self) -> Option<String> {
+        let mut fresh_cmd = None;
         if let Some(rx) = &self.rx {
             if let Ok(result) = rx.try_recv() {
                 match result {
                     Ok(text) => {
+                        let cmd = text.lines().next().unwrap_or("").trim().to_string();
+                        if !cmd.is_empty() {
+                            fresh_cmd = Some(cmd);
+                        }
                         self.response = Some(text);
                         self.loading = false;
                     }
@@ -106,6 +115,7 @@ impl AiPanel {
                 self.rx = None;
             }
         }
+        fresh_cmd
     }
 
     pub fn set_receiver(&mut self, rx: std::sync::mpsc::Receiver<Result<String, String>>) {

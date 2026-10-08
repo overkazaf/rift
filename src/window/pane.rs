@@ -76,6 +76,11 @@ impl Pane {
             let parser = &mut self.vt_parser;
             let mut handler = AnsiHandler::new(terminal);
             for &byte in &data {
+                // Kitty graphics protocol data travels inside an APC string
+                // (`ESC _ ... ST`), which `vte`'s Perform trait has no
+                // callback for. Scan for it in parallel — see
+                // AnsiHandler::feed_apc_byte for details.
+                handler.feed_apc_byte(byte);
                 parser.advance(&mut handler, byte);
             }
             changed = true;

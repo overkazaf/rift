@@ -21,6 +21,14 @@ pub fn on_resumed(app: &mut App, event_loop: &ActiveEventLoop) {
 
     let window = Arc::new(event_loop.create_window(attrs).unwrap());
 
+    // Set window icon (embedded at compile time)
+    {
+        let icon_bytes = include_bytes!("../../assets/icon.png");
+        if let Some(icon) = load_icon_from_png(icon_bytes) {
+            window.set_window_icon(Some(icon));
+        }
+    }
+
     // Native macOS window transparency
     if app.config.opacity < 1.0 {
         log::info!("Window opacity: {:.0}%", app.config.opacity * 100.0);
@@ -117,21 +125,31 @@ pub fn redraw(app: &mut App) {
         let logo = "R I F T";
         let subtitle = "dimension rift terminal";
         let version = format!("v{}", crate::config::VERSION);
+        let author = format!("by {}", crate::config::AUTHOR);
+        let kofi = "ko-fi.com/john5555555555";
 
         let logo_x = w.saturating_sub(logo.len() * cw) / 2;
-        let logo_y = h / 2 - ch * 2;
+        let logo_y = h / 2 - ch * 3;
         let sub_x = w.saturating_sub(subtitle.len() * cw) / 2;
         let sub_y = logo_y + ch * 2;
         let ver_x = w.saturating_sub(version.len() * cw) / 2;
         let ver_y = sub_y + ch + ch / 2;
+        let author_x = w.saturating_sub(author.len() * cw) / 2;
+        let author_y = ver_y + ch + 4;
+        let kofi_x = w.saturating_sub(kofi.len() * cw) / 2;
+        let kofi_y = author_y + ch + 4;
 
         let logo_color = crate::ui::dim(accent, alpha);
         let sub_color = crate::ui::dim(app.renderer.theme.fg, alpha * 0.5);
         let ver_color = crate::ui::dim(app.renderer.theme.fg, alpha * 0.3);
+        let author_color = crate::ui::dim(app.renderer.theme.fg, alpha * 0.35);
+        let kofi_color = crate::ui::dim((255, 90, 90), alpha * 0.5);
 
         crate::ui::render_text(&mut buffer, w, &mut app.renderer.font, logo, logo_x, logo_y, logo_color);
         crate::ui::render_text(&mut buffer, w, &mut app.renderer.font, subtitle, sub_x, sub_y, sub_color);
         crate::ui::render_text(&mut buffer, w, &mut app.renderer.font, &version, ver_x, ver_y, ver_color);
+        crate::ui::render_text(&mut buffer, w, &mut app.renderer.font, &author, author_x, author_y, author_color);
+        crate::ui::render_text(&mut buffer, w, &mut app.renderer.font, kofi, kofi_x, kofi_y, kofi_color);
 
         // Accent line under logo
         let line_w = logo.len() * cw + 40;
@@ -159,10 +177,18 @@ pub fn redraw(app: &mut App) {
     // Reserve space for HUD at bottom when visible
     let ch = app.renderer.cell_height();
     let hud_h = if app.hud_visible { ch * 3 + 20 } else { 0 };
+    let wv_visible = app.webview.as_ref().map_or(false, |wv| wv.visible);
+    let content_w = if wv_visible && app.webview_maximized {
+        0  // terminal hidden
+    } else if wv_visible {
+        (width as usize) / 2
+    } else {
+        width as usize
+    };
     let content_area = PaneRect {
         x: 0,
         y: tbh,
-        width: width as usize,
+        width: content_w,
         height: (height as usize).saturating_sub(tbh + hud_h),
     };
 
@@ -212,13 +238,18 @@ pub fn redraw(app: &mut App) {
 
     // Normal mode: Terminal content + tab bar
     let cmd_held = app.modifiers.super_key();
-    app.renderer.render_tabbed_with_cmd(&app.wm, content_area, &mut buffer, width, height, cmd_held);
+    app.renderer.render_tabbed_with_cmd(&app.wm, content_area, &mut buffer, width, height, cmd_held, &app.blocks, app.hover_pane);
 
     // Selection highlight
     if app.selection.active {
+        let sel_rect = app.wm.pane_layouts(content_area)
+            .into_iter()
+            .find(|(_, _, active)| *active)
+            .map(|(_, r, _)| r)
+            .unwrap_or(content_area);
         app.renderer.render_selection(
             &app.selection, &mut buffer,
-            width as usize, height as usize, tbh,
+            width as usize, height as usize, sel_rect,
         );
     }
 
@@ -461,6 +492,12 @@ pub fn redraw(app: &mut App) {
             &mut buffer, width as usize, height as usize,
             &mut app.renderer.font, &app.renderer.theme,
         );
+
+        // Advisor Mode — inline safety badge/notes next to the AI response.
+        app.advisor.render_inline(
+            &mut buffer, width as usize, height as usize,
+            &mut app.renderer.font, &app.renderer.theme,
+        );
     }
 
     // Search overlay
@@ -510,6 +547,36 @@ pub fn redraw(app: &mut App) {
             &mut app.renderer.font, &app.renderer.theme,
         );
     }
+    if app.network_monitor.visible {
+        app.network_monitor.render(
+            &mut buffer, width as usize, height as usize,
+            &mut app.renderer.font, &app.renderer.theme,
+        );
+    }
+    if app.process_tree.visible {
+        app.process_tree.render(
+            &mut buffer, width as usize, height as usize,
+            &mut app.renderer.font, &app.renderer.theme,
+        );
+    }
+    if app.system_info.visible {
+        app.system_info.render(
+            &mut buffer, width as usize, height as usize,
+            &mut app.renderer.font, &app.renderer.theme,
+        );
+    }
+    if app.port_dashboard.visible {
+        app.port_dashboard.render(
+            &mut buffer, width as usize, height as usize,
+            &mut app.renderer.font, &app.renderer.theme,
+        );
+    }
+    if app.regex_playground.visible {
+        app.regex_playground.render(
+            &mut buffer, width as usize, height as usize,
+            &mut app.renderer.font, &app.renderer.theme,
+        );
+    }
     if app.error_notif.visible {
         app.error_notif.render(
             &mut buffer, width as usize, height as usize,
@@ -536,8 +603,110 @@ pub fn redraw(app: &mut App) {
             &mut app.renderer.font, &app.renderer.theme,
         );
     }
+    // WebView address bar (rendered in the buffer above the native WebView)
+    if let Some(ref wv) = app.webview {
+        if wv.visible {
+            let w = width as usize;
+            let cw = app.renderer.cell_width();
+            let ch = app.renderer.cell_height();
+            let bar_x = if app.webview_maximized { 0 } else { w / 2 };
+            let bar_w = if app.webview_maximized { w } else { w / 2 };
+            let bar_y = tbh;
+            let bar_h = ch + 12;
+            let bar_bg = crate::ui::darken(app.renderer.theme.bg, 10);
+            let bar_px = crate::ui::pack_rgb(bar_bg);
+            for y in bar_y..(bar_y + bar_h).min(height as usize) {
+                let off = y * w + bar_x;
+                let end = (off + bar_w).min(buffer.len());
+                if off < buffer.len() { buffer[off..end].fill(bar_px); }
+            }
+
+            // Maximize/restore button on the right side
+            let btn_char = if app.webview_maximized { "[-]" } else { "[+]" };
+            let btn_x = bar_x + bar_w - (btn_char.len() + 1) * cw;
+            crate::ui::render_text(
+                &mut buffer, w, &mut app.renderer.font,
+                btn_char, btn_x, bar_y + 6, crate::ui::dim(app.renderer.theme.fg, 0.4),
+            );
+
+            let url_x = bar_x + 8;
+            let url_y = bar_y + 6;
+            let max_chars = (bar_w - btn_char.len() * cw - 24) / cw;
+
+            // Show editing text or current URL
+            let display_text = if app.addr_bar_editing {
+                &app.addr_bar_text
+            } else {
+                &wv.url
+            };
+            let display_url = if display_text.len() > max_chars {
+                &display_text[display_text.len() - max_chars..]
+            } else {
+                display_text.as_str()
+            };
+
+            // Input field bg (brighter when editing)
+            let field_bg = if app.addr_bar_editing {
+                crate::ui::lighten(bar_bg, 20)
+            } else {
+                crate::ui::lighten(bar_bg, 12)
+            };
+            let field_px = crate::ui::pack_rgb(field_bg);
+            for y in (bar_y + 3)..(bar_y + bar_h - 3).min(height as usize) {
+                let off = y * w + bar_x + 4;
+                let end = (off + bar_w - 8).min(buffer.len());
+                if off < buffer.len() { buffer[off..end].fill(field_px); }
+            }
+
+            // Border when focused
+            if app.addr_bar_editing {
+                let border_px = crate::ui::pack_rgb(app.renderer.theme.cursor);
+                for y in [bar_y + 3, bar_y + bar_h - 4] {
+                    if y < height as usize {
+                        let off = y * w + bar_x + 4;
+                        let end = (off + bar_w - 8).min(buffer.len());
+                        if off < buffer.len() { buffer[off..end].fill(border_px); }
+                    }
+                }
+            }
+
+            crate::ui::render_text(
+                &mut buffer, w, &mut app.renderer.font,
+                display_url, url_x, url_y, app.renderer.theme.fg,
+            );
+
+            // Text cursor when editing
+            if app.addr_bar_editing {
+                let cursor_x = url_x + display_url.chars().count() * cw;
+                let cursor_px = crate::ui::pack_rgb(app.renderer.theme.cursor);
+                for y in (url_y)..(url_y + ch).min(height as usize) {
+                    let idx = y * w + cursor_x;
+                    if idx + 1 < buffer.len() {
+                        buffer[idx] = cursor_px;
+                        buffer[idx + 1] = cursor_px;
+                    }
+                }
+            }
+            // Bottom separator
+            let sep_y = bar_y + bar_h - 1;
+            let sep_px = crate::ui::pack_rgb(crate::ui::lighten(bar_bg, 6));
+            if sep_y < height as usize {
+                let off = sep_y * w + bar_x;
+                let end = (off + bar_w).min(buffer.len());
+                if off < buffer.len() { buffer[off..end].fill(sep_px); }
+            }
+        }
+    }
     if app.webview_dialog.visible {
         app.webview_dialog.render(
+            &mut buffer, width as usize, height as usize,
+            &mut app.renderer.font, &app.renderer.theme,
+        );
+    }
+    // Command Palette — Cmd+P. Rendered above the other tool overlays but
+    // below the Welcome guide.
+    if app.command_palette.visible {
+        app.command_palette.render(
             &mut buffer, width as usize, height as usize,
             &mut app.renderer.font, &app.renderer.theme,
         );
@@ -598,6 +767,14 @@ pub fn redraw(app: &mut App) {
             px0 + 16, py0 + panel_h - ch - 10, crate::ui::dim(theme.fg, 0.3));
     }
 
+    // Smart History Search — full-width bottom panel, drawn after every other overlay.
+    if app.history.visible {
+        app.history.render(
+            &mut buffer, width as usize, height as usize,
+            &mut app.renderer.font, &app.renderer.theme,
+        );
+    }
+
     // Loading spinners for async operations
     {
         let w = width as usize;
@@ -636,6 +813,15 @@ pub fn redraw(app: &mut App) {
                 crate::ui::render_dots(&mut buffer, w, &mut app.renderer.font, 24 + 12 * cw, spinner_y, accent, elapsed);
             }
         }
+    }
+
+    // Preview-Then-Accept danger confirmation — drawn last, on top of every
+    // other overlay and HUD element, so it can never be obscured.
+    if app.exec_preview.visible {
+        app.exec_preview.render(
+            &mut buffer, width as usize, height as usize,
+            &mut app.renderer.font, &app.renderer.theme,
+        );
     }
 
     // Pixel-level opacity fallback (non-macOS only; macOS uses native NSWindow alpha)
@@ -724,14 +910,22 @@ pub fn handle_resize(app: &mut App, width: u32, height: u32) {
     let ch = app.renderer.cell_height();
     let hud_h = if app.hud_visible { ch * 3 + 20 } else { 0 };
     let effective_height = (height as usize).saturating_sub(hud_h) as u32;
-    app.wm.resize_all(cw, ch, width, effective_height, app.tab_bar_height());
+    let wv_visible = app.webview.as_ref().map_or(false, |wv| wv.visible);
+    let effective_width = if wv_visible && !app.webview_maximized {
+        width / 2
+    } else if wv_visible && app.webview_maximized {
+        0  // terminal hidden when maximized
+    } else {
+        width
+    };
+    if effective_width > 0 {
+        app.wm.resize_all(cw, ch, effective_width, effective_height, app.tab_bar_height());
+    }
 
     if let (Some(wv), Some(window)) = (&app.webview, &app.window) {
         if wv.visible {
-            let scale = window.scale_factor();
-            let lw = width as f64 / scale / 2.0;
-            let lh = height as f64 / scale;
-            wv.set_bounds(lw as i32, 0, lw as u32, lh as u32);
+            let (x, y, w, h) = crate::app::shortcuts::webview_bounds(app, window);
+            wv.set_bounds(x, y, w, h);
         }
     }
 }
@@ -742,14 +936,12 @@ pub fn about_to_wait(app: &mut App, event_loop: &ActiveEventLoop) {
     let has_shader = app.renderer.shader.has_effect();
     let in_startup = app.startup_time.elapsed().as_secs_f32() < 2.5;
 
-    if has_shader || in_startup {
-        // Cap at ~60fps to avoid CPU spin (Poll = 100% CPU)
-        event_loop.set_control_flow(ControlFlow::WaitUntil(
-            std::time::Instant::now() + std::time::Duration::from_millis(16)
-        ));
-    } else {
-        event_loop.set_control_flow(ControlFlow::Wait);
-    }
+    // PTY reader thread calls proxy.send_event(()) which wakes the loop from Wait.
+    // Use 16ms for animations, otherwise a short poll for responsiveness.
+    let poll_ms = if has_shader || in_startup { 16 } else { 32 };
+    event_loop.set_control_flow(ControlFlow::WaitUntil(
+        std::time::Instant::now() + std::time::Duration::from_millis(poll_ms)
+    ));
 
     // During startup animation, just keep redrawing
     if in_startup {
@@ -792,8 +984,24 @@ pub fn about_to_wait(app: &mut App, event_loop: &ActiveEventLoop) {
         }
     }
 
-    // Poll AI response
-    app.ai_panel.poll();
+    // Poll AI response, then kick off an Advisor Mode safety review for any
+    // freshly-arrived suggested command.
+    if let Some(cmd) = app.ai_panel.poll() {
+        if app.advisor.enabled {
+            let ctx = crate::ai::context::TermContext::collect();
+            let context = format!(
+                "OS: {}, Shell: {}, CWD: {}{}",
+                ctx.os,
+                ctx.shell,
+                ctx.cwd,
+                ctx.git_branch
+                    .map(|b| format!(", git branch: {b}"))
+                    .unwrap_or_default(),
+            );
+            app.advisor.review_command(&cmd, &context, &app.llm.config);
+        }
+    }
+    app.advisor.poll();
 
     // Process PTY output from all panes
     let pty_changed = app.wm.process_all_output();
@@ -801,20 +1009,35 @@ pub fn about_to_wait(app: &mut App, event_loop: &ActiveEventLoop) {
         app.wm.flush_all_responses();
         app.update_title();
 
-        // Feed Observer with the current terminal line (output tracking)
-        if app.observer.enabled {
+        // Feed tools with current terminal line
+        {
             let term = &app.wm.active_pane().terminal;
             let row = term.cursor_row.min(term.grid.len().saturating_sub(1));
             let line: String = term.grid[row].iter().map(|c| c.c).collect();
             let trimmed = line.trim();
             if !trimmed.is_empty() {
-                app.observer.on_output(trimmed);
+                // Observer
+                if app.observer.enabled {
+                    app.observer.on_output(trimmed);
+                }
+                // Block tracking (Warp-style command blocks)
+                let scrollback_line = term.scrollback.len() + row;
+                app.blocks.on_output_line(trimmed, scrollback_line);
+                // Error detection (cheap pre-check avoids building context every line)
+                if app.error_detector.matches_any(trimmed) {
+                    let recent: Vec<String> = term.grid.iter()
+                        .map(|r| r.iter().map(|c| c.c).collect::<String>())
+                        .collect();
+                    if let Some(err) = app.error_detector.check_line(trimmed, scrollback_line, &recent) {
+                        app.error_notif.show(err, 10);
+                    }
+                }
             }
         }
 
         // Handle OSC 52 clipboard requests + bell for all panes
         for tab in &mut app.wm.tabs {
-            for pane in &mut tab.panes {
+            for pane in tab.panes_mut() {
                 // OSC 52 clipboard
                 if let Some(req) = pane.terminal.clipboard_request.take() {
                     match req {
@@ -877,17 +1100,64 @@ pub fn about_to_wait(app: &mut App, event_loop: &ActiveEventLoop) {
         || app.autocomplete.visible
         || app.ai_panel.visible
         || app.compare_view.visible
+        || app.command_palette.visible
         || app.search.visible
         || app.file_manager.visible
         || app.git_panel.visible
         || app.cicd.visible
         || app.heatmap.visible
         || app.docker.visible
+        || app.network_monitor.visible
+        || app.process_tree.visible
+        || app.system_info.visible
+        || app.port_dashboard.visible
+        || app.regex_playground.visible
         || app.error_notif.visible
+        || app.history.visible
         || app.teaching.enabled;
     let timewarp_active = app.timewarp_browser.active;
 
     if pty_changed || has_shader || ssh_pending || ai_waiting || any_overlay || timewarp_active || app.hud_visible {
         app.request_redraw();
     }
+}
+
+fn load_icon_from_png(png_data: &[u8]) -> Option<winit::window::Icon> {
+    // Minimal PNG decoder for the embedded icon (RGBA, non-interlaced)
+    if png_data.len() < 33 || &png_data[0..8] != b"\x89PNG\r\n\x1a\n" {
+        return None;
+    }
+    // Read IHDR
+    let width = u32::from_be_bytes([png_data[16], png_data[17], png_data[18], png_data[19]]);
+    let height = u32::from_be_bytes([png_data[20], png_data[21], png_data[22], png_data[23]]);
+
+    // Collect all IDAT chunks
+    let mut idat_data = Vec::new();
+    let mut pos = 8;
+    while pos + 12 <= png_data.len() {
+        let chunk_len = u32::from_be_bytes([png_data[pos], png_data[pos+1], png_data[pos+2], png_data[pos+3]]) as usize;
+        let chunk_type = &png_data[pos+4..pos+8];
+        if chunk_type == b"IDAT" && pos + 8 + chunk_len <= png_data.len() {
+            idat_data.extend_from_slice(&png_data[pos+8..pos+8+chunk_len]);
+        }
+        pos += 12 + chunk_len;
+    }
+
+    // Decompress
+    use std::io::Read;
+    let mut decoder = flate2::read::ZlibDecoder::new(&idat_data[..]);
+    let mut raw = Vec::new();
+    decoder.read_to_end(&mut raw).ok()?;
+
+    // Unfilter (filter type 0 = None for our generated icon)
+    let stride = (width as usize) * 4;
+    let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+    for row in 0..height as usize {
+        let offset = row * (stride + 1) + 1; // skip filter byte
+        if offset + stride <= raw.len() {
+            rgba.extend_from_slice(&raw[offset..offset + stride]);
+        }
+    }
+
+    winit::window::Icon::from_rgba(rgba, width, height).ok()
 }

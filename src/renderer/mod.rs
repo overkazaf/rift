@@ -7,7 +7,7 @@ use std::time::Instant;
 use crate::config::{Rgb, Theme};
 use crate::effects::ShaderPipeline;
 use crate::window::PaneRect;
-use crate::terminal::{Color, Terminal};
+use crate::terminal::{Color, ImageCell, Terminal, TermImage};
 use crate::window::WindowManager;
 use font::FontManager;
 
@@ -47,8 +47,9 @@ impl Renderer {
         buffer: &mut [u32],
         width: u32,
         height: u32,
+        blocks: &crate::tools::blocks::BlockManager,
     ) {
-        self.render_tabbed_with_cmd(wm, content_area, buffer, width, height, false);
+        self.render_tabbed_with_cmd(wm, content_area, buffer, width, height, false, blocks, None);
     }
 
     pub fn render_tabbed_with_cmd(
@@ -59,6 +60,8 @@ impl Renderer {
         width: u32,
         height: u32,
         cmd_held: bool,
+        blocks: &crate::tools::blocks::BlockManager,
+        hover_pane: Option<usize>,
     ) {
         let w = width as usize;
         let h = height as usize;
@@ -67,20 +70,30 @@ impl Renderer {
         buffer.fill(bg);
 
         let tab_bar_h = content_area.y;
-        self.render_tab_bar(wm, buffer, w, tab_bar_h);
 
         let layouts = wm.pane_layouts(content_area);
         let active_tab = wm.active_tab();
         for (idx, rect, is_active) in &layouts {
-            if *idx < active_tab.panes.len() {
-                let terminal = &active_tab.panes[*idx].terminal;
+            if let Some(pane) = active_tab.pane(*idx) {
+                let terminal = &pane.terminal;
                 self.render_pane_inner(terminal, buffer, w, h, *rect, *is_active, cmd_held);
             }
         }
 
         if layouts.len() > 1 {
-            self.render_pane_borders(&layouts, buffer, w, h);
+            self.render_pane_borders(&layouts, buffer, w, h, hover_pane);
         }
+
+        // Warp-style command block indicators (left-side bar)
+        if blocks.block_count() > 0 {
+            if let Some((_, rect, _)) = layouts.first() {
+                let terminal = &active_tab.active_pane().terminal;
+                self.render_block_indicators(terminal, blocks, buffer, w, *rect);
+            }
+        }
+
+        // Tab bar rendered LAST so it's always on top of pane content
+        self.render_tab_bar(wm, buffer, w, tab_bar_h);
 
         let elapsed = self.start_time.elapsed().as_secs_f32();
         self.shader.apply(buffer, width, height, elapsed);
@@ -95,25 +108,14 @@ impl Renderer {
     ) {
         if bar_height == 0 { return; }
 
-        // Ghostty style: flat dark bar, no gradients, no accent lines
-        let bar_bg = darken(self.theme.bg, 20);
+        // Ghostty: dark titlebar bg, noticeably darker than terminal content
+        let bar_bg = darken(self.theme.bg, 30);
         let bar_bg_px = pack(bar_bg.0, bar_bg.1, bar_bg.2);
 
-        // Solid dark background
         for y in 0..bar_height {
             let off = y * buf_width;
             let end = (off + buf_width).min(buffer.len());
             buffer[off..end].fill(bar_bg_px);
-        }
-
-        // Thin bottom separator (subtle, not accent colored)
-        let sep_color = lighten(bar_bg, 10);
-        let sep_px = pack(sep_color.0, sep_color.1, sep_color.2);
-        {
-            let y = bar_height.saturating_sub(1);
-            let off = y * buf_width;
-            let end = (off + buf_width).min(buffer.len());
-            buffer[off..end].fill(sep_px);
         }
 
         let tabs = wm.tab_bar_info();
@@ -121,41 +123,42 @@ impl Renderer {
         let ch = self.font.cell_height;
         let text_y = (bar_height.saturating_sub(ch)) / 2;
 
-        // Colors
         let active_text = self.theme.fg;
-        let inactive_text = dim(self.theme.fg, 0.5);
+        let inactive_text = dim(self.theme.fg, 0.45);
 
-        // Active tab: use TERMINAL BG color (same as content area — Ghostty style)
-        // This creates the illusion that the active tab IS the content area
+        // Active tab = terminal bg (content flows into the tab)
         let active_bg = self.theme.bg;
         let active_bg_px = pack(active_bg.0, active_bg.1, active_bg.2);
 
-        // Tab layout: fill full width equally
         let tab_count = tabs.len().max(1);
         let tab_w = buf_width / tab_count;
 
+        // Find active tab index for separator logic
+        let active_idx = tabs.iter().position(|(_, a)| *a);
+
         for (i, (title, is_active)) in tabs.iter().enumerate() {
             let x0 = i * tab_w;
-            // Last tab extends to edge to avoid gap
             let x1 = if i == tab_count - 1 { buf_width } else { (i + 1) * tab_w };
             if x0 >= buf_width { break; }
 
             if *is_active {
-                // Active: terminal bg, only TOP corners rounded, bottom flush with content
-                let margin = 2;
-                let top = 4;
-                let bot = bar_height; // flush to bottom — no gap
+                // Ghostty: top-rounded rect, bottom flush, side margins for the gap
+                let margin = 4;
+                let top = 3;
+                let bot = bar_height;
                 let pl = x0 + margin;
                 let pr = x1.saturating_sub(margin);
-                let radius = 7i32;
+                let r = 8i32;
 
                 for y in top..bot {
-                    // Only round top corners
-                    let dy = (top as i32 + radius) - y as i32;
-                    let inset = if dy > 0 && dy <= radius {
-                        radius - integer_sqrt((radius * radius - dy * dy).max(0) as usize) as i32
-                    } else { 0 };
-
+                    let dy = (top as i32 + r) - y as i32;
+                    let inset = if dy > 0 && dy <= r {
+                        // Anti-aliased rounded corner
+                        let exact = r as f32 - ((r * r - dy * dy) as f32).sqrt();
+                        exact.round() as i32
+                    } else {
+                        0
+                    };
                     let rl = (pl as i32 + inset).max(0) as usize;
                     let rr = (pr as i32 - inset).max(0) as usize;
                     if rl < rr && rl < buf_width {
@@ -166,22 +169,9 @@ impl Renderer {
                         }
                     }
                 }
-            } else {
-                // Inactive: no background (just text on dark bar)
-                // Thin vertical separator between tabs
-                if i > 0 {
-                    let prev_active = tabs.get(i - 1).map_or(false, |(_, a)| *a);
-                    if !prev_active {
-                        let sp = pack(sep_color.0, sep_color.1, sep_color.2);
-                        for y in 8..bar_height.saturating_sub(8) {
-                            let idx = y * buf_width + x0;
-                            if idx < buffer.len() { buffer[idx] = sp; }
-                        }
-                    }
-                }
             }
 
-            // Title: centered in tab
+            // Title centered
             let text_color = if *is_active { active_text } else { inactive_text };
             let max_chars = ((x1 - x0) / cw).saturating_sub(2);
             let title_str = truncate_str(title, max_chars);
@@ -195,26 +185,27 @@ impl Renderer {
                 if c == ' ' { continue; }
                 self.draw_char(buffer, buf_width, bar_height, c, gx, text_y, text_color);
             }
+        }
 
-            // Tab index number right-aligned (Ghostty-style ⌘N indicator)
-            if i < 9 {
-                let idx_char = (b'1' + i as u8) as char;
-                let idx_color = dim(text_color, 0.35);
-                let idx_x = x1.saturating_sub(cw + 8);
-                if idx_x > x0 + cw && idx_x + cw <= buf_width {
-                    self.draw_char(buffer, buf_width, bar_height, idx_char, idx_x, text_y, idx_color);
-                }
+        // Bottom border: 1px line under inactive regions only
+        let sep_px = pack_rgb(darken(self.theme.bg, 10));
+        let sep_y = bar_height.saturating_sub(1);
+        let (ax0, ax1) = match active_idx {
+            Some(ai) => {
+                let m = 4;
+                (ai * tab_w + m, (if ai == tab_count - 1 { buf_width } else { (ai + 1) * tab_w }).saturating_sub(m))
             }
-
-            // Close button "x" (to the left of index when multiple tabs)
-            let close_margin = 4;
-            if tab_count > 1 {
-                let close_x = x1.saturating_sub(cw * 2 + close_margin + 12);
-                let close_color = if *is_active { dim(active_text, 0.35) } else { dim(inactive_text, 0.5) };
-                if close_x > x0 && close_x + cw <= buf_width {
-                    self.draw_char(buffer, buf_width, bar_height, 'x', close_x, text_y, close_color);
-                }
-            }
+            None => (0, 0),
+        };
+        if ax0 > 0 {
+            let off = sep_y * buf_width;
+            let end = (off + ax0).min(buffer.len());
+            if off < buffer.len() { buffer[off..end].fill(sep_px); }
+        }
+        if ax1 < buf_width {
+            let off = sep_y * buf_width + ax1;
+            let end = (sep_y * buf_width + buf_width).min(buffer.len());
+            if off < end { buffer[off..end].fill(sep_px); }
         }
     }
 
@@ -295,6 +286,10 @@ impl Renderer {
             _ => (elapsed * 2.0) as u32 % 2 == 0,
         };
         let show_cursor = is_active && terminal.cursor_visible && !terminal.is_scrolled_back() && cursor_blink_on;
+        // Kitty graphics placements are absolute grid coordinates that don't
+        // track scrollback (see terminal::images module docs), so only blit
+        // them while looking at the live screen.
+        let images_visible = !terminal.is_scrolled_back();
 
         // Pre-detect URLs (only when Cmd is held)
         let url_ranges: Vec<Vec<(usize, usize)>> = if cmd_held {
@@ -315,6 +310,20 @@ impl Renderer {
                 let y0 = rect.y + row * ch;
                 if x0 + cw > rect.x + rect.width || y0 + ch > rect.y + rect.height { continue; }
                 if x0 + cw > buf_width || y0 + ch > buf_height { continue; }
+
+                // Kitty graphics: if this cell is covered by a placed image,
+                // blit the corresponding slice of pixels and skip normal
+                // glyph/background rendering for it entirely — mirrors how
+                // real terminals leave blanks in the text grid under an
+                // image placement.
+                if images_visible {
+                    if let Some(ic) = terminal.image_store.get_cell(row, col) {
+                        if let Some(img) = terminal.image_store.get_image(ic.image_id) {
+                            blit_image_cell(buffer, buf_width, buf_height, img, ic, x0, y0, cw, ch);
+                        }
+                        continue;
+                    }
+                }
 
                 let (mut fg, mut bg) = (
                     self.resolve(cell.fg, true),
@@ -381,14 +390,19 @@ impl Renderer {
                     let text_color = if is_cursor && terminal.cursor_style == crate::terminal::CursorStyle::Block {
                         self.theme.bg
                     } else { fg };
+                    let fg_px = pack(text_color.0, text_color.1, text_color.2);
                     let bitmap = self.font.rasterize(cell.c);
                     for cy in 0..ch {
+                        let row_off = (y0 + cy) * buf_width + x0;
+                        let bmp_off = cy * cw;
                         for cx in 0..cw {
-                            let coverage = bitmap[cy * cw + cx] as u32;
+                            let coverage = bitmap[bmp_off + cx] as u32;
                             if coverage == 0 { continue; }
-                            let idx = (y0 + cy) * buf_width + x0 + cx;
+                            let idx = row_off + cx;
                             if idx < buffer.len() {
-                                buffer[idx] = blend(text_color, buffer[idx], coverage);
+                                buffer[idx] = if coverage >= 250 { fg_px } else {
+                                    blend(text_color, buffer[idx], coverage)
+                                };
                             }
                         }
                     }
@@ -463,15 +477,21 @@ impl Renderer {
         buffer: &mut [u32],
         buf_width: usize,
         buf_height: usize,
+        hover_pane: Option<usize>,
     ) {
         let split_color = darken(self.theme.bg, 6);
         let split_px = pack(split_color.0, split_color.1, split_color.2);
         let active_border = self.theme.cursor;
         let active_px = pack(active_border.0, active_border.1, active_border.2);
+        let hover_border = dim(self.theme.cursor, 0.4);
+        let hover_px = pack(hover_border.0, hover_border.1, hover_border.2);
 
-        for (_, rect, is_active) in layouts {
+        for (idx, rect, is_active) in layouts {
+            let is_hover = hover_pane == Some(*idx) && !*is_active;
             if *is_active {
                 draw_rect_border(buffer, buf_width, buf_height, rect, active_px);
+            } else if is_hover {
+                draw_rect_border(buffer, buf_width, buf_height, rect, hover_px);
             } else {
                 if rect.x > 0 {
                     let bx = rect.x - 1;
@@ -485,6 +505,41 @@ impl Renderer {
                     let off = by * buf_width + rect.x;
                     let end = (off + rect.width).min(buffer.len());
                     if off < buffer.len() { buffer[off..end].fill(split_px); }
+                }
+            }
+        }
+    }
+
+    fn render_block_indicators(
+        &self,
+        terminal: &Terminal,
+        blocks: &crate::tools::blocks::BlockManager,
+        buffer: &mut [u32],
+        buf_width: usize,
+        rect: PaneRect,
+    ) {
+        let ch = self.font.cell_height;
+        let visible = terminal.visible_rows();
+        let scroll_top = terminal.scrollback.len().saturating_sub(terminal.scroll_offset);
+
+        let bar_w = 3;
+        let bar_x = rect.x + 2;
+        let accent = self.theme.cursor;
+        let accent_px = pack(accent.0, accent.1, accent.2);
+        let dim_accent = dim(accent, 0.3);
+        let dim_px = pack(dim_accent.0, dim_accent.1, dim_accent.2);
+
+        for (row, _) in visible.iter().enumerate() {
+            let abs_line = scroll_top + row;
+            if let Some((_, blk)) = blocks.block_at_line(abs_line) {
+                let is_cmd_line = abs_line == blk.output_start.saturating_sub(1);
+                let px = if is_cmd_line { accent_px } else { dim_px };
+                let y0 = rect.y + row * ch;
+                for y in y0..(y0 + ch).min(rect.y + rect.height) {
+                    for dx in 0..bar_w {
+                        let idx = y * buf_width + bar_x + dx;
+                        if idx < buffer.len() { buffer[idx] = px; }
+                    }
                 }
             }
         }
@@ -568,19 +623,25 @@ impl Renderer {
         buffer: &mut [u32],
         buf_width: usize,
         buf_height: usize,
-        offset_y: usize,
+        rect: PaneRect,
     ) {
         if !sel.active { return; }
         let cw = self.font.cell_width;
         let ch = self.font.cell_height;
+        let offset_y = rect.y;
+        let offset_x = rect.x;
+        let stride = buf_width;
+        let clip_right = (rect.x + rect.width).min(buf_width);
+        let buf_height = (rect.y + rect.height).min(buf_height);
+        let buf_width = clip_right;
 
         let max_row = buf_height.saturating_sub(offset_y) / ch.max(1);
-        let max_col = buf_width / cw.max(1);
+        let max_col = buf_width.saturating_sub(offset_x) / cw.max(1);
 
         for row in 0..max_row {
             for col in 0..max_col {
                 if sel.contains(row, col) {
-                    let x0 = col * cw;
+                    let x0 = offset_x + col * cw;
                     let y0 = offset_y + row * ch;
                     for cy in 0..ch {
                         let py = y0 + cy;
@@ -588,7 +649,7 @@ impl Renderer {
                         for cx in 0..cw {
                             let px = x0 + cx;
                             if px >= buf_width { break; }
-                            let idx = py * buf_width + px;
+                            let idx = py * stride + px;
                             if idx < buffer.len() {
                                 let base = buffer[idx];
                                 let br = (base >> 16) & 0xff;
@@ -653,10 +714,81 @@ fn draw_rect_border(
     }
 }
 
-use crate::ui::{pack, darken, dim, lighten};
+use crate::ui::{pack, pack_rgb, darken, dim};
+
+/// Blit the slice of `img` that belongs in one terminal cell (as identified
+/// by `ic.offset_x`/`offset_y`, the cell's position within the image's
+/// placement span) into the pixel rectangle `[x0, x0+cw) x [y0, y0+ch)`.
+/// Scales via nearest-neighbor sampling, so the image is stretched to
+/// exactly fill however many cells its placement spans.
+fn blit_image_cell(
+    buffer: &mut [u32],
+    buf_width: usize,
+    buf_height: usize,
+    img: &TermImage,
+    ic: ImageCell,
+    x0: usize,
+    y0: usize,
+    cw: usize,
+    ch: usize,
+) {
+    if img.width == 0 || img.height == 0 {
+        return;
+    }
+    let expected = img.width as usize * img.height as usize * 4;
+    if img.data.len() < expected {
+        return;
+    }
+
+    let (span_rows, span_cols) = img
+        .placement
+        .as_ref()
+        .map(|p| (p.cell_rows.max(1), p.cell_cols.max(1)))
+        .unwrap_or((1, 1));
+
+    // The full placement spans (span_cols*cw, span_rows*ch) pixels; this one
+    // cell is a (cw, ch) slice of that, offset by (offset_x*cw, offset_y*ch).
+    let full_w = (span_cols * cw).max(1);
+    let full_h = (span_rows * ch).max(1);
+
+    for dy in 0..ch {
+        let py = y0 + dy;
+        if py >= buf_height {
+            break;
+        }
+        let out_y = ic.offset_y as usize * ch + dy;
+        let src_y = (out_y * img.height as usize / full_h).min(img.height as usize - 1);
+        for dx in 0..cw {
+            let px = x0 + dx;
+            if px >= buf_width {
+                break;
+            }
+            let out_x = ic.offset_x as usize * cw + dx;
+            let src_x = (out_x * img.width as usize / full_w).min(img.width as usize - 1);
+            let si = (src_y * img.width as usize + src_x) * 4;
+            let a = img.data[si + 3] as u32;
+            if a == 0 {
+                continue;
+            }
+            let idx = py * buf_width + px;
+            if idx >= buffer.len() {
+                continue;
+            }
+            let src_rgb = (img.data[si], img.data[si + 1], img.data[si + 2]);
+            buffer[idx] = if a >= 250 {
+                pack(src_rgb.0, src_rgb.1, src_rgb.2)
+            } else {
+                blend(src_rgb, buffer[idx], a)
+            };
+        }
+    }
+}
 
 #[inline]
 fn blend(fg: Rgb, base: u32, alpha: u32) -> u32 {
+    if alpha >= 250 {
+        return pack(fg.0, fg.1, fg.2);
+    }
     let inv = 255 - alpha;
     let br = (base >> 16) & 0xff;
     let bg = (base >> 8) & 0xff;
@@ -665,17 +797,6 @@ fn blend(fg: Rgb, base: u32, alpha: u32) -> u32 {
     let g = (fg.1 as u32 * alpha + bg * inv) / 255;
     let b = (fg.2 as u32 * alpha + bb * inv) / 255;
     pack(r as u8, g as u8, b as u8)
-}
-
-fn integer_sqrt(n: usize) -> usize {
-    if n == 0 { return 0; }
-    let mut x = n;
-    let mut y = (x + 1) / 2;
-    while y < x {
-        x = y;
-        y = (x + n / x) / 2;
-    }
-    x
 }
 
 fn truncate_str(s: &str, max_len: usize) -> &str {

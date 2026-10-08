@@ -47,11 +47,25 @@ impl WindowManager {
     pub fn new_tab(&mut self, cols: usize, rows: usize) {
         let id = self.alloc_id();
         let pane = Pane::new(id, cols, rows, self.proxy.clone());
-        let tab_num = self.tabs.len() + 1;
-        let mut tab = Tab::new(pane);
-        tab.title = format!("Tab {tab_num}");
+        let tab = Tab::new(pane);
         self.tabs.push(tab);
         self.active_tab = self.tabs.len() - 1;
+        self.renumber_tabs();
+    }
+
+    pub fn renumber_tabs(&mut self) {
+        for (i, tab) in self.tabs.iter_mut().enumerate() {
+            if !tab.custom_title {
+                tab.title = format!("Tab {}", i + 1);
+            }
+        }
+    }
+
+    pub fn rename_tab(&mut self, idx: usize, name: &str) {
+        if let Some(tab) = self.tabs.get_mut(idx) {
+            tab.title = name.to_string();
+            tab.custom_title = true;
+        }
     }
 
     pub fn close_current(&mut self) -> bool {
@@ -64,6 +78,7 @@ impl WindowManager {
             if self.active_tab >= self.tabs.len() {
                 self.active_tab = self.tabs.len() - 1;
             }
+            self.renumber_tabs();
         }
         false
     }
@@ -103,7 +118,7 @@ impl WindowManager {
     pub fn process_all_output(&mut self) -> bool {
         let mut changed = false;
         for tab in &mut self.tabs {
-            for pane in &mut tab.panes {
+            for pane in tab.panes_mut() {
                 if pane.process_output() {
                     changed = true;
                 }
@@ -114,7 +129,7 @@ impl WindowManager {
 
     pub fn flush_all_responses(&mut self) {
         for tab in &mut self.tabs {
-            for pane in &mut tab.panes {
+            for pane in tab.panes_mut() {
                 pane.flush_responses();
             }
         }
@@ -136,12 +151,10 @@ impl WindowManager {
 
         for tab in &mut self.tabs {
             let layouts = tab.layouts(area);
-            for (idx, rect, _) in layouts {
-                if idx < tab.panes.len() {
-                    let cols = (rect.width / cell_width).max(1);
-                    let rows = (rect.height / cell_height).max(1);
-                    tab.panes[idx].resize(cols, rows);
-                }
+            for (pane, (_, rect, _)) in tab.panes_mut().into_iter().zip(layouts) {
+                let cols = (rect.width / cell_width.max(1)).max(1);
+                let rows = (rect.height / cell_height.max(1)).max(1);
+                pane.resize(cols, rows);
             }
         }
     }
@@ -152,7 +165,7 @@ impl WindowManager {
 
     #[allow(dead_code)]
     pub fn pane_count(&self) -> usize {
-        self.active_tab().panes.len()
+        self.active_tab().pane_count()
     }
 
     pub fn get_proxy(&self) -> EventLoopProxy<()> {
@@ -183,6 +196,7 @@ impl WindowManager {
         } else if self.active_tab > idx {
             self.active_tab -= 1;
         }
+        self.renumber_tabs();
         false
     }
 

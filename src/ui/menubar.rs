@@ -50,12 +50,15 @@ pub enum MenuAction {
     NetworkMonitor,
     ProcessTree,
     SystemInfo,
+    PortDashboard,
+    RegexPlayground,
     Heatmap,
     SecretMask,
     AuditLog,
     TeachingMode,
     AiAssistant,
     ObserverMode,
+    AdvisorMode,
     TimeWarp,
     HudToggle,
     BroadcastToggle,
@@ -78,16 +81,16 @@ impl AppMenuBar {
         let about = PredefinedMenuItem::about(
             Some("About rift"),
             Some(AboutMetadata {
-                name: Some("rift".into()),
+                name: Some("Rift".into()),
                 version: Some(crate::config::VERSION.into()),
-                short_version: None,
-                comments: Some("A cyberpunk terminal with AI, SSH, and 32 built-in tools".into()),
-                copyright: Some("MIT License".into()),
+                short_version: Some(crate::config::VERSION.into()),
+                comments: None,
+                copyright: Some("\u{00a9} 2024-2026 overkazaf. MIT License.".into()),
                 license: Some("MIT".into()),
-                website: None,
-                website_label: None,
-                authors: None,
-                credits: None,
+                website: Some("https://github.com/overkazaf/rift".into()),
+                website_label: Some("GitHub".into()),
+                authors: Some(vec!["overkazaf".into()]),
+                credits: Some("Author: overkazaf\nGitHub: github.com/overkazaf/rift\nSupport: ko-fi.com/john5555555555".into()),
                 icon: None,
             }),
         );
@@ -206,7 +209,7 @@ impl AppMenuBar {
         // ── Terminal menu ──
         let term_menu = Submenu::new("Terminal", true);
         let split_h = MenuItem::new("Split Right", true, accel("CmdOrCtrl+D"));
-        let split_v = MenuItem::new("Split Down", true, accel("CmdOrCtrl+Shift+D"));
+        let split_v = MenuItem::new("Split Down", true, None);
         let hud = MenuItem::new("Toggle HUD", true, accel("CmdOrCtrl+Shift+H"));
         let timewarp = MenuItem::new("Time Warp", true, None::<Accelerator>);
         let broadcast = MenuItem::new("Toggle Broadcast", true, accel("CmdOrCtrl+Shift+P"));
@@ -238,6 +241,8 @@ impl AppMenuBar {
         let netmon = MenuItem::new("Network Monitor", true, None::<Accelerator>);
         let proctree = MenuItem::new("Process Tree", true, None::<Accelerator>);
         let sysinfo = MenuItem::new("System Info", true, None::<Accelerator>);
+        let portdash = MenuItem::new("Port Dashboard", true, None::<Accelerator>);
+        let regex_play = MenuItem::new("Regex Playground", true, accel("CmdOrCtrl+Shift+X"));
         let heatmap = MenuItem::new("Command Heatmap", true, accel("CmdOrCtrl+Shift+Y"));
         let secret = MenuItem::new("Secret Masking", true, accel("CmdOrCtrl+Shift+M"));
         let audit = MenuItem::new("Audit Log", true, accel("CmdOrCtrl+Shift+U"));
@@ -250,6 +255,8 @@ impl AppMenuBar {
         actions.insert(netmon.id().clone(), MenuAction::NetworkMonitor);
         actions.insert(proctree.id().clone(), MenuAction::ProcessTree);
         actions.insert(sysinfo.id().clone(), MenuAction::SystemInfo);
+        actions.insert(portdash.id().clone(), MenuAction::PortDashboard);
+        actions.insert(regex_play.id().clone(), MenuAction::RegexPlayground);
         actions.insert(heatmap.id().clone(), MenuAction::Heatmap);
         actions.insert(secret.id().clone(), MenuAction::SecretMask);
         actions.insert(audit.id().clone(), MenuAction::AuditLog);
@@ -258,7 +265,9 @@ impl AppMenuBar {
         let _ = tools_menu.append_items(&[
             &fm, &git, &docker, &cicd,
             &PredefinedMenuItem::separator(),
-            &netmon, &proctree, &sysinfo,
+            &netmon, &proctree, &sysinfo, &portdash,
+            &PredefinedMenuItem::separator(),
+            &regex_play,
             &PredefinedMenuItem::separator(),
             &heatmap, &secret, &audit, &teach,
         ]);
@@ -267,9 +276,11 @@ impl AppMenuBar {
         let ai_menu = Submenu::new("AI", true);
         let ai_assist = MenuItem::new("AI Assistant", true, accel("CmdOrCtrl+Shift+A"));
         let observer = MenuItem::new("Observer Mode", true, None::<Accelerator>);
+        let advisor = MenuItem::new("Advisor Mode", true, None::<Accelerator>);
         actions.insert(ai_assist.id().clone(), MenuAction::AiAssistant);
         actions.insert(observer.id().clone(), MenuAction::ObserverMode);
-        let _ = ai_menu.append_items(&[&ai_assist, &observer]);
+        actions.insert(advisor.id().clone(), MenuAction::AdvisorMode);
+        let _ = ai_menu.append_items(&[&ai_assist, &observer, &advisor]);
 
         // ── Window menu ──
         let window_menu = Submenu::new("Window", true);

@@ -1,3 +1,4 @@
+pub mod advisor;
 pub mod autocomplete;
 pub mod backend;
 pub mod context;
@@ -6,6 +7,7 @@ pub mod observer;
 pub mod panel;
 pub mod profile;
 
+pub use advisor::Advisor;
 pub use autocomplete::Autocomplete;
 pub use panel::{AiAction, AiPanel, AiPanelKey};
 

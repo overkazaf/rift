@@ -1,9 +1,11 @@
 pub mod chart;
 pub mod codec;
+pub mod command_palette;
 pub mod compare;
 pub mod diff;
 pub mod fuzzy;
 pub mod hex;
+pub mod history;
 pub mod hud;
 pub mod recording;
 pub mod snippet;
@@ -31,3 +33,6 @@ pub mod ssh_tunnel;
 pub mod cmd_timer;
 pub mod network_monitor;
 pub mod system_info;
+pub mod session;
+pub mod port_dashboard;
+pub mod regex_playground;

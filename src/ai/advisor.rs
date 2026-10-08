@@ -1,0 +1,399 @@
+use std::sync::mpsc::Receiver;
+
+use crate::config::{Rgb, Theme};
+use crate::renderer::font::FontManager;
+use crate::ui::{dim, fill_rect, pack_rgb, render_text, trunc};
+
+use super::LlmConfig;
+
+/// How risky the advisor judged a suggested command to be.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RiskLevel {
+    Safe,
+    Caution,
+    Danger,
+}
+
+impl RiskLevel {
+    fn from_label(s: &str) -> Self {
+        match s.trim().to_lowercase().as_str() {
+            "danger" | "dangerous" | "high" | "critical" => RiskLevel::Danger,
+            "safe" | "low" | "none" => RiskLevel::Safe,
+            _ => RiskLevel::Caution,
+        }
+    }
+
+    /// Theme-aware color for this risk level. Reuses the terminal's ANSI
+    /// red/green/yellow palette slots so the badge matches whatever theme
+    /// the user has active instead of hardcoding colors.
+    pub fn color(&self, theme: &Theme) -> Rgb {
+        match self {
+            RiskLevel::Safe => theme.palette[2],    // ANSI green
+            RiskLevel::Caution => theme.palette[3], // ANSI yellow
+            RiskLevel::Danger => theme.palette[1],  // ANSI red
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            RiskLevel::Safe => "SAFE",
+            RiskLevel::Caution => "CAUTION",
+            RiskLevel::Danger => "DANGER",
+        }
+    }
+}
+
+/// Result of an advisor safety/correctness review for one suggested command.
+pub struct AdvisorReview {
+    pub safe: bool,
+    pub notes: Vec<String>,
+    pub suggestion: Option<String>,
+    pub risk_level: RiskLevel,
+}
+
+/// Advisor Mode — a second, independent LLM pass that reviews commands the
+/// AI assistant suggests, before the user runs them. Inspired by Oh-My-Pi's
+/// advisor model: the assistant proposes, the advisor critiques, the human
+/// still decides.
+///
+/// Disabled by default. The review runs on a background thread (same
+/// pattern as `LlmManager::ask`) so it never blocks the UI; `poll()` picks
+/// up the result once it lands.
+pub struct Advisor {
+    pub enabled: bool,
+    pub review: Option<AdvisorReview>,
+    pub error: Option<String>,
+    rx: Option<Receiver<Result<AdvisorReview, String>>>,
+}
+
+impl Advisor {
+    pub fn new() -> Self {
+        Self {
+            enabled: false,
+            review: None,
+            error: None,
+            rx: None,
+        }
+    }
+
+    pub fn toggle(&mut self) {
+        self.enabled = !self.enabled;
+        if !self.enabled {
+            self.clear();
+        }
+    }
+
+    /// Drop any in-flight or completed review (e.g. because the user asked
+    /// a new question, or turned Advisor Mode off). A background thread may
+    /// still be running; its result is simply discarded when it lands since
+    /// the receiving end is gone.
+    pub fn clear(&mut self) {
+        self.review = None;
+        self.error = None;
+        self.rx = None;
+    }
+
+    pub fn is_loading(&self) -> bool {
+        self.rx.is_some()
+    }
+
+    /// Kick off a background safety review of `cmd`. No-op if Advisor Mode
+    /// is off or the command is blank. `context` is a short, human-readable
+    /// description of the terminal state (OS/shell/cwd/branch) — kept small
+    /// so the review prompt stays cheap and fast.
+    pub fn review_command(&mut self, cmd: &str, context: &str, config: &LlmConfig) {
+        if !self.enabled {
+            return;
+        }
+        let cmd = cmd.trim().to_string();
+        if cmd.is_empty() {
+            return;
+        }
+
+        self.review = None;
+        self.error = None;
+
+        let config = config.clone();
+        let context = context.to_string();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = request_review(&config, &cmd, &context);
+            let _ = tx.send(result);
+        });
+        self.rx = Some(rx);
+    }
+
+    /// Check for a completed review. Call once per event-loop tick.
+    pub fn poll(&mut self) {
+        let Some(rx) = &self.rx else { return };
+        if let Ok(result) = rx.try_recv() {
+            match result {
+                Ok(review) => {
+                    self.review = Some(review);
+                    self.error = None;
+                }
+                Err(e) => {
+                    log::warn!("Advisor: review failed: {e}");
+                    self.error = Some(e);
+                    self.review = None;
+                }
+            }
+            self.rx = None;
+        }
+    }
+
+    /// Render a compact inline badge + notes + suggestion next to the AI
+    /// response. Intentionally minimal — a colored dot and a line or two of
+    /// dimmed text, not a second panel. Geometry mirrors `AiPanel::render`'s
+    /// layout so the badge lines up with the response panel it annotates.
+    pub fn render_inline(
+        &self,
+        buffer: &mut [u32],
+        width: usize,
+        height: usize,
+        font: &mut FontManager,
+        theme: &Theme,
+    ) {
+        if !self.enabled {
+            return;
+        }
+
+        let cw = font.cell_width.max(1);
+        let ch = font.cell_height.max(1);
+        // Mirrors AiPanel::render's panel geometry (same formula) so the
+        // badge sits in that panel's header rather than drifting from it.
+        let panel_h = (ch * 10 + 40).min(height / 3).max(ch * 6);
+        let panel_y = height.saturating_sub(panel_h);
+        let pad = 16;
+        let title_y = panel_y + 10;
+
+        if self.is_loading() {
+            let label = "advisor reviewing...";
+            let x = width.saturating_sub(pad + label.len() * cw);
+            render_text(buffer, width, font, label, x, title_y, dim(theme.fg, 0.4));
+            return;
+        }
+
+        let Some(review) = &self.review else { return };
+        let max_chars = width.saturating_sub(pad * 2) / cw;
+
+        // Badge: colored dot + risk label, top-right of the panel header —
+        // reads as an annotation "next to" the response below it.
+        let label = review.risk_level.label();
+        let dot_w = (ch / 2).max(6);
+        let gap = cw / 2 + 2;
+        let total_w = dot_w + gap + label.len() * cw;
+        let x0 = width.saturating_sub(pad + total_w);
+        let color = review.risk_level.color(theme);
+        let dot_y = title_y + ch.saturating_sub(dot_w) / 2;
+        fill_rect(buffer, width, x0, dot_y, dot_w, dot_w, pack_rgb(color));
+        render_text(buffer, width, font, label, x0 + dot_w + gap, title_y, color);
+
+        // Notes + suggestion: a compact, dimmed block anchored just above
+        // the panel's bottom help line — reads as "below the response"
+        // without needing to know exactly how many lines the response
+        // used. Capped at a couple of notes to stay out of the way.
+        let help_y = height.saturating_sub(ch + 8);
+        let min_y = title_y + ch + 4;
+
+        let mut rows: Vec<(String, Rgb)> = Vec::new();
+        if let Some(ref suggestion) = review.suggestion {
+            rows.push((format!("Advisor suggests: {suggestion}"), theme.cursor));
+        }
+        for note in review.notes.iter().take(2).rev() {
+            rows.push((format!("  - {note}"), dim(theme.fg, 0.55)));
+        }
+
+        let mut y = help_y.saturating_sub(ch + 4);
+        for (text, color) in &rows {
+            if y < min_y {
+                break;
+            }
+            render_text(buffer, width, font, trunc(text, max_chars), pad, y, *color);
+            y = y.saturating_sub(ch + 2);
+        }
+    }
+}
+
+// ── LLM request + response parsing ──
+
+fn request_review(config: &LlmConfig, cmd: &str, context: &str) -> Result<AdvisorReview, String> {
+    let prompt = build_prompt(cmd, context);
+    let text = super::backend::complete_simple(config, &prompt)?;
+    parse_review(&text)
+}
+
+fn build_prompt(cmd: &str, context: &str) -> String {
+    format!(
+        "You are a security-aware command reviewer. Review this shell command for \
+         safety, correctness, and best practices.\n\n\
+         Command: `{cmd}`\n\
+         Context: {context}\n\n\
+         Respond with ONLY a single JSON object — no markdown fences, no commentary \
+         before or after it — using double-quoted keys and strings, in exactly this shape:\n\
+         {{\"safe\": true, \"risk\": \"safe\", \"notes\": [\"short note\"], \"suggestion\": null}}\n\n\
+         Field rules:\n\
+         - \"safe\": true or false\n\
+         - \"risk\": one of \"safe\", \"caution\", \"danger\"\n\
+         - \"notes\": short, specific observations; empty array if there's nothing to flag\n\
+         - \"suggestion\": a safer or better alternative command, or null if the command is already fine"
+    )
+}
+
+fn parse_review(text: &str) -> Result<AdvisorReview, String> {
+    let json = extract_json_object(text)
+        .ok_or_else(|| format!("Advisor: no JSON object in response: {}", trunc(text, 150)))?;
+
+    let risk_level = super::backend::extract_json_string(json, "risk")
+        .map(|s| RiskLevel::from_label(&s))
+        .unwrap_or(RiskLevel::Caution);
+    let safe = extract_bool(json, "safe").unwrap_or(matches!(risk_level, RiskLevel::Safe));
+    let notes = extract_string_array(json, "notes");
+    let suggestion = super::backend::extract_json_string(json, "suggestion")
+        .map(|s| s.trim().to_string())
+        .filter(|s| {
+            let lower = s.to_lowercase();
+            !s.is_empty() && lower != "null" && lower != "none" && lower != "n/a"
+        });
+
+    Ok(AdvisorReview {
+        safe,
+        notes,
+        suggestion,
+        risk_level,
+    })
+}
+
+/// Find the first balanced `{...}` object in `text`, ignoring braces inside
+/// string literals. Tolerates markdown fences or stray commentary around
+/// the JSON since it only pays attention to the braces themselves.
+fn extract_json_object(text: &str) -> Option<&str> {
+    let start = text.find('{')?;
+    let rest = &text[start..];
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escape = false;
+    let mut end = None;
+    for (i, c) in rest.char_indices() {
+        if in_string {
+            if escape {
+                escape = false;
+            } else if c == '\\' {
+                escape = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match c {
+            '"' => in_string = true,
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = Some(i + c.len_utf8());
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    end.map(|e| &rest[..e])
+}
+
+fn extract_bool(json: &str, key: &str) -> Option<bool> {
+    let pat = format!("\"{key}\"");
+    let pos = json.find(&pat)?;
+    let after = json[pos + pat.len()..]
+        .trim_start()
+        .strip_prefix(':')?
+        .trim_start();
+    if after.starts_with("true") {
+        Some(true)
+    } else if after.starts_with("false") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+fn extract_string_array(json: &str, key: &str) -> Vec<String> {
+    let pat = format!("\"{key}\"");
+    let Some(pos) = json.find(&pat) else {
+        return Vec::new();
+    };
+    let Some(after) = json[pos + pat.len()..].trim_start().strip_prefix(':') else {
+        return Vec::new();
+    };
+    let after = after.trim_start();
+    if !after.starts_with('[') {
+        return Vec::new();
+    }
+
+    // Find the matching closing bracket, respecting string literals, so we
+    // don't get tripped up by `]` characters inside note text.
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escape = false;
+    let mut end = None;
+    for (i, c) in after.char_indices() {
+        if in_string {
+            if escape {
+                escape = false;
+            } else if c == '\\' {
+                escape = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match c {
+            '"' => in_string = true,
+            '[' => depth += 1,
+            ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = Some(i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let Some(end) = end else {
+        return Vec::new();
+    };
+    let inner = &after[1..end];
+
+    let mut items = Vec::new();
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        if c != '"' {
+            continue;
+        }
+        let mut s = String::new();
+        loop {
+            match chars.next() {
+                Some('\\') => match chars.next() {
+                    Some('n') => s.push('\n'),
+                    Some('t') => s.push('\t'),
+                    Some('"') => s.push('"'),
+                    Some('\\') => s.push('\\'),
+                    Some(other) => {
+                        s.push('\\');
+                        s.push(other);
+                    }
+                    None => break,
+                },
+                Some('"') => break,
+                Some(ch) => s.push(ch),
+                None => break,
+            }
+        }
+        let trimmed = s.trim();
+        if !trimmed.is_empty() {
+            items.push(trimmed.to_string());
+        }
+    }
+    items
+}

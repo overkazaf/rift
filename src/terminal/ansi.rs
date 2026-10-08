@@ -10,6 +10,13 @@ impl<'a> AnsiHandler<'a> {
     pub fn new(terminal: &'a mut Terminal) -> Self {
         Self { terminal }
     }
+
+    /// Feed one raw PTY byte to the Kitty graphics (APC) scanner, in
+    /// parallel with the normal `vte` feed in `Pane::process_output`. See
+    /// `Terminal::feed_apc_byte` for why this can't be done via `Perform`.
+    pub fn feed_apc_byte(&mut self, byte: u8) {
+        self.terminal.feed_apc_byte(byte);
+    }
 }
 
 fn collect(params: &Params) -> Vec<u16> {

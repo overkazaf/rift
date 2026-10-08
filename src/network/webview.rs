@@ -28,6 +28,7 @@ impl WebViewPane {
                 size: wry::dpi::LogicalSize::new(w as f64, h as f64).into(),
             })
             .with_transparent(false)
+            .with_devtools(true)
             .build_as_child(window.as_ref())
             .map_err(|e| format!("WebView creation failed: {e}"))?;
 
@@ -76,7 +77,22 @@ impl WebViewPane {
         self.visible = visible;
         #[cfg(feature = "webview")]
         {
+            if !visible {
+                // Close DevTools before hiding to avoid orphaned inspector panels
+                if self.webview.is_devtools_open() {
+                    self.webview.close_devtools();
+                }
+            }
             let _ = self.webview.set_visible(visible);
+        }
+    }
+
+    pub fn close_devtools(&self) {
+        #[cfg(feature = "webview")]
+        {
+            if self.webview.is_devtools_open() {
+                self.webview.close_devtools();
+            }
         }
     }
 }
