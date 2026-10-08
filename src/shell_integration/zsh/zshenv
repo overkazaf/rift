@@ -1,0 +1,28 @@
+# Rift shell integration bootstrap for zsh.
+#
+# Rift launches zsh with ZDOTDIR pointing at the directory containing this
+# file, so zsh reads it *instead of* the user's ~/.zshenv. We immediately put
+# ZDOTDIR back the way the user had it, source their real .zshenv, and then
+# load the integration hooks. User rc files are never modified, and since
+# ZDOTDIR is restored here, .zprofile/.zshrc/.zlogin are read from the user's
+# real location as usual.
+
+if [[ -n "${RIFT_ORIG_ZDOTDIR+X}" ]]; then
+  if [[ -n "$RIFT_ORIG_ZDOTDIR" ]]; then
+    ZDOTDIR="$RIFT_ORIG_ZDOTDIR"
+  else
+    unset ZDOTDIR
+  fi
+  unset RIFT_ORIG_ZDOTDIR
+fi
+
+{
+  builtin typeset _rift_user_zshenv="${ZDOTDIR:-$HOME}/.zshenv"
+  [[ ! -r "$_rift_user_zshenv" ]] || builtin source -- "$_rift_user_zshenv"
+} always {
+  builtin unset _rift_user_zshenv
+}
+
+if [[ -o interactive && -n "$RIFT_SHELL_INTEGRATION" && -r "$RIFT_SHELL_DIR/rift-integration.zsh" ]]; then
+  builtin source -- "$RIFT_SHELL_DIR/rift-integration.zsh"
+fi

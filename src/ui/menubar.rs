@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use crate::window::tab::{Direction, PaneCmd};
 use muda::{
     accelerator::Accelerator, AboutMetadata, Menu, MenuEvent, MenuItem, MenuId,
     PredefinedMenuItem, Submenu,
@@ -42,6 +43,7 @@ pub enum MenuAction {
     Preferences,
     Welcome,
     WebView,
+    Browser(crate::network::browser::BrowserCmd),
     // New actions
     FileManager,
     GitPanel,
@@ -64,6 +66,7 @@ pub enum MenuAction {
     BroadcastToggle,
     Find,
     CompareOutput,
+    Pane(PaneCmd),
 }
 
 pub struct AppMenuBar {
@@ -191,8 +194,53 @@ impl AppMenuBar {
         let _ = effects_menu.append(&PredefinedMenuItem::separator());
         let _ = effects_menu.append(&no_fx);
 
+        // Panes submenu. Shortcuts are shown in the label text only: menu
+        // accelerators would be swallowed by macOS before the key handler.
+        let panes_menu = Submenu::new("Panes", true);
+        let pane_items: Vec<(&str, PaneCmd)> = vec![
+            ("Split Right  \u{2318}D", PaneCmd::SplitRight),
+            ("Split Down  \u{21e7}\u{2318}D", PaneCmd::SplitDown),
+            ("Close Pane  \u{2318}W", PaneCmd::ClosePane),
+            ("Zoom Pane  \u{21e7}\u{2318}\u{21a9}", PaneCmd::Zoom),
+            ("Equalize Panes  \u{2303}\u{2318}=", PaneCmd::Equalize),
+            ("Next Pane  \u{2318}]", PaneCmd::FocusNext),
+            ("Previous Pane  \u{2318}[", PaneCmd::FocusPrev),
+            ("Focus Left  \u{2325}\u{2318}\u{2190}", PaneCmd::Focus(Direction::Left)),
+            ("Focus Right  \u{2325}\u{2318}\u{2192}", PaneCmd::Focus(Direction::Right)),
+            ("Focus Up  \u{2325}\u{2318}\u{2191}", PaneCmd::Focus(Direction::Up)),
+            ("Focus Down  \u{2325}\u{2318}\u{2193}", PaneCmd::Focus(Direction::Down)),
+            ("Swap Left  \u{21e7}\u{2303}\u{2318}\u{2190}", PaneCmd::Swap(Direction::Left)),
+            ("Swap Right  \u{21e7}\u{2303}\u{2318}\u{2192}", PaneCmd::Swap(Direction::Right)),
+            ("Swap Up  \u{21e7}\u{2303}\u{2318}\u{2191}", PaneCmd::Swap(Direction::Up)),
+            ("Swap Down  \u{21e7}\u{2303}\u{2318}\u{2193}", PaneCmd::Swap(Direction::Down)),
+        ];
+        for (i, (label, cmd)) in pane_items.iter().enumerate() {
+            // Separators between: splits | zoom/equalize | cycle | focus | swap
+            if matches!(i, 3 | 5 | 7 | 11) {
+                let _ = panes_menu.append(&PredefinedMenuItem::separator());
+            }
+            let item = MenuItem::new(*label, true, None::<Accelerator>);
+            actions.insert(item.id().clone(), MenuAction::Pane(*cmd));
+            let _ = panes_menu.append(&item);
+        }
+
         let webview_item = MenuItem::new("Toggle WebView", true, accel("CmdOrCtrl+Shift+B"));
         actions.insert(webview_item.id().clone(), MenuAction::WebView);
+        use crate::network::browser::BrowserCmd as Bc;
+        let br_back = MenuItem::new("Browser: Back", true, accel_mac("CmdOrCtrl+["));
+        let br_fwd = MenuItem::new("Browser: Forward", true, accel_mac("CmdOrCtrl+]"));
+        let br_reload = MenuItem::new("Browser: Reload", true, accel_mac("CmdOrCtrl+R"));
+        let br_addr = MenuItem::new("Browser: Focus Address Bar", true, accel_mac("CmdOrCtrl+L"));
+        let br_close = MenuItem::new("Browser: Close", true, accel_mac("CmdOrCtrl+W"));
+        for (item, cmd) in [
+            (&br_back, Bc::Back),
+            (&br_fwd, Bc::Forward),
+            (&br_reload, Bc::Reload),
+            (&br_addr, Bc::FocusAddress),
+            (&br_close, Bc::Close),
+        ] {
+            actions.insert(item.id().clone(), MenuAction::Browser(cmd));
+        }
 
         let _ = view_menu.append_items(&[
             &fullscreen,
@@ -202,8 +250,14 @@ impl AppMenuBar {
             &zoom_reset,
             &PredefinedMenuItem::separator(),
             &effects_menu,
+            &panes_menu,
             &PredefinedMenuItem::separator(),
             &webview_item,
+            &br_back,
+            &br_fwd,
+            &br_reload,
+            &br_addr,
+            &br_close,
         ]);
 
         // ── Terminal menu ──
@@ -333,4 +387,10 @@ impl AppMenuBar {
 
 fn accel(s: &str) -> Option<Accelerator> {
     s.parse().ok()
+}
+
+/// Accelerator only on macOS, where Cmd+<letter> doesn't collide with shell
+/// control keys (Ctrl+R history, Ctrl+W, Ctrl+L, Ctrl+[ = ESC).
+fn accel_mac(s: &str) -> Option<Accelerator> {
+    if cfg!(target_os = "macos") { accel(s) } else { None }
 }

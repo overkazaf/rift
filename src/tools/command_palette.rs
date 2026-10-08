@@ -1,4 +1,5 @@
 use crate::config::Theme;
+use crate::window::tab::{Direction, PaneCmd};
 use crate::renderer::font::FontManager;
 
 /// Command Palette — Cmd+P. A searchable popup giving quick keyboard access
@@ -45,6 +46,7 @@ pub enum PaletteAction {
     CloseTab,
     SplitH,
     SplitV,
+    Pane(PaneCmd),
     Search,
     Ssh,
     Ai,
@@ -318,6 +320,23 @@ fn default_items() -> Vec<PaletteItem> {
         PaletteItem::new("Close Tab", Some(format!("{m}+Shift+W")), PaletteAction::CloseTab),
         PaletteItem::new("Split Right", Some(format!("{m}+D")), PaletteAction::SplitH),
         PaletteItem::new("Split Down", Some(format!("{m}+Shift+D")), PaletteAction::SplitV),
+        PaletteItem::new("Close Pane", Some(format!("{m}+W")), PaletteAction::Pane(PaneCmd::ClosePane)),
+        PaletteItem::new("Zoom Pane", Some(format!("{m}+Shift+Enter")), PaletteAction::Pane(PaneCmd::Zoom)),
+        PaletteItem::new("Equalize Panes", Some(format!("{m}+Ctrl+=")), PaletteAction::Pane(PaneCmd::Equalize)),
+        PaletteItem::new("Next Pane", Some(format!("{m}+]")), PaletteAction::Pane(PaneCmd::FocusNext)),
+        PaletteItem::new("Previous Pane", Some(format!("{m}+[")), PaletteAction::Pane(PaneCmd::FocusPrev)),
+        PaletteItem::new("Focus Pane Left", Some(format!("{m}+Alt+Left")), PaletteAction::Pane(PaneCmd::Focus(Direction::Left))),
+        PaletteItem::new("Focus Pane Right", Some(format!("{m}+Alt+Right")), PaletteAction::Pane(PaneCmd::Focus(Direction::Right))),
+        PaletteItem::new("Focus Pane Up", Some(format!("{m}+Alt+Up")), PaletteAction::Pane(PaneCmd::Focus(Direction::Up))),
+        PaletteItem::new("Focus Pane Down", Some(format!("{m}+Alt+Down")), PaletteAction::Pane(PaneCmd::Focus(Direction::Down))),
+        PaletteItem::new("Swap Pane Left", Some(format!("{m}+Ctrl+Shift+Left")), PaletteAction::Pane(PaneCmd::Swap(Direction::Left))),
+        PaletteItem::new("Swap Pane Right", Some(format!("{m}+Ctrl+Shift+Right")), PaletteAction::Pane(PaneCmd::Swap(Direction::Right))),
+        PaletteItem::new("Swap Pane Up", Some(format!("{m}+Ctrl+Shift+Up")), PaletteAction::Pane(PaneCmd::Swap(Direction::Up))),
+        PaletteItem::new("Swap Pane Down", Some(format!("{m}+Ctrl+Shift+Down")), PaletteAction::Pane(PaneCmd::Swap(Direction::Down))),
+        PaletteItem::new("Resize Pane Left", Some(format!("{m}+Ctrl+Left")), PaletteAction::Pane(PaneCmd::Resize(Direction::Left))),
+        PaletteItem::new("Resize Pane Right", Some(format!("{m}+Ctrl+Right")), PaletteAction::Pane(PaneCmd::Resize(Direction::Right))),
+        PaletteItem::new("Resize Pane Up", Some(format!("{m}+Ctrl+Up")), PaletteAction::Pane(PaneCmd::Resize(Direction::Up))),
+        PaletteItem::new("Resize Pane Down", Some(format!("{m}+Ctrl+Down")), PaletteAction::Pane(PaneCmd::Resize(Direction::Down))),
         PaletteItem::new("Find in Terminal", Some(format!("{m}+F")), PaletteAction::Search),
         PaletteItem::new("SSH Connect...", Some(format!("{m}+Shift+S")), PaletteAction::Ssh),
         PaletteItem::new("AI Assistant", Some(format!("{m}+Shift+A")), PaletteAction::Ai),

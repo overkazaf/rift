@@ -20,6 +20,8 @@ pub fn on_resumed(app: &mut App, event_loop: &ActiveEventLoop) {
         .with_inner_size(winit::dpi::LogicalSize::new(800.0, 600.0));
 
     let window = Arc::new(event_loop.create_window(attrs).unwrap());
+    // Enable IME (Pinyin, Kana, Hangul ...) so composed text arrives as Ime events.
+    window.set_ime_allowed(true);
 
     // Set window icon (embedded at compile time)
     {
@@ -177,14 +179,14 @@ pub fn redraw(app: &mut App) {
     // Reserve space for HUD at bottom when visible
     let ch = app.renderer.cell_height();
     let hud_h = if app.hud_visible { ch * 3 + 20 } else { 0 };
-    let wv_visible = app.webview.as_ref().map_or(false, |wv| wv.visible);
-    let content_w = if wv_visible && app.webview_maximized {
-        0  // terminal hidden
-    } else if wv_visible {
-        (width as usize) / 2
-    } else {
-        width as usize
-    };
+    let blayout = app.webview.as_ref().filter(|wv| wv.visible).map(|_| {
+        crate::network::browser::chrome::BrowserLayout::compute(
+            width as usize, height as usize, tbh,
+            app.renderer.cell_width(), app.renderer.cell_height(),
+            window.scale_factor(), app.browser.ratio, app.webview_maximized,
+        )
+    });
+    let content_w = blayout.map_or(width as usize, |l| l.terminal_w);
     let content_area = PaneRect {
         x: 0,
         y: tbh,
@@ -238,7 +240,14 @@ pub fn redraw(app: &mut App) {
 
     // Normal mode: Terminal content + tab bar
     let cmd_held = app.modifiers.super_key();
-    app.renderer.render_tabbed_with_cmd(&app.wm, content_area, &mut buffer, width, height, cmd_held, &app.blocks, app.hover_pane);
+    let split_ui = crate::renderer::SplitUiState {
+        hover_pane: app.hover_pane,
+        hover_border: app.hover_border,
+        dragging_border: app.dragging_border,
+        zoomed: app.wm.active_tab().is_zoomed(),
+    };
+    app.renderer.render_tabbed_with_cmd(&app.wm, content_area, &mut buffer, width, height, cmd_held, &app.blocks, split_ui);
+    let t_overlays = std::time::Instant::now();
 
     // Selection highlight
     if app.selection.active {
@@ -252,6 +261,10 @@ pub fn redraw(app: &mut App) {
             width as usize, height as usize, sel_rect,
         );
     }
+
+    // IME: position the OS candidate window and draw inline preedit text
+    super::ime::update_cursor_area(&app.wm, &app.renderer, window, &mut app.ime_area, content_area);
+    super::ime::render_preedit(&app.wm, &mut app.renderer, &app.ime_preedit, &mut buffer, width as usize, content_area);
 
     // Search match highlights
     if app.search.visible && !app.search.matches.is_empty() {
@@ -603,99 +616,12 @@ pub fn redraw(app: &mut App) {
             &mut app.renderer.font, &app.renderer.theme,
         );
     }
-    // WebView address bar (rendered in the buffer above the native WebView)
-    if let Some(ref wv) = app.webview {
-        if wv.visible {
-            let w = width as usize;
-            let cw = app.renderer.cell_width();
-            let ch = app.renderer.cell_height();
-            let bar_x = if app.webview_maximized { 0 } else { w / 2 };
-            let bar_w = if app.webview_maximized { w } else { w / 2 };
-            let bar_y = tbh;
-            let bar_h = ch + 12;
-            let bar_bg = crate::ui::darken(app.renderer.theme.bg, 10);
-            let bar_px = crate::ui::pack_rgb(bar_bg);
-            for y in bar_y..(bar_y + bar_h).min(height as usize) {
-                let off = y * w + bar_x;
-                let end = (off + bar_w).min(buffer.len());
-                if off < buffer.len() { buffer[off..end].fill(bar_px); }
-            }
-
-            // Maximize/restore button on the right side
-            let btn_char = if app.webview_maximized { "[-]" } else { "[+]" };
-            let btn_x = bar_x + bar_w - (btn_char.len() + 1) * cw;
-            crate::ui::render_text(
-                &mut buffer, w, &mut app.renderer.font,
-                btn_char, btn_x, bar_y + 6, crate::ui::dim(app.renderer.theme.fg, 0.4),
-            );
-
-            let url_x = bar_x + 8;
-            let url_y = bar_y + 6;
-            let max_chars = (bar_w - btn_char.len() * cw - 24) / cw;
-
-            // Show editing text or current URL
-            let display_text = if app.addr_bar_editing {
-                &app.addr_bar_text
-            } else {
-                &wv.url
-            };
-            let display_url = if display_text.len() > max_chars {
-                &display_text[display_text.len() - max_chars..]
-            } else {
-                display_text.as_str()
-            };
-
-            // Input field bg (brighter when editing)
-            let field_bg = if app.addr_bar_editing {
-                crate::ui::lighten(bar_bg, 20)
-            } else {
-                crate::ui::lighten(bar_bg, 12)
-            };
-            let field_px = crate::ui::pack_rgb(field_bg);
-            for y in (bar_y + 3)..(bar_y + bar_h - 3).min(height as usize) {
-                let off = y * w + bar_x + 4;
-                let end = (off + bar_w - 8).min(buffer.len());
-                if off < buffer.len() { buffer[off..end].fill(field_px); }
-            }
-
-            // Border when focused
-            if app.addr_bar_editing {
-                let border_px = crate::ui::pack_rgb(app.renderer.theme.cursor);
-                for y in [bar_y + 3, bar_y + bar_h - 4] {
-                    if y < height as usize {
-                        let off = y * w + bar_x + 4;
-                        let end = (off + bar_w - 8).min(buffer.len());
-                        if off < buffer.len() { buffer[off..end].fill(border_px); }
-                    }
-                }
-            }
-
-            crate::ui::render_text(
-                &mut buffer, w, &mut app.renderer.font,
-                display_url, url_x, url_y, app.renderer.theme.fg,
-            );
-
-            // Text cursor when editing
-            if app.addr_bar_editing {
-                let cursor_x = url_x + display_url.chars().count() * cw;
-                let cursor_px = crate::ui::pack_rgb(app.renderer.theme.cursor);
-                for y in (url_y)..(url_y + ch).min(height as usize) {
-                    let idx = y * w + cursor_x;
-                    if idx + 1 < buffer.len() {
-                        buffer[idx] = cursor_px;
-                        buffer[idx + 1] = cursor_px;
-                    }
-                }
-            }
-            // Bottom separator
-            let sep_y = bar_y + bar_h - 1;
-            let sep_px = crate::ui::pack_rgb(crate::ui::lighten(bar_bg, 6));
-            if sep_y < height as usize {
-                let off = sep_y * w + bar_x;
-                let end = (off + bar_w).min(buffer.len());
-                if off < buffer.len() { buffer[off..end].fill(sep_px); }
-            }
-        }
+    // Browser chrome (toolbar, divider) drawn above the native WebView's area
+    if let (Some(layout), Some(wv)) = (&blayout, &app.webview) {
+        crate::network::browser::render(
+            &mut buffer, width as usize, height as usize, layout, &mut app.browser, wv,
+            app.webview_maximized, &mut app.renderer.font, &app.renderer.theme,
+        );
     }
     if app.webview_dialog.visible {
         app.webview_dialog.render(
@@ -836,6 +762,9 @@ pub fn redraw(app: &mut App) {
         }
     }
 
+    let t_present = std::time::Instant::now();
+    app.renderer.prof_add(crate::renderer::Phase::Overlays, t_present - t_overlays);
+
     // GPU rendering path: upload pixel buffer to GPU, present via wgpu
     #[cfg(feature = "gpu")]
     if let Some(ref mut gpu) = app.gpu_pipeline {
@@ -843,6 +772,7 @@ pub fn redraw(app: &mut App) {
         let time = app.renderer.start_time.elapsed().as_secs_f32();
         gpu.render_frame(&buffer, width, height, effect, time);
         drop(buffer);
+        finish_frame(app, t_present);
         return;
     }
 
@@ -850,6 +780,19 @@ pub fn redraw(app: &mut App) {
     if let Err(e) = buffer.present() {
         log::warn!("softbuffer present failed: {e}");
     }
+    finish_frame(app, t_present);
+}
+
+/// Bookkeeping after a normal-mode frame was presented: profiling sample and
+/// the timestamp the PTY-burst coalescing in `about_to_wait` paces against.
+fn finish_frame(app: &mut App, t_present: std::time::Instant) {
+    app.renderer.prof_add(crate::renderer::Phase::Present, t_present.elapsed());
+    app.renderer.prof_frame_end();
+    SCHED.with(|s| {
+        let mut s = s.borrow_mut();
+        s.last_redraw = Some(std::time::Instant::now());
+        s.redraw_pending = false;
+    });
 }
 
 // ── HUD pixel helpers ──
@@ -910,27 +853,35 @@ pub fn handle_resize(app: &mut App, width: u32, height: u32) {
     let ch = app.renderer.cell_height();
     let hud_h = if app.hud_visible { ch * 3 + 20 } else { 0 };
     let effective_height = (height as usize).saturating_sub(hud_h) as u32;
-    let wv_visible = app.webview.as_ref().map_or(false, |wv| wv.visible);
-    let effective_width = if wv_visible && !app.webview_maximized {
-        width / 2
-    } else if wv_visible && app.webview_maximized {
-        0  // terminal hidden when maximized
-    } else {
-        width
-    };
+    let effective_width = app.terminal_width(width as usize) as u32;
     if effective_width > 0 {
         app.wm.resize_all(cw, ch, effective_width, effective_height, app.tab_bar_height());
     }
 
-    if let (Some(wv), Some(window)) = (&app.webview, &app.window) {
-        if wv.visible {
-            let (x, y, w, h) = crate::app::shortcuts::webview_bounds(app, window);
-            wv.set_bounds(x, y, w, h);
-        }
-    }
+    crate::network::browser::apply_bounds(app);
 }
 
 // ── Event loop idle ──
+
+/// Target minimum spacing between redraws while PTY output is streaming
+/// (~vsync at 120Hz); keystroke-driven redraws are not throttled.
+const PTY_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(8);
+/// Idle poll cadence (menu events, SSH/AI polling have no wake-up source).
+const IDLE_POLL_MS: u64 = 50;
+
+/// Redraw scheduling state for `about_to_wait` / `redraw`.
+#[derive(Default)]
+struct Sched {
+    last_redraw: Option<std::time::Instant>,
+    /// PTY output was processed but not yet drawn (throttled).
+    redraw_pending: bool,
+    /// Last cursor blink phase we requested a redraw for.
+    last_blink_phase: Option<u32>,
+}
+
+thread_local! {
+    static SCHED: std::cell::RefCell<Sched> = std::cell::RefCell::new(Sched::default());
+}
 
 pub fn about_to_wait(app: &mut App, event_loop: &ActiveEventLoop) {
     let has_shader = app.renderer.shader.has_effect();
@@ -938,10 +889,9 @@ pub fn about_to_wait(app: &mut App, event_loop: &ActiveEventLoop) {
 
     // PTY reader thread calls proxy.send_event(()) which wakes the loop from Wait.
     // Use 16ms for animations, otherwise a short poll for responsiveness.
-    let poll_ms = if has_shader || in_startup { 16 } else { 32 };
-    event_loop.set_control_flow(ControlFlow::WaitUntil(
-        std::time::Instant::now() + std::time::Duration::from_millis(poll_ms)
-    ));
+    let poll_ms = if has_shader || in_startup { 16 } else { IDLE_POLL_MS };
+    let mut wake_at = std::time::Instant::now() + std::time::Duration::from_millis(poll_ms);
+    event_loop.set_control_flow(ControlFlow::WaitUntil(wake_at));
 
     // During startup animation, just keep redrawing
     if in_startup {
@@ -953,6 +903,9 @@ pub fn about_to_wait(app: &mut App, event_loop: &ActiveEventLoop) {
     while let Some(action) = app.menubar.poll_event() {
         shortcuts::handle_menu_action(app, action, event_loop);
     }
+
+    // Browser: drain webview events (title/url/loading/focus)
+    crate::network::browser::poll(app);
 
     // Poll SSH connection
     if let Some(ref connecting) = app.ssh_connecting {
@@ -1004,7 +957,11 @@ pub fn about_to_wait(app: &mut App, event_loop: &ActiveEventLoop) {
     app.advisor.poll();
 
     // Process PTY output from all panes
+    let t_pty = std::time::Instant::now();
     let pty_changed = app.wm.process_all_output();
+    if pty_changed {
+        app.renderer.prof_add(crate::renderer::Phase::Pty, t_pty.elapsed());
+    }
     if pty_changed {
         app.wm.flush_all_responses();
         app.update_title();
@@ -1022,7 +979,9 @@ pub fn about_to_wait(app: &mut App, event_loop: &ActiveEventLoop) {
                 }
                 // Block tracking (Warp-style command blocks)
                 let scrollback_line = term.scrollback.len() + row;
-                app.blocks.on_output_line(trimmed, scrollback_line);
+                if !term.blocks.osc_seen() {
+                    app.blocks.on_output_line(trimmed, scrollback_line);
+                }
                 // Error detection (cheap pre-check avoids building context every line)
                 if app.error_detector.matches_any(trimmed) {
                     let recent: Vec<String> = term.grid.iter()
@@ -1117,9 +1076,57 @@ pub fn about_to_wait(app: &mut App, event_loop: &ActiveEventLoop) {
         || app.teaching.enabled;
     let timewarp_active = app.timewarp_browser.active;
 
-    if pty_changed || has_shader || ssh_pending || ai_waiting || any_overlay || timewarp_active || app.hud_visible {
+    if has_shader || ssh_pending || ai_waiting || any_overlay || timewarp_active || app.hud_visible {
+        app.request_redraw();
+        return;
+    }
+
+    // Cursor blink (Bar/Underline, ~2Hz): only redraw on phase flips; the
+    // renderer repaints just the cursor row.
+    let blink_style = {
+        let t = &app.wm.active_pane().terminal;
+        t.cursor_visible
+            && !t.is_scrolled_back()
+            && t.cursor_style != crate::terminal::CursorStyle::Block
+    };
+    let mut blink_due = false;
+    if blink_style {
+        let elapsed = app.renderer.start_time.elapsed().as_secs_f32();
+        let phase = (elapsed * 2.0) as u32;
+        SCHED.with(|s| {
+            let mut s = s.borrow_mut();
+            if s.last_blink_phase != Some(phase) {
+                s.last_blink_phase = Some(phase);
+                blink_due = true;
+            }
+        });
+        let next = app.renderer.start_time
+            + std::time::Duration::from_secs_f32((phase + 1) as f32 / 2.0);
+        wake_at = wake_at.min(next);
+    }
+
+    // PTY bursts: everything pending was just parsed above; draw at most once
+    // per PTY_FRAME_INTERVAL while output keeps streaming.
+    let (pending, last) = SCHED.with(|s| {
+        let mut s = s.borrow_mut();
+        if pty_changed { s.redraw_pending = true; }
+        (s.redraw_pending, s.last_redraw)
+    });
+    if pending {
+        let ready_at = last.map(|t| t + PTY_FRAME_INTERVAL);
+        match ready_at {
+            Some(t) if t > std::time::Instant::now() => wake_at = wake_at.min(t),
+            _ => {
+                app.request_redraw();
+                SCHED.with(|s| s.borrow_mut().redraw_pending = false);
+                blink_due = false;
+            }
+        }
+    }
+    if blink_due {
         app.request_redraw();
     }
+    event_loop.set_control_flow(ControlFlow::WaitUntil(wake_at));
 }
 
 fn load_icon_from_png(png_data: &[u8]) -> Option<winit::window::Icon> {

@@ -2,7 +2,7 @@ use std::io::{Read, Write};
 use std::sync::mpsc;
 use std::thread;
 
-use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{native_pty_system, MasterPty, PtySize};
 use winit::event_loop::EventLoopProxy;
 
 pub struct Pty {
@@ -13,14 +13,22 @@ pub struct Pty {
 
 impl Pty {
     pub fn spawn(cols: u16, rows: u16, proxy: EventLoopProxy<()>) -> Self {
+        Self::spawn_in(cols, rows, proxy, None)
+    }
+
+    /// Like [`Pty::spawn`], starting the shell in `cwd` when it is an existing directory.
+    pub fn spawn_in(cols: u16, rows: u16, proxy: EventLoopProxy<()>, cwd: Option<&str>) -> Self {
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
             .expect("Failed to open PTY");
 
-        let mut cmd = CommandBuilder::new_default_prog();
-        cmd.env("TERM", "xterm-256color");
-        cmd.env("COLORTERM", "truecolor");
+        // Launches the user's shell with OSC 133/OSC 7 shell integration
+        // injected (see shell_integration; opt out with RIFT_NO_SHELL_INTEGRATION).
+        let mut cmd = crate::shell_integration::build_shell_command();
+        if let Some(dir) = cwd.filter(|d| std::path::Path::new(d).is_dir()) {
+            cmd.cwd(dir);
+        }
         let _child = pair.slave.spawn_command(cmd).expect("Failed to spawn shell");
         drop(pair.slave);
 

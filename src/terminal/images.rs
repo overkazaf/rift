@@ -118,6 +118,12 @@ impl ImageStore {
         None
     }
 
+    /// True when at least one image currently has a placement. Lets the
+    /// renderer skip per-cell `get_cell` probing for the (usual) no-image case.
+    pub fn has_placements(&self) -> bool {
+        self.images.values().any(|i| i.placement.is_some())
+    }
+
     pub fn get_image(&self, id: u32) -> Option<&TermImage> {
         self.images.get(&id)
     }

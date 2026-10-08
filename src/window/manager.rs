@@ -1,13 +1,16 @@
 use winit::event_loop::EventLoopProxy;
 
-use super::pane::Pane;
-use super::tab::{PaneRect, Tab};
+use super::pane::{Pane, PtyKind};
+use super::tab::{MinSize, PaneNode, PaneRect, SplitDir, Tab};
 
 pub struct WindowManager {
     pub tabs: Vec<Tab>,
     pub active_tab: usize,
     next_pane_id: usize,
     proxy: EventLoopProxy<()>,
+    /// Content area from the last `resize_all`; used for geometric decisions
+    /// (e.g. which pane takes focus after a close).
+    last_area: PaneRect,
 }
 
 impl WindowManager {
@@ -19,6 +22,7 @@ impl WindowManager {
             active_tab: 0,
             next_pane_id: 1,
             proxy,
+            last_area: PaneRect { x: 0, y: 0, width: 0, height: 0 },
         }
     }
 
@@ -69,7 +73,8 @@ impl WindowManager {
     }
 
     pub fn close_current(&mut self) -> bool {
-        let should_close_tab = self.active_tab_mut().close_pane();
+        let area = self.last_area;
+        let should_close_tab = self.active_tab_mut().close_pane(area);
         if should_close_tab {
             self.tabs.remove(self.active_tab);
             if self.tabs.is_empty() {
@@ -95,16 +100,62 @@ impl WindowManager {
         }
     }
 
-    pub fn split_h(&mut self, cols: usize, rows: usize) {
+    /// Split the active pane along `dir`; the new shell starts in the active
+    /// pane's working directory (OSC 7) when known. Unzooms first. Refuses
+    /// (returns false) when either half would drop below the minimum pane size.
+    pub fn split_active(&mut self, dir: SplitDir, area: PaneRect, min: MinSize) -> bool {
+        let idx = self.active_tab;
+        self.tabs[idx].unzoom();
+        if !self.tabs[idx].can_split(area, dir, min) {
+            log::warn!("Split refused: pane would be smaller than {}x{} cells", super::tab::MIN_COLS, super::tab::MIN_ROWS);
+            return false;
+        }
+        let (cols, rows, cwd) = {
+            let p = self.tabs[idx].active_pane();
+            let cwd = match p.pty {
+                PtyKind::Local(_) => p.terminal.cwd.clone(),
+                PtyKind::Ssh(_) => None, // remote path is meaningless locally
+            };
+            (p.terminal.cols, p.terminal.rows, cwd)
+        };
         let id = self.alloc_id();
-        let pane = Pane::new(id, cols / 2, rows, self.proxy.clone());
-        self.active_tab_mut().split_h(pane);
+        let (c, r) = match dir {
+            SplitDir::Horizontal => ((cols / 2).max(1), rows),
+            SplitDir::Vertical => (cols, (rows / 2).max(1)),
+        };
+        let pane = Pane::new_in(id, c, r, self.proxy.clone(), cwd.as_deref());
+        self.tabs[idx].split(dir, pane);
+        true
     }
 
-    pub fn split_v(&mut self, cols: usize, rows: usize) {
-        let id = self.alloc_id();
-        let pane = Pane::new(id, cols, rows / 2, self.proxy.clone());
-        self.active_tab_mut().split_v(pane);
+    /// Replace a freshly created single-pane tab's root with a restored
+    /// layout. The existing pane becomes the first leaf; every other leaf is
+    /// spawned in its saved working directory.
+    pub fn restore_layout(&mut self, tab_idx: usize, layout: &PaneNode<Option<String>>, active: usize) {
+        let proxy = self.proxy.clone();
+        let mut next = self.next_pane_id;
+        let Some(tab) = self.tabs.get_mut(tab_idx) else { return };
+        if tab.pane_count() != 1 {
+            return;
+        }
+        let old = std::mem::replace(&mut tab.root, PaneNode::Empty);
+        let PaneNode::Leaf(first_pane) = old else {
+            tab.root = old;
+            return;
+        };
+        let (cols, rows) = (first_pane.terminal.cols, first_pane.terminal.rows);
+        let mut first = Some(first_pane);
+        tab.root = layout.map_leaves(&mut |cwd: &Option<String>| match first.take() {
+            Some(p) => p,
+            None => {
+                let id = next;
+                next += 1;
+                Pane::new_in(id, (cols / 2).max(1), rows, proxy.clone(), cwd.as_deref())
+            }
+        });
+        tab.active = active.min(tab.pane_count().saturating_sub(1));
+        tab.zoomed = false;
+        self.next_pane_id = next;
     }
 
     pub fn focus_next_pane(&mut self) {
@@ -149,9 +200,19 @@ impl WindowManager {
         let content_h = (height as usize).saturating_sub(tab_bar_height);
         let area = PaneRect { x: 0, y: tab_bar_height, width: width as usize, height: content_h };
 
+        self.last_area = area;
+
         for tab in &mut self.tabs {
-            let layouts = tab.layouts(area);
-            for (pane, (_, rect, _)) in tab.panes_mut().into_iter().zip(layouts) {
+            // Unzoomed tree geometry for every pane; the zoomed pane alone
+            // gets the whole area (the others keep their tree size).
+            let mut layouts = tab.tree_layouts(area);
+            if tab.is_zoomed() {
+                let active = tab.active;
+                if let Some(l) = layouts.iter_mut().find(|(i, _)| *i == active) {
+                    l.1 = area;
+                }
+            }
+            for (pane, (_, rect)) in tab.panes_mut().into_iter().zip(layouts) {
                 let cols = (rect.width / cell_width.max(1)).max(1);
                 let rows = (rect.height / cell_height.max(1)).max(1);
                 pane.resize(cols, rows);

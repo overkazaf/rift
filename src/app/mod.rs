@@ -1,5 +1,7 @@
+mod ime;
 mod lifecycle;
 mod overlays;
+mod panes;
 pub mod shortcuts;
 
 use std::sync::Arc;
@@ -79,8 +81,15 @@ pub struct App {
     pub window_focused: bool,
     pub hover_pane: Option<usize>,
     pub dragging_border: Option<usize>,
-    pub addr_bar_editing: bool,
-    pub addr_bar_text: String,
+    /// Divider currently under the mouse (pre-order index), for highlight.
+    pub hover_border: Option<usize>,
+    /// Time + divider of the last divider click (double-click => equalize).
+    pub last_border_click: Option<(std::time::Instant, usize)>,
+    pub browser: crate::network::browser::BrowserUi,
+    /// IME composition (preedit) text currently being edited; empty when idle.
+    pub ime_preedit: String,
+    /// Last IME cursor area sent to the OS (x, y, w, h in physical px).
+    pub ime_area: Option<(i32, i32, u32, u32)>,
 
     pub blocks: BlockManager,
     pub error_detector: ErrorDetector,
@@ -166,8 +175,11 @@ impl App {
             window_focused: true,
             hover_pane: None,
             dragging_border: None,
-            addr_bar_editing: false,
-            addr_bar_text: String::new(),
+            hover_border: None,
+            last_border_click: None,
+            browser: crate::network::browser::BrowserUi::new(),
+            ime_preedit: String::new(),
+            ime_area: None,
 
             blocks: BlockManager::new(),
             error_detector: ErrorDetector::new(),
@@ -256,8 +268,7 @@ impl App {
         let tbh = self.tab_bar_height();
         let ch = self.renderer.cell_height();
         let hud_h = if self.hud_visible { ch * 3 + 20 } else { 0 };
-        let wv_visible = self.webview.as_ref().map_or(false, |wv| wv.visible);
-        let width = if wv_visible && self.webview_maximized { 0 } else if wv_visible { w / 2 } else { w };
+        let width = self.terminal_width(w);
         crate::window::PaneRect { x: 0, y: tbh, width, height: h.saturating_sub(tbh + hud_h) }
     }
 
@@ -323,11 +334,16 @@ impl ApplicationHandler for App {
                 self.cursor_x = position.x as usize;
                 self.cursor_y = position.y as usize;
 
+                if crate::network::browser::on_cursor_moved(self) {
+                    return;
+                }
+
                 // Divider drag: resize splits live
                 if let Some(border) = self.dragging_border {
                     let area = self.content_area();
                     let (x, y) = (self.cursor_x, self.cursor_y);
-                    if self.wm.active_tab_mut().drag_border(area, border, x, y) {
+                    let min = panes::min_size(self);
+                    if self.wm.active_tab_mut().drag_border(area, border, x, y, min) {
                         if let Some(win) = &self.window {
                             let s = win.inner_size();
                             lifecycle::handle_resize(self, s.width, s.height);
@@ -342,7 +358,11 @@ impl ApplicationHandler for App {
                     let area = self.content_area();
                     let old_hover = self.hover_pane;
                     self.hover_pane = self.wm.active_tab().pane_at(area, self.cursor_x, self.cursor_y);
-                    if old_hover != self.hover_pane && self.wm.active_tab().pane_count() > 1 {
+                    let old_border = self.hover_border;
+                    self.hover_border = self.wm.active_tab().border_at(area, self.cursor_x, self.cursor_y, 4).map(|(b, _)| b);
+                    if (old_hover != self.hover_pane || old_border != self.hover_border)
+                        && self.wm.active_tab().pane_count() > 1
+                    {
                         self.request_redraw();
                     }
                     self.update_resize_cursor();
@@ -362,51 +382,38 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {
-                let tbh = self.tab_bar_height();
                 let mouse_mode = self.wm.active_pane().terminal.mouse_mode;
 
                 match (state, button) {
                     (ElementState::Pressed, MouseButton::Left) => {
                         self.mouse_pressed = true;
-                        // Click on address bar area?
-                        let wv_visible = self.webview.as_ref().map_or(false, |wv| wv.visible);
-                        if wv_visible {
-                            let w = self.window.as_ref().map_or(800, |w| w.inner_size().width as usize);
-                            let bar_x = if self.webview_maximized { 0 } else { w / 2 };
-                            let bar_w = if self.webview_maximized { w } else { w / 2 };
-                            let addr_bar_bottom = tbh + self.renderer.cell_height() + 12;
-                            if self.cursor_x >= bar_x && self.cursor_y >= tbh && self.cursor_y < addr_bar_bottom {
-                                // Check if clicking the maximize button (right 4 chars)
-                                let cw = self.renderer.cell_width();
-                                let btn_right = bar_x + bar_w;
-                                let btn_left = btn_right.saturating_sub(5 * cw);
-                                if self.cursor_x >= btn_left {
-                                    shortcuts::toggle_webview_maximize(self);
-                                    return;
-                                }
-                                self.addr_bar_editing = true;
-                                self.addr_bar_text = self.webview.as_ref().map_or(String::new(), |wv| wv.url.clone());
-                                self.request_redraw();
-                                return;
-                            } else {
-                                self.addr_bar_editing = false;
-                            }
+                        // Browser toolbar / divider / focus handoff
+                        if crate::network::browser::on_mouse_press(self) {
+                            return;
                         }
+                        let tbh = self.tab_bar_height();
                         if self.cursor_y < tbh {
                             shortcuts::handle_click(self, event_loop);
                         } else {
                             let area = self.content_area();
                             // Grab a split divider?
                             if let Some((border, _)) = self.wm.active_tab().border_at(area, self.cursor_x, self.cursor_y, 4) {
+                                // Double-click a divider: reset that split to 50/50.
+                                panes::register_border_click(self, border);
                                 self.dragging_border = Some(border);
                                 return;
                             }
                             // Click in content area: focus the pane under the cursor
                             if let Some(idx) = self.wm.active_tab().pane_at(area, self.cursor_x, self.cursor_y) {
                                 if idx != self.wm.active_tab().active {
-                                    self.wm.active_tab_mut().focus_pane(idx);
-                                    self.selection.clear();
+                                    panes::focus_pane_idx(self, idx);
                                     self.request_redraw();
+                                    // Cmd+click on another pane only focuses it;
+                                    // the click is not passed on to the app.
+                                    if self.modifiers.super_key() {
+                                        self.mouse_pressed = false;
+                                        return;
+                                    }
                                 }
                             }
                             // Then handle Cmd+Click URL / mouse mode / selection
@@ -416,7 +423,12 @@ impl ApplicationHandler for App {
                                 if row < terminal.rows {
                                     let line: String = terminal.grid[row].iter().map(|c| c.c).collect();
                                     if let Some(url) = crate::tools::url_detect::url_at_col(&line, col) {
-                                        crate::tools::url_detect::open_url(&url);
+                                        // Cmd+Click opens in Rift's browser, Cmd+Shift+Click externally.
+                                        if self.modifiers.shift_key() || !cfg!(feature = "webview") {
+                                            crate::tools::url_detect::open_url(&url);
+                                        } else {
+                                            crate::network::browser::open(self, &url);
+                                        }
                                     }
                                 }
                             } else if mouse_mode != MouseMode::None && !self.modifiers.shift_key() {
@@ -432,7 +444,10 @@ impl ApplicationHandler for App {
                         }
                     }
                     (ElementState::Released, MouseButton::Left) => {
-                        self.mouse_pressed = false;
+                        let was_pressed = std::mem::replace(&mut self.mouse_pressed, false);
+                        if crate::network::browser::on_mouse_release(self) {
+                            return;
+                        }
                         if self.dragging_border.take().is_some() {
                             self.update_resize_cursor();
                             return;
@@ -448,7 +463,7 @@ impl ApplicationHandler for App {
                                 }
                             }
                             self.request_redraw();
-                        } else if mouse_mode != MouseMode::None && !self.modifiers.shift_key() {
+                        } else if was_pressed && mouse_mode != MouseMode::None && !self.modifiers.shift_key() {
                             let (row, col) = self.pixel_to_cell(self.cursor_x, self.cursor_y);
                             let seq = format!("\x1b[<0;{};{}m", col + 1, row + 1);
                             self.wm.active_pane_mut().write(seq.as_bytes());
@@ -504,8 +519,13 @@ impl ApplicationHandler for App {
                 }
                 self.request_redraw();
             }
+            WindowEvent::Ime(ime) => ime::handle_ime(self, ime),
             WindowEvent::Focused(focused) => {
                 self.window_focused = focused;
+                if !focused && !self.ime_preedit.is_empty() {
+                    self.ime_preedit.clear();
+                    self.request_redraw();
+                }
                 // Send focus in/out sequences if terminal requested focus reporting
                 let pane = self.wm.active_pane_mut();
                 if pane.terminal.focus_reporting {

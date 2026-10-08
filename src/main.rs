@@ -6,6 +6,7 @@ mod app;
 mod config;
 mod input;
 mod pty;
+mod shell_integration;
 mod terminal;
 mod renderer;
 mod window;

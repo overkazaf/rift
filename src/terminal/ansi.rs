@@ -200,6 +200,15 @@ impl Perform for AnsiHandler<'_> {
                     }
                 }
             }
+            b"133" => self.terminal.handle_osc133(&params[1..]),
+            b"7" => {
+                if params.len() >= 2 {
+                    // A URI may legally contain ';' — re-join defensively.
+                    let uri = params[1..].join(&b';');
+                    self.terminal.handle_osc7(&uri);
+                }
+            }
+            b"1337" => self.terminal.handle_osc1337(&params[1..]),
             _ => {}
         }
     }

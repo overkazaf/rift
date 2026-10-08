@@ -10,7 +10,8 @@
 use std::path::PathBuf;
 
 use crate::terminal::{Cell, Terminal};
-use crate::window::tab::Tab;
+use crate::window::pane::PtyKind;
+use crate::window::tab::{PaneNode, SplitDir, Tab};
 use crate::window::WindowManager;
 
 /// Number of trailing terminal lines kept per tab when saving a session.
@@ -29,6 +30,10 @@ pub struct TabState {
     pub title: String,
     pub working_dir: String,
     pub scrollback: Vec<String>,
+    /// Split layout (structure, ratios, per-pane cwd); None for a single pane.
+    pub layout: Option<PaneNode<Option<String>>>,
+    /// In-order index of the focused pane within `layout`.
+    pub active_pane: usize,
 }
 
 // ── Public API ──
@@ -43,6 +48,14 @@ pub fn save_session(wm: &WindowManager) -> Result<(), String> {
             title: tab.title.clone(),
             working_dir: detect_working_dir(terminal),
             scrollback: extract_scrollback(terminal, MAX_SCROLLBACK_LINES),
+            layout: (tab.pane_count() > 1).then(|| {
+                tab.root.map_leaves(&mut |pane| match pane.pty {
+                    // A remote shell's cwd means nothing locally.
+                    PtyKind::Ssh(_) => None,
+                    PtyKind::Local(_) => Some(detect_working_dir(&pane.terminal)).filter(|d| d != "~"),
+                })
+            }),
+            active_pane: tab.active,
         }
     }).collect();
 
@@ -105,11 +118,11 @@ pub fn restore_session(wm: &mut WindowManager) {
         (terminal.cols, terminal.rows)
     };
 
-    apply_tab_state(&mut wm.tabs[0], &state.tabs[0]);
+    restore_tab(wm, 0, &state.tabs[0]);
     for tab_state in state.tabs.iter().skip(1) {
         wm.new_tab(cols, rows);
         let idx = wm.tabs.len() - 1;
-        apply_tab_state(&mut wm.tabs[idx], tab_state);
+        restore_tab(wm, idx, tab_state);
     }
 
     let last = wm.tabs.len() - 1;
@@ -118,7 +131,51 @@ pub fn restore_session(wm: &mut WindowManager) {
     log::info!("Session restored: {} tab(s)", wm.tabs.len());
 }
 
-fn apply_tab_state(tab: &mut Tab, state: &TabState) {
+/// Rebuild one tab: the split layout first (spawning extra panes in their
+/// saved directories), then title / scrollback / cwd on the focused pane.
+fn restore_tab(wm: &mut WindowManager, idx: usize, state: &TabState) {
+    let Some(layout) = state.layout.as_ref().filter(|l| count_leaves(l) > 1) else {
+        apply_tab_state(&mut wm.tabs[idx], state, true);
+        return;
+    };
+    let expanded = layout.map_leaves(&mut |cwd: &Option<String>| cwd.as_deref().map(expand_tilde));
+    wm.restore_layout(idx, &expanded, state.active_pane);
+    // The pre-existing pane became leaf 0; spawned panes already start in
+    // their cwd, so only leaf 0 needs a `cd`.
+    if let Some(dir) = first_leaf(&expanded) {
+        if let Some(pane) = wm.tabs[idx].pane_mut(0) {
+            pane.write(format!("cd {} 2>/dev/null\n", shell_quote(dir)).as_bytes());
+        }
+    }
+    apply_tab_state(&mut wm.tabs[idx], state, false);
+}
+
+fn count_leaves<T>(node: &PaneNode<T>) -> usize {
+    match node {
+        PaneNode::Leaf(_) => 1,
+        PaneNode::Split { first, second, .. } => count_leaves(first) + count_leaves(second),
+        PaneNode::Empty => 0,
+    }
+}
+
+fn first_leaf(node: &PaneNode<Option<String>>) -> Option<&str> {
+    match node {
+        PaneNode::Leaf(cwd) => cwd.as_deref(),
+        PaneNode::Split { first, .. } => first_leaf(first),
+        PaneNode::Empty => None,
+    }
+}
+
+/// `~` / `~/x` -> absolute path (prompt scraping yields home-relative paths).
+fn expand_tilde(path: &str) -> String {
+    match (path, dirs::home_dir()) {
+        ("~", Some(home)) => home.display().to_string(),
+        (p, Some(home)) if p.starts_with("~/") => home.join(&p[2..]).display().to_string(),
+        (p, _) => p.to_string(),
+    }
+}
+
+fn apply_tab_state(tab: &mut Tab, state: &TabState, change_dir: bool) {
     tab.title = state.title.clone();
 
     // Populate scrollback with the saved lines so the user can scroll up
@@ -127,11 +184,11 @@ fn apply_tab_state(tab: &mut Tab, state: &TabState) {
     let cols = tab.active_pane().terminal.cols;
     let pane = tab.active_pane_mut();
     for line in &state.scrollback {
-        pane.terminal.scrollback.push(text_to_row(line, cols));
+        pane.terminal.scrollback.push_back(text_to_row(line, cols));
     }
 
     // Best-effort: return the shell to its previous working directory.
-    if !state.working_dir.is_empty() && state.working_dir != "~" {
+    if change_dir && !state.working_dir.is_empty() && state.working_dir != "~" {
         let cmd = format!("cd {} 2>/dev/null\n", shell_quote(&state.working_dir));
         pane.write(cmd.as_bytes());
     }
@@ -148,6 +205,10 @@ fn apply_tab_state(tab: &mut Tab, state: &TabState) {
 // particular shell or pane internals.
 
 fn detect_working_dir(terminal: &Terminal) -> String {
+    // Exact path reported by the shell (OSC 7) beats scraping the prompt.
+    if let Some(cwd) = terminal.cwd.as_ref().filter(|c| !c.is_empty()) {
+        return cwd.clone();
+    }
     for row in terminal.grid.iter().rev() {
         let line = row_to_string(row);
         if line.trim().is_empty() { continue; }
@@ -278,8 +339,12 @@ impl SessionState {
                 if j + 1 < tab.scrollback.len() { s.push(','); }
                 s.push('\n');
             }
-            s.push_str("      ]\n");
-            s.push_str("    }");
+            s.push_str("      ]");
+            if let Some(layout) = &tab.layout {
+                s.push_str(&format!(",\n      \"active_pane\": {},\n      \"layout\": ", tab.active_pane));
+                layout_to_json(layout, &mut s);
+            }
+            s.push_str("\n    }");
             if i + 1 < self.tabs.len() { s.push(','); }
             s.push('\n');
         }
@@ -306,11 +371,57 @@ impl SessionState {
                 .and_then(JsonValue::as_array)
                 .map(|arr| arr.iter().filter_map(JsonValue::as_str).map(str::to_string).collect::<Vec<String>>())
                 .unwrap_or_default();
-            tabs.push(TabState { title, working_dir, scrollback });
+            let layout = obj_get(tobj, "layout").and_then(|v| layout_from_json(v, 0));
+            let active_pane = obj_get(tobj, "active_pane").and_then(JsonValue::as_u64).unwrap_or(0) as usize;
+            tabs.push(TabState { title, working_dir, scrollback, layout, active_pane });
         }
 
         Some(SessionState { tabs, active_tab, timestamp })
     }
+}
+
+fn layout_to_json(node: &PaneNode<Option<String>>, out: &mut String) {
+    match node {
+        PaneNode::Leaf(Some(cwd)) => out.push_str(&format!("{{\"cwd\": \"{}\"}}", json_escape(cwd))),
+        PaneNode::Leaf(None) | PaneNode::Empty => out.push_str("{}"),
+        PaneNode::Split { dir, ratio, first, second } => {
+            let d = if *dir == SplitDir::Horizontal { "h" } else { "v" };
+            out.push_str(&format!("{{\"dir\": \"{d}\", \"ratio\": {ratio:.4}, \"first\": "));
+            layout_to_json(first, out);
+            out.push_str(", \"second\": ");
+            layout_to_json(second, out);
+            out.push('}');
+        }
+    }
+}
+
+/// Maximum nesting accepted when reading a layout (guards a corrupt file).
+const MAX_LAYOUT_DEPTH: usize = 32;
+
+fn layout_from_json(v: &JsonValue, depth: usize) -> Option<PaneNode<Option<String>>> {
+    if depth > MAX_LAYOUT_DEPTH {
+        return None;
+    }
+    let obj = v.as_object()?;
+    let Some(dir) = obj_get(obj, "dir").and_then(JsonValue::as_str) else {
+        let cwd = obj_get(obj, "cwd").and_then(JsonValue::as_str).map(str::to_string);
+        return Some(PaneNode::Leaf(cwd));
+    };
+    let dir = match dir {
+        "h" => SplitDir::Horizontal,
+        "v" => SplitDir::Vertical,
+        _ => return None,
+    };
+    let ratio = match obj_get(obj, "ratio") {
+        Some(JsonValue::Num(n)) => (*n as f32).clamp(0.05, 0.95),
+        _ => 0.5,
+    };
+    Some(PaneNode::Split {
+        dir,
+        ratio,
+        first: Box::new(layout_from_json(obj_get(obj, "first")?, depth + 1)?),
+        second: Box::new(layout_from_json(obj_get(obj, "second")?, depth + 1)?),
+    })
 }
 
 fn json_escape(s: &str) -> String {
@@ -502,5 +613,81 @@ impl JsonParser {
         if self.pos == start { return None; }
         let text: String = self.chars[start..self.pos].iter().collect();
         text.parse::<f64>().ok().map(JsonValue::Num)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn leaf(c: Option<&str>) -> Box<PaneNode<Option<String>>> {
+        Box::new(PaneNode::Leaf(c.map(str::to_string)))
+    }
+
+    #[test]
+    fn layout_round_trips_through_session_json() {
+        let layout = PaneNode::Split {
+            dir: SplitDir::Horizontal,
+            ratio: 0.3,
+            first: leaf(Some("/tmp/a \"b\"")),
+            second: Box::new(PaneNode::Split {
+                dir: SplitDir::Vertical,
+                ratio: 0.75,
+                first: leaf(None),
+                second: leaf(Some("/var")),
+            }),
+        };
+        let state = SessionState {
+            tabs: vec![
+                TabState {
+                    title: "t".into(),
+                    working_dir: "/x".into(),
+                    scrollback: vec!["hi".into()],
+                    layout: Some(layout),
+                    active_pane: 2,
+                },
+                TabState { title: "u".into(), working_dir: "~".into(), scrollback: vec![], layout: None, active_pane: 0 },
+            ],
+            active_tab: 1,
+            timestamp: 7,
+        };
+        let back = SessionState::from_json(&state.to_json()).expect("parses");
+        assert_eq!(back.tabs.len(), 2);
+        assert!(back.tabs[1].layout.is_none());
+        assert_eq!(back.tabs[0].active_pane, 2);
+        let l = back.tabs[0].layout.as_ref().expect("layout kept");
+        assert_eq!(count_leaves(l), 3);
+        assert_eq!(first_leaf(l), Some("/tmp/a \"b\""));
+        match l {
+            PaneNode::Split { dir, ratio, second, .. } => {
+                assert_eq!(*dir, SplitDir::Horizontal);
+                assert!((ratio - 0.3).abs() < 1e-4);
+                match &**second {
+                    PaneNode::Split { dir, ratio, second, .. } => {
+                        assert_eq!(*dir, SplitDir::Vertical);
+                        assert!((ratio - 0.75).abs() < 1e-4);
+                        assert!(matches!(&**second, PaneNode::Leaf(Some(p)) if p == "/var"));
+                    }
+                    _ => panic!("inner split lost"),
+                }
+            }
+            _ => panic!("root split lost"),
+        }
+    }
+
+    #[test]
+    fn old_sessions_without_layout_still_load() {
+        let json = r#"{"active_tab":0,"timestamp":1,"tabs":[{"title":"a","working_dir":"~","scrollback":[]}]}"#;
+        let s = SessionState::from_json(json).expect("parses");
+        assert!(s.tabs[0].layout.is_none());
+    }
+
+    #[test]
+    fn expand_tilde_handles_home_relative_paths() {
+        assert_eq!(expand_tilde("/abs"), "/abs");
+        if let Some(home) = dirs::home_dir() {
+            assert_eq!(expand_tilde("~"), home.display().to_string());
+            assert_eq!(expand_tilde("~/code"), home.join("code").display().to_string());
+        }
     }
 }

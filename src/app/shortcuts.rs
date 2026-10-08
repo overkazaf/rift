@@ -9,7 +9,9 @@ use crate::effects::{CrtParams, GlitchParams, MatrixParams, NeonParams, ShaderEf
                      AmberParams, HologramParams, PixelateParams, ThermalParams,
                      RaindropParams, VhsParams, GridParams, FilmGrainParams, InvertParams, DesaturateParams,
                      ChromaticParams, PulseParams, SnowParams, UnderwaterParams, NeonOutlineParams, ScanlineRgbParams};
-use crate::network::{AuthMethod, SshConfig, SshPty, SshConnectRequest, WebViewPane};
+use crate::network::{AuthMethod, SshConfig, SshPty, SshConnectRequest};
+
+use crate::window::tab::PaneCmd;
 
 use super::{App, SshConnecting};
 use super::overlays;
@@ -25,6 +27,16 @@ fn cmd_or_ctrl(modifiers: &ModifiersState) -> bool {
 // ── Keyboard ──
 
 pub fn handle_key(app: &mut App, event: &KeyEvent, event_loop: &ActiveEventLoop) {
+    // While an IME composition is in progress, text-producing keys belong to the
+    // IME (they arrive via Ime::Commit); never also encode them to the PTY/overlays.
+    if !app.ime_preedit.is_empty()
+        && !app.modifiers.super_key()
+        && !app.modifiers.control_key()
+        && matches!(&event.logical_key, Key::Character(_) | Key::Named(NamedKey::Space))
+    {
+        return;
+    }
+
     // 1. Overlay interception (priority order)
     if overlays::try_intercept(app, event, event_loop) {
         return;
@@ -81,6 +93,11 @@ pub fn handle_key(app: &mut App, event: &KeyEvent, event_loop: &ActiveEventLoop)
         }
     }
 
+    // 2a2. Pane management (focus / resize / swap / zoom / equalize / close)
+    if super::panes::try_pane_shortcut(app, event, event_loop) {
+        return;
+    }
+
     // 2b. Font zoom: Cmd+= (zoom in), Ctrl+- (zoom out, Cmd+- eaten by macOS), Cmd+0 (reset)
     if app.modifiers.super_key() && !app.modifiers.shift_key() {
         if let Key::Character(ref s) = event.logical_key {
@@ -127,10 +144,7 @@ pub fn handle_key(app: &mut App, event: &KeyEvent, event_loop: &ActiveEventLoop)
     if app.modifiers.super_key() && !app.modifiers.shift_key() {
         if let Key::Character(ref s) = event.logical_key {
             if s.eq_ignore_ascii_case("d") && !event.repeat {
-                let (c, r) = pane_size(app);
-                app.wm.split_h(c, r);
-                resize_from_window(app);
-                app.request_redraw();
+                super::panes::run_pane_cmd(app, PaneCmd::SplitRight, event_loop);
                 return;
             }
             if s.eq_ignore_ascii_case("f") && !event.repeat {
@@ -248,20 +262,7 @@ pub fn handle_key(app: &mut App, event: &KeyEvent, event_loop: &ActiveEventLoop)
         }
     }
 
-    // 6. Alt+Arrow — switch pane focus
-    if app.modifiers.alt_key() {
-        match event.logical_key {
-            Key::Named(NamedKey::ArrowRight) | Key::Named(NamedKey::ArrowDown) => {
-                if !event.repeat { app.wm.focus_next_pane(); app.request_redraw(); }
-                return;
-            }
-            Key::Named(NamedKey::ArrowLeft) | Key::Named(NamedKey::ArrowUp) => {
-                if !event.repeat { app.wm.focus_prev_pane(); app.request_redraw(); }
-                return;
-            }
-            _ => {}
-        }
-    }
+    // 6. Alt+Arrow pane focus is handled by panes::try_pane_shortcut (step 2a2).
 
     // 7. Normal input → active pane (or broadcast to all panes)
     let app_cursor = app.wm.active_pane().terminal.app_cursor_keys;
@@ -294,7 +295,7 @@ pub fn handle_key(app: &mut App, event: &KeyEvent, event_loop: &ActiveEventLoop)
                 // buffer of its own), so they're already sitting uncommitted
                 // in the shell's line editor — confirming later just needs
                 // to submit that buffer (see overlays::handle_exec_preview).
-                if let Some(preview) = ExecPreview::check_command(&cmd) {
+                if let Some(preview) = ExecPreview::check_command_in(&cmd, app.wm.active_pane().terminal.cwd.as_deref()) {
                     app.exec_preview = preview;
                     app.exec_preview.visible = true;
                     app.request_redraw();
@@ -304,7 +305,10 @@ pub fn handle_key(app: &mut App, event: &KeyEvent, event_loop: &ActiveEventLoop)
                 if app.observer.enabled {
                     app.observer.on_command(&cmd);
                 }
-                app.blocks.on_input(&cmd, scrollback_line);
+                // Exact OSC 133 blocks live on the terminal; heuristic is fallback only.
+                if !app.wm.active_pane().terminal.blocks.osc_seen() {
+                    app.blocks.on_input(&cmd, scrollback_line);
+                }
                 if app.audit.enabled {
                     app.audit.log_command(&cmd, 0);
                 }
@@ -381,17 +385,9 @@ pub fn handle_menu_action(app: &mut App, action: MenuAction, event_loop: &Active
         MenuAction::ZoomIn => zoom_font(app, 1.0),
         MenuAction::ZoomOut => zoom_font(app, -1.0),
         MenuAction::ZoomReset => reset_font(app),
-        MenuAction::SplitH => {
-            let (c, r) = pane_size(app);
-            app.wm.split_h(c, r);
-            resize_from_window(app);
-        }
-        MenuAction::SplitV => {
-            log::info!("MenuAction::SplitV triggered");
-            let (c, r) = pane_size(app);
-            app.wm.split_v(c, r);
-            resize_from_window(app);
-        }
+        MenuAction::SplitH => super::panes::run_pane_cmd(app, PaneCmd::SplitRight, event_loop),
+        MenuAction::SplitV => super::panes::run_pane_cmd(app, PaneCmd::SplitDown, event_loop),
+        MenuAction::Pane(cmd) => super::panes::run_pane_cmd(app, cmd, event_loop),
         MenuAction::Recording => app.toggle_recording(),
         // Effects
         MenuAction::CrtEffect => app.renderer.shader.set_effect(Some(ShaderEffect::Crt(CrtParams::default()))),
@@ -418,20 +414,8 @@ pub fn handle_menu_action(app: &mut App, action: MenuAction, event_loop: &Active
         // UI panels
         MenuAction::Preferences => app.prefs.toggle(),
         MenuAction::Welcome => app.welcome.toggle(),
-        MenuAction::WebView => {
-            if let Some(wv) = &mut app.webview {
-                if wv.visible {
-                    wv.set_visible(false);
-                    resize_from_window(app);
-                    if let Some(w) = &app.window { w.focus_window(); }
-                } else {
-                    wv.set_visible(true);
-                    resize_from_window(app);
-                }
-            } else {
-                app.webview_dialog.toggle();
-            }
-        }
+        MenuAction::WebView => crate::network::browser::toggle(app),
+        MenuAction::Browser(cmd) => crate::network::browser::run_command(app, cmd),
         MenuAction::Find => {
             app.search.toggle();
             if app.search.visible {
@@ -531,64 +515,7 @@ pub fn do_ssh_connect(app: &mut App, req: SshConnectRequest) {
 // ── WebView ──
 
 pub fn open_webview(app: &mut App, url: &str) {
-    if let Some(window) = &app.window {
-        let _scale = window.scale_factor();
-        let (x, y, w, h) = webview_bounds(app, window);
-
-        app.webview_tab = Some(app.wm.active_tab);
-        app.webview_pane = Some(app.wm.active_tab().active);
-        if let Some(wv) = &mut app.webview {
-            wv.navigate(url);
-            wv.url = url.to_string();
-            wv.set_visible(true);
-            wv.set_bounds(x, y, w, h);
-        } else {
-            match WebViewPane::new(window, url, x, y, w, h) {
-                Ok(wv) => {
-                    log::info!("WebView opened: {url}");
-                    app.webview = Some(wv);
-                }
-                Err(e) => log::error!("WebView failed: {e}"),
-            }
-        }
-    }
-}
-
-pub fn toggle_webview_maximize(app: &mut App) {
-    app.webview_maximized = !app.webview_maximized;
-    if let (Some(wv), Some(window)) = (&app.webview, &app.window) {
-        if wv.visible {
-            let (x, y, w, h) = webview_bounds(app, window);
-            wv.set_bounds(x, y, w, h);
-        }
-    }
-    app.request_redraw();
-}
-
-pub fn webview_bounds(app: &App, window: &std::sync::Arc<winit::window::Window>) -> (i32, i32, u32, u32) {
-    let size = window.inner_size();
-    let scale = window.scale_factor();
-    let tab_bar_logical = app.tab_bar_height() as f64 / scale;
-    let addr_bar_h = 32.0;
-
-    if app.webview_maximized {
-        let lw = (size.width as f64 / scale).max(1.0);
-        let lh = (size.height as f64 / scale).max(1.0);
-        let x = 0i32;
-        let y = (tab_bar_logical + addr_bar_h) as i32;
-        let w = lw as u32;
-        let h = (lh - tab_bar_logical - addr_bar_h).max(1.0) as u32;
-        (x, y, w, h)
-    } else {
-        // Position in the right half of the window (default split view)
-        let lw = (size.width as f64 / scale).max(1.0);
-        let lh = (size.height as f64 / scale).max(1.0);
-        let x = (lw / 2.0) as i32;
-        let y = (tab_bar_logical + addr_bar_h) as i32;
-        let w = (lw / 2.0) as u32;
-        let h = (lh - tab_bar_logical - addr_bar_h).max(1.0) as u32;
-        (x, y, w, h)
-    }
+    crate::network::browser::open(app, url);
 }
 
 // ── Private helpers ──
@@ -609,15 +536,12 @@ fn handle_mod_shift(app: &mut App, key: &str, event_loop: &ActiveEventLoop) -> b
             true
         }
         "d" | "D" => {
-            let (c, r) = pane_size(app);
-            app.wm.split_v(c, r);  // Cmd+Shift+D = horizontal split (up/down)
-            resize_from_window(app);
+            // Cmd+Shift+D = split down (new pane below)
+            super::panes::run_pane_cmd(app, PaneCmd::SplitDown, event_loop);
             true
         }
         "-" | "_" => {
-            let (c, r) = pane_size(app);
-            app.wm.split_v(c, r);
-            resize_from_window(app);
+            super::panes::run_pane_cmd(app, PaneCmd::SplitDown, event_loop);
             true
         }
         // Effects moved to Ctrl+Shift+1-8 (avoids macOS screenshot conflict)
@@ -646,15 +570,7 @@ fn handle_mod_shift(app: &mut App, key: &str, event_loop: &ActiveEventLoop) -> b
         }
         "s" | "S" => { app.ssh_dialog.toggle(); true }
         "a" | "A" => { app.ai_panel.toggle(); true }
-        "b" | "B" => {
-            if let Some(wv) = &mut app.webview {
-                let new_vis = !wv.visible;
-                wv.set_visible(new_vis);
-            } else {
-                app.webview_dialog.toggle();
-            }
-            true
-        }
+        "b" | "B" => { crate::network::browser::toggle(app); true }
         "g" | "G" => {
             app.git_panel.toggle();
             true
@@ -723,7 +639,13 @@ fn sync_webview_for_tab(app: &mut App) {
         let should_show = app.webview_tab == Some(app.wm.active_tab);
         if wv.visible != should_show {
             wv.set_visible(should_show);
+            if !should_show {
+                wv.focus_parent();
+                app.browser.editing = false;
+                app.browser.focused = false;
+            }
             resize_from_window(app);
+            crate::network::browser::apply_bounds(app);
             if !should_show {
                 if let Some(w) = &app.window { w.focus_window(); }
             }
@@ -753,7 +675,7 @@ fn pane_size(app: &App) -> (usize, usize) {
     (p.terminal.cols, p.terminal.rows)
 }
 
-fn resize_from_window(app: &mut App) {
+pub fn resize_from_window(app: &mut App) {
     if let Some(win) = &app.window {
         let s = win.inner_size();
         super::lifecycle::handle_resize(app, s.width, s.height);

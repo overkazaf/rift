@@ -1,3 +1,4 @@
+pub mod browser;
 pub mod ssh;
 pub mod webview;
 pub mod webview_dialog;

@@ -84,6 +84,20 @@ impl ExecPreview {
     /// (but not-yet-visible) preview if so. Callers are expected to set
     /// `.visible = true` themselves before showing it.
     pub fn check_command(cmd: &str) -> Option<ExecPreview> {
+        Self::check_command_in(cmd, None)
+    }
+
+    /// Like `check_command`, but live introspection (git, relative `rm`
+    /// targets) runs in `cwd` — the shell's real directory as reported by
+    /// OSC 7 — instead of Rift's own process directory.
+    pub fn check_command_in(cmd: &str, cwd: Option<&str>) -> Option<ExecPreview> {
+        PREVIEW_CWD.with(|c| *c.borrow_mut() = cwd.map(std::path::PathBuf::from));
+        let result = Self::check_command_inner(cmd);
+        PREVIEW_CWD.with(|c| *c.borrow_mut() = None);
+        result
+    }
+
+    fn check_command_inner(cmd: &str) -> Option<ExecPreview> {
         let trimmed = cmd.trim();
         if trimmed.is_empty() {
             return None;
@@ -457,7 +471,11 @@ fn check_rm(parts: &[&str], is_sudo: bool) -> Option<(Severity, Vec<Impact>)> {
         ));
     } else {
         for target in &targets {
-            let path = Path::new(target);
+            let resolved = match PREVIEW_CWD.with(|d| d.borrow().clone()) {
+                Some(base) if !Path::new(target).is_absolute() && !target.starts_with('~') => base.join(target),
+                _ => std::path::PathBuf::from(target),
+            };
+            let path = resolved.as_path();
             let detail = if path.is_dir() {
                 match count_files_recursive(path) {
                     Ok(n) => format!("directory — {n} file(s)/dir(s) inside"),
@@ -675,8 +693,23 @@ fn cap_impacts(mut impacts: Vec<Impact>, max: usize) -> Vec<Impact> {
 
 // ── Live introspection (best-effort; failures just fall back to generic text) ──
 
+thread_local! {
+    /// Working directory for the command currently being previewed.
+    static PREVIEW_CWD: std::cell::RefCell<Option<std::path::PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// `git` command rooted at the previewed shell's cwd when known.
+fn git_cmd() -> Command {
+    let mut c = Command::new("git");
+    if let Some(dir) = PREVIEW_CWD.with(|d| d.borrow().clone()) {
+        c.current_dir(dir);
+    }
+    c
+}
+
 fn git_status_porcelain() -> Vec<String> {
-    Command::new("git")
+    git_cmd()
         .args(["status", "--porcelain"])
         .output()
         .ok()
@@ -686,7 +719,7 @@ fn git_status_porcelain() -> Vec<String> {
 }
 
 fn git_clean_dry_run() -> Vec<String> {
-    Command::new("git")
+    git_cmd()
         .args(["clean", "-fdn"])
         .output()
         .ok()
@@ -702,7 +735,7 @@ fn git_clean_dry_run() -> Vec<String> {
 
 /// `(ahead, behind)` of HEAD relative to its upstream, if one is configured.
 fn git_push_divergence() -> Option<(usize, usize)> {
-    let out = Command::new("git")
+    let out = git_cmd()
         .args(["rev-list", "--left-right", "--count", "@{upstream}...HEAD"])
         .output()
         .ok()?;

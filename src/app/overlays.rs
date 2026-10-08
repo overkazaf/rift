@@ -37,8 +37,8 @@ pub fn try_intercept(app: &mut App, event: &KeyEvent, event_loop: &ActiveEventLo
         return handle_timewarp(app, event);
     }
     // WebView address bar editing
-    if app.addr_bar_editing {
-        return handle_addr_bar(app, event);
+    if app.browser.editing {
+        return crate::network::browser::handle_key(app, event);
     }
     // Observer summary dismissal
     if app.observer_summary.is_some() {
@@ -507,6 +507,7 @@ fn dispatch_palette_action(app: &mut App, action: PaletteAction, event_loop: &Ac
         PaletteAction::CloseTab => Some(MenuAction::CloseTab),
         PaletteAction::SplitH => Some(MenuAction::SplitH),
         PaletteAction::SplitV => Some(MenuAction::SplitV),
+        PaletteAction::Pane(cmd) => Some(MenuAction::Pane(cmd)),
         PaletteAction::Search => Some(MenuAction::Find),
         PaletteAction::Ssh => Some(MenuAction::SshConnect),
         PaletteAction::Ai => Some(MenuAction::AiAssistant),
@@ -747,79 +748,4 @@ fn addr_bar_key_char(event: &KeyEvent) -> Option<String> {
         return Some(c.to_string());
     }
     None
-}
-
-fn handle_addr_bar(app: &mut App, event: &KeyEvent) -> bool {
-    // Cmd+C/V/A/X in address bar
-    if app.modifiers.super_key() {
-        if let Some(ref s) = addr_bar_key_char(event) {
-            match s.as_str() {
-                "c" => {
-                    crate::window::selection::copy_to_clipboard(&app.addr_bar_text);
-                    log::info!("Address bar: copied URL ({} chars)", app.addr_bar_text.len());
-                    app.request_redraw();
-                    return true;
-                }
-                "v" => {
-                    if let Some(text) = crate::window::selection::paste_from_clipboard() {
-                        let clean = text.lines().next().unwrap_or("").to_string();
-                        app.addr_bar_text.push_str(&clean);
-                        log::info!("Address bar: pasted {} chars", clean.len());
-                    }
-                    app.request_redraw();
-                    return true;
-                }
-                "a" => {
-                    app.request_redraw();
-                    return true;
-                }
-                "x" => {
-                    crate::window::selection::copy_to_clipboard(&app.addr_bar_text);
-                    app.addr_bar_text.clear();
-                    app.request_redraw();
-                    return true;
-                }
-                _ => {}
-            }
-        }
-        // Consume Cmd+<anything> to prevent it leaking to terminal
-        app.request_redraw();
-        return true;
-    }
-    match &event.logical_key {
-        Key::Named(NamedKey::Escape) => {
-            app.addr_bar_editing = false;
-        }
-        Key::Named(NamedKey::Backspace) => {
-            app.addr_bar_text.pop();
-        }
-        Key::Named(NamedKey::Enter) => {
-            if app.modifiers.shift_key() {
-                super::shortcuts::toggle_webview_maximize(app);
-            } else {
-                let url = app.addr_bar_text.trim().to_string();
-                app.addr_bar_editing = false;
-                if !url.is_empty() {
-                    if let Some(wv) = &mut app.webview {
-                        let nav_url = if url.starts_with("http://") || url.starts_with("https://") {
-                            url.clone()
-                        } else {
-                            format!("https://{}", url)
-                        };
-                        wv.navigate(&nav_url);
-                        wv.url = nav_url;
-                    }
-                }
-            }
-        }
-        Key::Character(ref s) => {
-            app.addr_bar_text.push_str(s);
-        }
-        Key::Named(NamedKey::Space) => {
-            app.addr_bar_text.push(' ');
-        }
-        _ => {}
-    }
-    app.request_redraw();
-    true
 }

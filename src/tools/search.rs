@@ -80,7 +80,7 @@ impl SearchOverlay {
     }
 
     /// Search through scrollback buffer and visible grid.
-    pub fn search(&mut self, scrollback: &[Vec<Cell>], grid: &[Vec<Cell>]) {
+    pub fn search(&mut self, scrollback: &std::collections::VecDeque<Vec<Cell>>, grid: &[Vec<Cell>]) {
         self.matches.clear();
         if self.query.is_empty() {
             return;

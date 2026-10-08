@@ -54,6 +54,18 @@ impl Pane {
         }
     }
 
+    /// Local pane whose shell starts in `cwd` (when it is an existing directory).
+    pub fn new_in(id: usize, cols: usize, rows: usize, proxy: EventLoopProxy<()>, cwd: Option<&str>) -> Self {
+        Self {
+            id,
+            terminal: Terminal::new(cols, rows),
+            pty: PtyKind::Local(Pty::spawn_in(cols as u16, rows as u16, proxy, cwd)),
+            vt_parser: vte::Parser::new(),
+            recorder: None,
+            label: None,
+        }
+    }
+
     pub fn from_ssh(id: usize, cols: usize, rows: usize, ssh: SshPty) -> Self {
         let label = ssh.config.display_name();
         Self {

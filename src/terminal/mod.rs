@@ -1,10 +1,12 @@
 mod ansi;
 pub mod grid;
 pub mod images;
+pub mod semantic;
 
 pub use ansi::AnsiHandler;
 pub use grid::{Attrs, Cell, Color};
 pub use images::{ImageCell, ImageStore, TermImage};
+pub use semantic::SemanticMark;
 
 #[derive(PartialEq, Eq, Clone, Copy)]
 pub enum MouseMode {
@@ -81,7 +83,7 @@ pub struct Terminal {
     wrap_next: bool,
     tab_stops: Vec<bool>,
 
-    pub scrollback: Vec<Vec<Cell>>,
+    pub scrollback: std::collections::VecDeque<Vec<Cell>>,
     max_scrollback: usize,
     pub scroll_offset: usize,
 
@@ -96,6 +98,13 @@ pub struct Terminal {
     pub g1_charset: Charset,
     pub active_charset: usize,
     pub clipboard_request: Option<ClipboardRequest>,
+
+    /// Shell-reported working directory (OSC 7 / OSC 1337;CurrentDir).
+    pub cwd: Option<String>,
+    /// Recent OSC 133 semantic marks (bounded).
+    pub marks: Vec<SemanticMark>,
+    /// Exact command blocks built from OSC 133 marks (per terminal/pane).
+    pub blocks: crate::tools::blocks::BlockManager,
 
     pub image_store: ImageStore,
     apc_scan: ApcScan,
@@ -132,7 +141,7 @@ impl Terminal {
             using_alt_screen: false,
             wrap_next: false,
             tab_stops,
-            scrollback: Vec::new(),
+            scrollback: std::collections::VecDeque::new(),
             max_scrollback: 10000,
             scroll_offset: 0,
             mouse_mode: MouseMode::None,
@@ -146,6 +155,9 @@ impl Terminal {
             g1_charset: Charset::Ascii,
             active_charset: 0,
             clipboard_request: None,
+            cwd: None,
+            marks: Vec::new(),
+            blocks: crate::tools::blocks::BlockManager::new(),
             image_store: ImageStore::new(),
             apc_scan: ApcScan::Idle,
             apc_buffer: Vec::new(),
@@ -404,9 +416,10 @@ impl Terminal {
             if self.scroll_top < self.scroll_bottom {
                 let removed = self.grid.remove(self.scroll_top);
                 if !self.using_alt_screen {
-                    self.scrollback.push(removed);
+                    self.scrollback.push_back(removed);
                     if self.scrollback.len() > self.max_scrollback {
-                        self.scrollback.remove(0);
+                        self.scrollback.pop_front();
+                        self.blocks.shift_lines(1);
                     }
                 }
                 self.grid.insert(self.scroll_bottom, vec![blank; self.cols]);

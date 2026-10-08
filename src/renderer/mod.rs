@@ -2,14 +2,200 @@ pub mod font;
 #[cfg(feature = "gpu")]
 pub mod gpu;
 
-use std::time::Instant;
+use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
+use std::time::{Duration, Instant};
 
 use crate::config::{Rgb, Theme};
 use crate::effects::ShaderPipeline;
 use crate::window::PaneRect;
-use crate::terminal::{Color, ImageCell, Terminal, TermImage};
+use crate::window::tab::{SplitBorder, SplitDir, BORDER};
+use crate::terminal::{Cell, Color, ImageCell, Terminal, TermImage};
 use crate::window::WindowManager;
 use font::FontManager;
+
+// ── Cheap hashing (FxHash-style) for damage tracking and the tile cache ──
+
+#[derive(Default, Clone, Copy)]
+pub struct FxHasher(u64);
+
+const FX_SEED: u64 = 0x517c_c1b7_2722_0a95;
+
+impl FxHasher {
+    #[inline]
+    fn add(&mut self, v: u64) {
+        self.0 = (self.0.rotate_left(5) ^ v).wrapping_mul(FX_SEED);
+    }
+}
+
+impl Hasher for FxHasher {
+    #[inline]
+    fn finish(&self) -> u64 { self.0 }
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes { self.add(b as u64); }
+    }
+    #[inline]
+    fn write_u8(&mut self, i: u8) { self.add(i as u64); }
+    #[inline]
+    fn write_u32(&mut self, i: u32) { self.add(i as u64); }
+    #[inline]
+    fn write_u64(&mut self, i: u64) { self.add(i); }
+    #[inline]
+    fn write_usize(&mut self, i: usize) { self.add(i as u64); }
+}
+
+type FxBuild = BuildHasherDefault<FxHasher>;
+
+#[inline]
+fn mix(h: u64, v: u64) -> u64 {
+    (h.rotate_left(5) ^ v).wrapping_mul(FX_SEED)
+}
+
+#[inline]
+fn color_bits(c: Color) -> u64 {
+    match c {
+        Color::Default => 0,
+        Color::Indexed(i) => (1 << 24) | i as u64,
+        Color::Rgb(r, g, b) => (2 << 24) | (r as u64) << 16 | (g as u64) << 8 | b as u64,
+    }
+}
+
+#[inline]
+fn rgb_bits(c: Rgb) -> u64 {
+    (c.0 as u64) << 16 | (c.1 as u64) << 8 | c.2 as u64
+}
+
+/// Hash of everything that determines a cell's pixels (apart from cursor /
+/// selection-like per-frame state, which is mixed in separately).
+#[inline]
+fn hash_cells(mut h: u64, cells: &[Cell]) -> u64 {
+    for cell in cells {
+        let a = cell.attrs;
+        let attrs = a.bold as u64
+            | (a.dim as u64) << 1
+            | (a.italic as u64) << 2
+            | (a.underline as u64) << 3
+            | (a.reverse as u64) << 4
+            | (a.hidden as u64) << 5;
+        h = mix(h, cell.c as u64 | attrs << 32);
+        h = mix(h, color_bits(cell.fg) << 32 | color_bits(cell.bg));
+    }
+    h
+}
+
+// ── Pre-blended glyph tile cache ──
+
+/// (glyph, fg pixel, underlying bg pixel) -> cw*ch pre-blended pixels.
+type TileKey = (char, u32, u32);
+type TileMap = HashMap<TileKey, Box<[u32]>, FxBuild>;
+
+/// Max number of cached tiles (two generations of half this size each).
+const TILE_CACHE_CAP: usize = 4096;
+
+/// Two-generation (approximate LRU) tile cache: lookups promote from `old`
+/// into `cur`; when `cur` fills up it becomes `old` and the previous `old`
+/// (the least recently used half) is dropped.
+#[derive(Default)]
+struct TileCache {
+    cur: TileMap,
+    old: TileMap,
+}
+
+impl TileCache {
+    fn clear(&mut self) {
+        self.cur.clear();
+        self.old.clear();
+    }
+
+    /// Ensure `key` is in `cur`; returns false if it must be built.
+    #[inline]
+    fn promote(&mut self, key: TileKey) -> bool {
+        if self.cur.contains_key(&key) { return true; }
+        if let Some(t) = self.old.remove(&key) {
+            self.insert(key, t);
+            return true;
+        }
+        false
+    }
+
+    fn insert(&mut self, key: TileKey, tile: Box<[u32]>) {
+        if self.cur.len() >= TILE_CACHE_CAP / 2 {
+            self.old = std::mem::take(&mut self.cur);
+        }
+        self.cur.insert(key, tile);
+    }
+
+    #[inline]
+    fn get(&self, key: &TileKey) -> &[u32] {
+        &self.cur[key]
+    }
+}
+
+fn build_tile(bitmap: &[u8], cw: usize, ch: usize, fg: Rgb, fg_px: u32, bg_px: u32) -> Box<[u32]> {
+    let n = cw * ch;
+    let mut tile = vec![bg_px; n];
+    for (i, t) in tile.iter_mut().enumerate() {
+        let coverage = bitmap.get(i).copied().unwrap_or(0) as u32;
+        if coverage == 0 { continue; }
+        *t = if coverage >= 250 { fg_px } else { blend(fg, bg_px, coverage) };
+    }
+    tile.into_boxed_slice()
+}
+
+#[inline]
+fn blit_tile(buffer: &mut [u32], buf_width: usize, x0: usize, y0: usize, cw: usize, ch: usize, tile: &[u32]) {
+    for cy in 0..ch {
+        let o = (y0 + cy) * buf_width + x0;
+        buffer[o..o + cw].copy_from_slice(&tile[cy * cw..cy * cw + cw]);
+    }
+}
+
+// ── Opt-in frame profiler (RIFT_PROFILE=1) ──
+
+#[derive(Clone, Copy)]
+pub enum Phase { Pty = 0, Render = 1, Overlays = 2, Present = 3 }
+
+const PHASE_NAMES: [&str; 4] = ["pty", "render_tabbed", "overlays", "present"];
+const PROFILE_REPORT_FRAMES: u32 = 120;
+
+#[derive(Default)]
+pub struct Profiler {
+    sum: [Duration; 4],
+    max: [Duration; 4],
+    cnt: [u32; 4],
+    frames: u32,
+}
+
+impl Profiler {
+    fn add(&mut self, phase: Phase, d: Duration) {
+        let i = phase as usize;
+        self.sum[i] += d;
+        self.max[i] = self.max[i].max(d);
+        self.cnt[i] += 1;
+    }
+
+    fn frame_end(&mut self) {
+        self.frames += 1;
+        if self.frames < PROFILE_REPORT_FRAMES { return; }
+        let mut line = format!("[rift-profile] {} frames:", self.frames);
+        for i in 0..4 {
+            let n = self.cnt[i].max(1) as f64;
+            line.push_str(&format!(
+                " | {} avg {:.2} max {:.2} ms (n={})",
+                PHASE_NAMES[i],
+                self.sum[i].as_secs_f64() * 1000.0 / n,
+                self.max[i].as_secs_f64() * 1000.0,
+                self.cnt[i],
+            ));
+        }
+        eprintln!("{line}");
+        *self = Self::default();
+    }
+}
+
+/// Marker for "no damage cache" (external buffers, tests): every row is dirty.
+const NO_CACHE: usize = usize::MAX;
 
 pub struct Renderer {
     pub font: FontManager,
@@ -17,6 +203,41 @@ pub struct Renderer {
     pub shader: ShaderPipeline,
     pub opacity: f32,
     pub start_time: Instant,
+
+    // ── Damage tracking state ──
+    /// Persistent back buffer; the softbuffer buffer is not preserved between
+    /// frames, so each frame we memcpy this into it and draw overlays on top.
+    back: Vec<u32>,
+    /// Signature of everything that forces a full redraw (size, theme, font
+    /// metrics, layout, ...). A change invalidates all row hashes.
+    frame_sig: u64,
+    force_full: bool,
+    /// True while the current frame is a full redraw (all rows dirty).
+    full_frame: bool,
+    tab_sig: u64,
+    /// Per pane (index within the active tab) -> per visible row hash.
+    pane_rows: HashMap<usize, Vec<u64>>,
+    cur_pane: usize,
+    /// Per-row extra state (block indicator bar) for the next pane render.
+    row_extra: Option<Vec<u8>>,
+    /// Output of the last `render_pane_inner`: which rows were repainted.
+    dirty_rows: Vec<bool>,
+    tiles: TileCache,
+    pub prof: Option<Profiler>,
+}
+
+/// How far unfocused panes are blended toward the background (0.0..1.0).
+const UNFOCUSED_DIM: f32 = 0.28;
+/// Divider base color: theme.bg lightened by this much.
+const DIVIDER_LIGHTEN: u8 = 18;
+
+/// Mouse / zoom state the split chrome needs, passed in from the app.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SplitUiState {
+    pub hover_pane: Option<usize>,
+    pub hover_border: Option<usize>,
+    pub dragging_border: Option<usize>,
+    pub zoomed: bool,
 }
 
 impl Renderer {
@@ -28,12 +249,45 @@ impl Renderer {
             shader: ShaderPipeline::new(),
             opacity: 1.0,
             start_time: Instant::now(),
+            back: Vec::new(),
+            frame_sig: 0,
+            force_full: true,
+            full_frame: true,
+            tab_sig: 0,
+            pane_rows: HashMap::new(),
+            cur_pane: NO_CACHE,
+            row_extra: None,
+            dirty_rows: Vec::new(),
+            tiles: TileCache::default(),
+            prof: if std::env::var("RIFT_PROFILE").map_or(false, |v| v == "1") {
+                Some(Profiler::default())
+            } else {
+                None
+            },
         }
     }
 
     pub fn reinit_font(&mut self, font_path: &str, font_size: f32) {
         log::info!("Reinit font: {font_size}px (scaled for display)");
         self.font = FontManager::new(font_path, font_size);
+        self.invalidate();
+    }
+
+    /// Drop all cached pixels/hashes; the next frame is a full redraw.
+    pub fn invalidate(&mut self) {
+        self.force_full = true;
+        self.tiles.clear();
+    }
+
+    /// Record a profiling sample (no-op unless RIFT_PROFILE=1).
+    #[inline]
+    pub fn prof_add(&mut self, phase: Phase, d: Duration) {
+        if let Some(p) = &mut self.prof { p.add(phase, d); }
+    }
+
+    /// Mark the end of a presented frame (prints a report every 120 frames).
+    pub fn prof_frame_end(&mut self) {
+        if let Some(p) = &mut self.prof { p.frame_end(); }
     }
 
     pub fn cell_width(&self) -> usize { self.font.cell_width }
@@ -49,7 +303,7 @@ impl Renderer {
         height: u32,
         blocks: &crate::tools::blocks::BlockManager,
     ) {
-        self.render_tabbed_with_cmd(wm, content_area, buffer, width, height, false, blocks, None);
+        self.render_tabbed_with_cmd(wm, content_area, buffer, width, height, false, blocks, SplitUiState::default());
     }
 
     pub fn render_tabbed_with_cmd(
@@ -61,42 +315,117 @@ impl Renderer {
         height: u32,
         cmd_held: bool,
         blocks: &crate::tools::blocks::BlockManager,
-        hover_pane: Option<usize>,
+        split_ui: SplitUiState,
     ) {
+        let t_start = Instant::now();
         let w = width as usize;
         let h = height as usize;
+        let n = buffer.len();
 
         let bg = pack(self.theme.bg.0, self.theme.bg.1, self.theme.bg.2);
-        buffer.fill(bg);
-
         let tab_bar_h = content_area.y;
 
         let layouts = wm.pane_layouts(content_area);
         let active_tab = wm.active_tab();
+        let tabs = wm.tab_bar_info();
+
+        // Everything that forces a full repaint is folded into one signature.
+        let cw = self.font.cell_width;
+        let ch = self.font.cell_height;
+        let mut sig = mix(0, w as u64);
+        sig = mix(sig, h as u64);
+        sig = mix(sig, n as u64);
+        sig = mix(sig, cw as u64);
+        sig = mix(sig, ch as u64);
+        sig = mix(sig, cmd_held as u64);
+        sig = mix(sig, rgb_bits(self.theme.fg));
+        sig = mix(sig, rgb_bits(self.theme.bg));
+        sig = mix(sig, rgb_bits(self.theme.cursor));
+        for c in self.theme.palette { sig = mix(sig, rgb_bits(c)); }
+        for v in [content_area.x, content_area.y, content_area.width, content_area.height] {
+            sig = mix(sig, v as u64);
+        }
         for (idx, rect, is_active) in &layouts {
+            for v in [*idx, rect.x, rect.y, rect.width, rect.height, *is_active as usize] {
+                sig = mix(sig, v as u64);
+            }
+        }
+        let mut tsig = mix(sig, tabs.len() as u64);
+        for (title, active) in &tabs {
+            for b in title.bytes() { tsig = mix(tsig, b as u64); }
+            tsig = mix(tsig, *active as u64 + 0x100);
+        }
+
+        // A shader post-processes every frame, so keep that path simple:
+        // full redraw (the back buffer itself stays unshaded).
+        let full = self.force_full
+            || self.back.len() != n
+            || sig != self.frame_sig
+            || self.shader.has_effect();
+        self.force_full = false;
+        self.frame_sig = sig;
+        self.full_frame = full;
+
+        let mut back = std::mem::take(&mut self.back);
+        if full {
+            back.clear();
+            back.resize(n, bg);
+            self.pane_rows.clear();
+        }
+
+        // Block-indicator bar state for the first pane (rows hash it in).
+        // Exact OSC 133 blocks (owned by the terminal) win over the app-level heuristic.
+        let blocks = match layouts.first().and_then(|l| active_tab.pane(l.0)) {
+            Some(p) if p.terminal.blocks.osc_seen() => &p.terminal.blocks,
+            _ => blocks,
+        };
+        let block_states = if blocks.block_count() > 0 && !layouts.is_empty() {
+            Some(self.block_row_states(&active_tab.active_pane().terminal, blocks))
+        } else {
+            None
+        };
+
+        for (i, (idx, rect, is_active)) in layouts.iter().enumerate() {
             if let Some(pane) = active_tab.pane(*idx) {
                 let terminal = &pane.terminal;
-                self.render_pane_inner(terminal, buffer, w, h, *rect, *is_active, cmd_held);
+                self.cur_pane = *idx;
+                self.row_extra = if i == 0 { block_states.clone() } else { None };
+                self.render_pane_inner(terminal, &mut back, w, h, *rect, *is_active, cmd_held);
+                if i == 0 {
+                    if let Some(states) = &block_states {
+                        self.draw_block_indicators(states, &self.dirty_rows, &mut back, w, *rect);
+                    }
+                }
             }
         }
-
-        if layouts.len() > 1 {
-            self.render_pane_borders(&layouts, buffer, w, h, hover_pane);
-        }
-
-        // Warp-style command block indicators (left-side bar)
-        if blocks.block_count() > 0 {
-            if let Some((_, rect, _)) = layouts.first() {
-                let terminal = &active_tab.active_pane().terminal;
-                self.render_block_indicators(terminal, blocks, buffer, w, *rect);
-            }
-        }
+        self.cur_pane = NO_CACHE;
 
         // Tab bar rendered LAST so it's always on top of pane content
-        self.render_tab_bar(wm, buffer, w, tab_bar_h);
+        if full || tsig != self.tab_sig {
+            self.render_tab_bar(wm, &mut back, w, tab_bar_h);
+            self.tab_sig = tsig;
+        }
+
+        // The softbuffer buffer is not preserved between frames: copy our
+        // persistent frame into it (cheap memcpy), overlays go on top of that.
+        buffer.copy_from_slice(&back);
+        self.back = back;
+
+        // Split chrome is composited onto the output buffer (never the
+        // persistent back buffer) so dimming cannot compound across frames.
+        if layouts.len() > 1 {
+            let borders = active_tab.split_borders(content_area);
+            self.dim_unfocused_panes(&layouts, buffer, w, h, split_ui.hover_pane);
+            self.render_pane_borders(&layouts, &borders, buffer, w, h, &split_ui);
+        } else if split_ui.zoomed {
+            if let Some((_, rect, _)) = layouts.first() {
+                self.draw_zoom_badge(buffer, w, h, *rect);
+            }
+        }
 
         let elapsed = self.start_time.elapsed().as_secs_f32();
         self.shader.apply(buffer, width, height, elapsed);
+        self.prof_add(Phase::Render, t_start.elapsed());
     }
 
     fn render_tab_bar(
@@ -265,6 +594,15 @@ impl Renderer {
         self.render_pane_inner(terminal, buffer, buf_width, buf_height, rect, is_active, cmd_held)
     }
 
+    /// Render one pane into `buffer`, repainting only rows whose content hash
+    /// changed since the previous frame (`self.cur_pane` selects the hash
+    /// cache slot; `NO_CACHE` or a full frame repaints every row). The
+    /// repainted rows are reported in `self.dirty_rows`.
+    ///
+    /// The caller guarantees that for non-dirty rows `buffer` still holds the
+    /// pixels produced for the identical hash last time (the persistent back
+    /// buffer), and that anything affecting all rows (theme, font metrics,
+    /// layout, Cmd state) is covered by the frame signature.
     fn render_pane_inner(
         &mut self,
         terminal: &Terminal,
@@ -290,173 +628,322 @@ impl Renderer {
         // track scrollback (see terminal::images module docs), so only blit
         // them while looking at the live screen.
         let images_visible = !terminal.is_scrolled_back();
+        let has_images = images_visible && terminal.image_store.has_placements();
 
-        // Pre-detect URLs (only when Cmd is held)
-        let url_ranges: Vec<Vec<(usize, usize)>> = if cmd_held {
-            visible.iter().map(|cells| {
+        // Scrollback indicator text (drawn over the first rows).
+        let indicator = if terminal.is_scrolled_back() {
+            Some(format!("[{}/{}]", terminal.scroll_offset, terminal.scrollback_len()))
+        } else {
+            None
+        };
+        let ind_rows = ((ch + 8).div_ceil(ch.max(1))).min(visible.len());
+        let ind_hash = indicator.as_ref().map_or(0, |t| {
+            t.bytes().fold(0x9e37u64, |h, b| mix(h, b as u64))
+        });
+
+        // ── Damage detection: hash every visible row ──
+        let key = self.cur_pane;
+        let use_cache = key != NO_CACHE && !self.full_frame;
+        let old_hashes = if use_cache { self.pane_rows.remove(&key).unwrap_or_default() } else { Vec::new() };
+        let extra = self.row_extra.take();
+        let nrows = visible.len();
+        let mut new_hashes: Vec<u64> = Vec::with_capacity(nrows);
+        let mut dirty = std::mem::take(&mut self.dirty_rows);
+        dirty.clear();
+        for (row, cells) in visible.iter().enumerate() {
+            let mut h = hash_cells(mix(0, cells.len() as u64), cells);
+            if show_cursor && row == terminal.cursor_row {
+                h = mix(h, 1 << 40 | (terminal.cursor_col as u64) << 8 | terminal.cursor_style as u64);
+            }
+            if has_images {
+                for col in 0..cells.len() {
+                    if let Some(ic) = terminal.image_store.get_cell(row, col) {
+                        h = mix(h, ic.image_id as u64 | (ic.offset_x as u64) << 32);
+                        h = mix(h, ic.offset_y as u64 | (col as u64) << 32);
+                        if let Some(img) = terminal.image_store.get_image(ic.image_id) {
+                            h = mix(h, img.data.as_ptr() as u64);
+                            h = mix(h, (img.width as u64) << 32 | img.height as u64);
+                            h = mix(h, img.data.len() as u64);
+                            if let Some(p) = &img.placement {
+                                h = mix(h, (p.cell_rows as u64) << 32 | p.cell_cols as u64);
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(e) = &extra {
+                h = mix(h, e.get(row).copied().unwrap_or(0) as u64 + 0x200);
+            }
+            if row < ind_rows { h = mix(h, ind_hash); }
+            // Edge rows may carry pane-border pixels that interior rows don't.
+            if row == 0 || row + 1 == nrows { h = mix(h, 0xed9e + row.min(1) as u64); }
+            dirty.push(old_hashes.get(row) != Some(&h));
+            new_hashes.push(h);
+        }
+
+        for (row, cells) in visible.iter().enumerate() {
+            if !dirty[row] { continue; }
+            let url_ranges: Vec<(usize, usize)> = if cmd_held {
                 let line: String = cells.iter().map(|c| c.c).collect();
                 crate::tools::url_detect::detect_urls(&line)
                     .into_iter()
                     .map(|(start, end, _)| (start, end))
                     .collect()
-            }).collect()
-        } else {
-            Vec::new()
-        };
+            } else {
+                Vec::new()
+            };
+            self.render_row(
+                terminal, row, cells, buffer, buf_width, buf_height, rect,
+                show_cursor, images_visible, &url_ranges,
+            );
+        }
 
-        for (row, cells) in visible.iter().enumerate() {
-            for (col, cell) in cells.iter().enumerate() {
-                let x0 = rect.x + col * cw;
+        // Rows that existed last frame but are gone now (short scrollback view):
+        // clear their bands, as the old whole-frame fill did.
+        if old_hashes.len() > nrows {
+            let bg_px = pack(self.theme.bg.0, self.theme.bg.1, self.theme.bg.2);
+            let x1 = (rect.x + rect.width).min(buf_width);
+            for row in nrows..old_hashes.len() {
                 let y0 = rect.y + row * ch;
-                if x0 + cw > rect.x + rect.width || y0 + ch > rect.y + rect.height { continue; }
-                if x0 + cw > buf_width || y0 + ch > buf_height { continue; }
+                if y0 + ch > rect.y + rect.height || y0 + ch > buf_height || x1 <= rect.x { continue; }
+                for cy in 0..ch {
+                    let o = (y0 + cy) * buf_width;
+                    buffer[o + rect.x..o + x1].fill(bg_px);
+                }
+            }
+        }
 
-                // Kitty graphics: if this cell is covered by a placed image,
-                // blit the corresponding slice of pixels and skip normal
-                // glyph/background rendering for it entirely — mirrors how
-                // real terminals leave blanks in the text grid under an
-                // image placement.
-                if images_visible {
-                    if let Some(ic) = terminal.image_store.get_cell(row, col) {
-                        if let Some(img) = terminal.image_store.get_image(ic.image_id) {
-                            blit_image_cell(buffer, buf_width, buf_height, img, ic, x0, y0, cw, ch);
+        // Scrollback indicator: repaint whenever any row under it was repainted
+        if let Some(indicator) = indicator {
+            if dirty.iter().take(ind_rows).any(|d| *d) {
+                let ix = rect.x + rect.width.saturating_sub(indicator.len() * cw + 8);
+                let iy = rect.y + 4;
+                let ind_bg = pack(40, 40, 60);
+                for y in iy..iy + ch + 4 {
+                    for x in ix.saturating_sub(4)..ix + indicator.len() * cw + 4 {
+                        if x < buf_width && y < buf_height {
+                            let idx = y * buf_width + x;
+                            if idx < buffer.len() { buffer[idx] = ind_bg; }
                         }
-                        continue;
                     }
                 }
+                self.draw_char_seq(buffer, buf_width, buf_height, &indicator, ix, iy + 2, (200, 200, 255));
+            }
+        }
 
-                let (mut fg, mut bg) = (
-                    self.resolve(cell.fg, true),
-                    self.resolve(cell.bg, false),
+        if key != NO_CACHE {
+            self.pane_rows.insert(key, new_hashes);
+        }
+        self.dirty_rows = dirty;
+    }
+
+    /// Repaint a single terminal row: clear its band to the theme bg, then
+    /// draw every cell (glyphs through the pre-blended tile cache).
+    fn render_row(
+        &mut self,
+        terminal: &Terminal,
+        row: usize,
+        cells: &[Cell],
+        buffer: &mut [u32],
+        buf_width: usize,
+        buf_height: usize,
+        rect: PaneRect,
+        show_cursor: bool,
+        images_visible: bool,
+        url_ranges: &[(usize, usize)],
+    ) {
+        let cw = self.font.cell_width;
+        let ch = self.font.cell_height;
+        let y0 = rect.y + row * ch;
+        if y0 + ch > rect.y + rect.height || y0 + ch > buf_height { return; }
+
+        // Row band background (replaces the old whole-frame buffer.fill).
+        let theme_bg_px = pack(self.theme.bg.0, self.theme.bg.1, self.theme.bg.2);
+        let bx1 = (rect.x + cells.len() * cw).min(rect.x + rect.width).min(buf_width);
+        if bx1 > rect.x {
+            for cy in 0..ch {
+                let o = (y0 + cy) * buf_width;
+                buffer[o + rect.x..o + bx1].fill(theme_bg_px);
+            }
+        }
+
+        for (col, cell) in cells.iter().enumerate() {
+            let x0 = rect.x + col * cw;
+            if x0 + cw > rect.x + rect.width { continue; }
+            if x0 + cw > buf_width { continue; }
+
+            // Kitty graphics: if this cell is covered by a placed image,
+            // blit the corresponding slice of pixels and skip normal
+            // glyph/background rendering for it entirely — mirrors how
+            // real terminals leave blanks in the text grid under an
+            // image placement.
+            if images_visible {
+                if let Some(ic) = terminal.image_store.get_cell(row, col) {
+                    if let Some(img) = terminal.image_store.get_image(ic.image_id) {
+                        blit_image_cell(buffer, buf_width, buf_height, img, ic, x0, y0, cw, ch);
+                    }
+                    continue;
+                }
+            }
+
+            let (mut fg, mut bg) = (
+                self.resolve(cell.fg, true),
+                self.resolve(cell.bg, false),
+            );
+            if cell.attrs.reverse { std::mem::swap(&mut fg, &mut bg); }
+            if cell.attrs.dim {
+                fg = (fg.0 / 2, fg.1 / 2, fg.2 / 2);
+            }
+
+            // Skip wide-char continuation placeholder
+            if cell.c == '\0' { continue; }
+
+            let is_cursor = show_cursor
+                && row == terminal.cursor_row
+                && col == terminal.cursor_col;
+
+            let has_glyph = cell.c != ' ' && !cell.attrs.hidden;
+            let wide = has_glyph && font::is_wide(cell.c);
+
+            if has_glyph && !wide && !is_cursor {
+                // Fast path: one pre-blended (glyph, fg, bg) tile, copied row-wise.
+                let under = if cell.bg != Color::Default { bg } else { self.theme.bg };
+                let fg_px = pack(fg.0, fg.1, fg.2);
+                let bg_px = pack(under.0, under.1, under.2);
+                let tkey = (cell.c, fg_px, bg_px);
+                if !self.tiles.promote(tkey) {
+                    let tile = build_tile(self.font.rasterize(cell.c), cw, ch, fg, fg_px, bg_px);
+                    self.tiles.insert(tkey, tile);
+                }
+                blit_tile(buffer, buf_width, x0, y0, cw, ch, self.tiles.get(&tkey));
+            } else {
+                self.draw_cell_slow(
+                    cell, fg, bg, is_cursor, wide, has_glyph, terminal.cursor_style,
+                    buffer, buf_width, x0, y0,
                 );
-                if cell.attrs.reverse { std::mem::swap(&mut fg, &mut bg); }
-                if cell.attrs.dim {
-                    fg = (fg.0 / 2, fg.1 / 2, fg.2 / 2);
-                }
+            }
 
-                // Skip wide-char continuation placeholder
-                if cell.c == '\0' { continue; }
-
-                let is_cursor = show_cursor
-                    && row == terminal.cursor_row
-                    && col == terminal.cursor_col;
-
-                // Determine cursor width (2 cells for wide chars)
-                let cursor_w = if is_cursor {
-                    use unicode_width::UnicodeWidthChar;
-                    cell.c.width().unwrap_or(1).max(1) * cw
-                } else { cw };
-
-                // Background fill
-                if cell.bg != Color::Default || (is_cursor && terminal.cursor_style == crate::terminal::CursorStyle::Block) {
-                    let fill = if is_cursor && terminal.cursor_style == crate::terminal::CursorStyle::Block {
-                        self.theme.cursor
-                    } else { bg };
-                    let px = pack(fill.0, fill.1, fill.2);
-                    let fill_w = if is_cursor { cursor_w } else { cw };
-                    for cy in 0..ch {
-                        let offset = (y0 + cy) * buf_width + x0;
-                        if offset + fill_w <= buffer.len() {
-                            buffer[offset..offset + fill_w].fill(px);
+            // URL: underline + accent color (only when Cmd held)
+            if !url_ranges.is_empty() {
+                let is_url = url_ranges.iter().any(|&(s, e)| col >= s && col < e);
+                if is_url {
+                    // Recolor text to accent/cursor color
+                    let accent = self.theme.cursor;
+                    if cell.c != ' ' && !cell.attrs.hidden {
+                        let wide = font::is_wide(cell.c);
+                        let gw = if wide { cw * 2 } else { cw };
+                        let bitmap = if wide { self.font.rasterize_wide(cell.c) } else { self.font.rasterize(cell.c) };
+                        for cy in 0..ch {
+                            for cx in 0..gw.min(buf_width - x0) {
+                                let coverage = bitmap[cy * gw + cx] as u32;
+                                if coverage > 128 {
+                                    let idx = (y0 + cy) * buf_width + x0 + cx;
+                                    if idx < buffer.len() {
+                                        buffer[idx] = blend(accent, buffer[idx], coverage);
+                                    }
+                                }
+                            }
                         }
                     }
-                }
-
-                // Bar cursor (left 2px)
-                if is_cursor && terminal.cursor_style == crate::terminal::CursorStyle::Bar {
-                    let bar_px = pack(self.theme.cursor.0, self.theme.cursor.1, self.theme.cursor.2);
-                    for cy in 0..ch {
-                        let offset = (y0 + cy) * buf_width + x0;
-                        if offset + 1 < buffer.len() {
-                            buffer[offset] = bar_px;
-                            buffer[offset + 1] = bar_px;
-                        }
-                    }
-                }
-
-                // Underline cursor (bottom 2px, width matches char)
-                if is_cursor && terminal.cursor_style == crate::terminal::CursorStyle::Underline {
-                    let ul_px = pack(self.theme.cursor.0, self.theme.cursor.1, self.theme.cursor.2);
-                    for dy in 0..2usize {
-                        let uy = y0 + ch.saturating_sub(1 + dy);
-                        for cx in 0..cursor_w {
+                    // Underline
+                    let uy = y0 + ch - 2;
+                    if uy < buf_height {
+                        let ul_px = pack(accent.0, accent.1, accent.2);
+                        for cx in 0..cw {
                             let idx = uy * buf_width + x0 + cx;
                             if idx < buffer.len() { buffer[idx] = ul_px; }
                         }
                     }
                 }
+            }
+        }
+    }
 
-                if cell.c != ' ' && !cell.attrs.hidden {
-                    let text_color = if is_cursor && terminal.cursor_style == crate::terminal::CursorStyle::Block {
-                        self.theme.bg
-                    } else { fg };
-                    let fg_px = pack(text_color.0, text_color.1, text_color.2);
-                    let bitmap = self.font.rasterize(cell.c);
-                    for cy in 0..ch {
-                        let row_off = (y0 + cy) * buf_width + x0;
-                        let bmp_off = cy * cw;
-                        for cx in 0..cw {
-                            let coverage = bitmap[bmp_off + cx] as u32;
-                            if coverage == 0 { continue; }
-                            let idx = row_off + cx;
-                            if idx < buffer.len() {
-                                buffer[idx] = if coverage >= 250 { fg_px } else {
-                                    blend(text_color, buffer[idx], coverage)
-                                };
-                            }
-                        }
-                    }
-                }
+    /// Per-pixel blending path: cursor cells, wide glyphs, and cells without
+    /// a glyph (background only). Mirrors the original renderer exactly.
+    fn draw_cell_slow(
+        &mut self,
+        cell: &Cell,
+        fg: Rgb,
+        bg: Rgb,
+        is_cursor: bool,
+        wide: bool,
+        has_glyph: bool,
+        cursor_style: crate::terminal::CursorStyle,
+        buffer: &mut [u32],
+        buf_width: usize,
+        x0: usize,
+        y0: usize,
+    ) {
+        let cw = self.font.cell_width;
+        let ch = self.font.cell_height;
 
-                // URL: underline + accent color (only when Cmd held)
-                if !url_ranges.is_empty() && row < url_ranges.len() {
-                    let is_url = url_ranges[row].iter().any(|&(s, e)| col >= s && col < e);
-                    if is_url {
-                        // Recolor text to accent/cursor color
-                        let accent = self.theme.cursor;
-                        if cell.c != ' ' && !cell.attrs.hidden {
-                            let bitmap = self.font.rasterize(cell.c);
-                            for cy in 0..ch {
-                                for cx in 0..cw {
-                                    let coverage = bitmap[cy * cw + cx] as u32;
-                                    if coverage > 128 {
-                                        let idx = (y0 + cy) * buf_width + x0 + cx;
-                                        if idx < buffer.len() {
-                                            buffer[idx] = blend(accent, buffer[idx], coverage);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        // Underline
-                        let uy = y0 + ch - 2;
-                        if uy < buf_height {
-                            let ul_px = pack(accent.0, accent.1, accent.2);
-                            for cx in 0..cw {
-                                let idx = uy * buf_width + x0 + cx;
-                                if idx < buffer.len() { buffer[idx] = ul_px; }
-                            }
-                        }
-                    }
+        // Determine cursor width (2 cells for wide chars)
+        let cursor_w = if is_cursor {
+            use unicode_width::UnicodeWidthChar;
+            cell.c.width().unwrap_or(1).max(1) * cw
+        } else { cw };
+
+        // Background fill
+        if cell.bg != Color::Default || (is_cursor && cursor_style == crate::terminal::CursorStyle::Block) {
+            let fill = if is_cursor && cursor_style == crate::terminal::CursorStyle::Block {
+                self.theme.cursor
+            } else { bg };
+            let px = pack(fill.0, fill.1, fill.2);
+            let fill_w = if is_cursor { cursor_w } else { cw };
+            for cy in 0..ch {
+                let offset = (y0 + cy) * buf_width + x0;
+                if offset + fill_w <= buffer.len() {
+                    buffer[offset..offset + fill_w].fill(px);
                 }
             }
         }
 
-        // Scrollback indicator
-        if terminal.is_scrolled_back() {
-            let indicator = format!("[{}/{}]", terminal.scroll_offset, terminal.scrollback_len());
-            let ix = rect.x + rect.width.saturating_sub(indicator.len() * cw + 8);
-            let iy = rect.y + 4;
-            let ind_bg = pack(40, 40, 60);
-            for y in iy..iy + ch + 4 {
-                for x in ix.saturating_sub(4)..ix + indicator.len() * cw + 4 {
-                    if x < buf_width && y < buf_height {
-                        let idx = y * buf_width + x;
-                        if idx < buffer.len() { buffer[idx] = ind_bg; }
+        // Bar cursor (left 2px)
+        if is_cursor && cursor_style == crate::terminal::CursorStyle::Bar {
+            let bar_px = pack(self.theme.cursor.0, self.theme.cursor.1, self.theme.cursor.2);
+            for cy in 0..ch {
+                let offset = (y0 + cy) * buf_width + x0;
+                if offset + 1 < buffer.len() {
+                    buffer[offset] = bar_px;
+                    buffer[offset + 1] = bar_px;
+                }
+            }
+        }
+
+        // Underline cursor (bottom 2px, width matches char)
+        if is_cursor && cursor_style == crate::terminal::CursorStyle::Underline {
+            let ul_px = pack(self.theme.cursor.0, self.theme.cursor.1, self.theme.cursor.2);
+            for dy in 0..2usize {
+                let uy = y0 + ch.saturating_sub(1 + dy);
+                for cx in 0..cursor_w {
+                    let idx = uy * buf_width + x0 + cx;
+                    if idx < buffer.len() { buffer[idx] = ul_px; }
+                }
+            }
+        }
+
+        if has_glyph {
+            let text_color = if is_cursor && cursor_style == crate::terminal::CursorStyle::Block {
+                self.theme.bg
+            } else { fg };
+            let fg_px = pack(text_color.0, text_color.1, text_color.2);
+            let gw = if wide { cw * 2 } else { cw };
+            let bitmap = if wide { self.font.rasterize_wide(cell.c) } else { self.font.rasterize(cell.c) };
+            for cy in 0..ch {
+                let row_off = (y0 + cy) * buf_width + x0;
+                let bmp_off = cy * gw;
+                for cx in 0..gw.min(buf_width - x0) {
+                    let coverage = bitmap[bmp_off + cx] as u32;
+                    if coverage == 0 { continue; }
+                    let idx = row_off + cx;
+                    if idx < buffer.len() {
+                        buffer[idx] = if coverage >= 250 { fg_px } else {
+                            blend(text_color, buffer[idx], coverage)
+                        };
                     }
                 }
             }
-            self.draw_char_seq(buffer, buf_width, buf_height, &indicator, ix, iy + 2, (200, 200, 255));
         }
     }
 
@@ -471,7 +958,9 @@ impl Renderer {
         }
     }
 
-    fn render_pane_borders(
+    /// Blend every unfocused pane toward the theme background so the active
+    /// pane stands out. The hovered pane is dimmed half as much.
+    fn dim_unfocused_panes(
         &self,
         layouts: &[(usize, PaneRect, bool)],
         buffer: &mut [u32],
@@ -479,67 +968,168 @@ impl Renderer {
         buf_height: usize,
         hover_pane: Option<usize>,
     ) {
-        let split_color = darken(self.theme.bg, 6);
-        let split_px = pack(split_color.0, split_color.1, split_color.2);
-        let active_border = self.theme.cursor;
-        let active_px = pack(active_border.0, active_border.1, active_border.2);
-        let hover_border = dim(self.theme.cursor, 0.4);
-        let hover_px = pack(hover_border.0, hover_border.1, hover_border.2);
-
+        let bg = [self.theme.bg.0 as i32, self.theme.bg.1 as i32, self.theme.bg.2 as i32];
         for (idx, rect, is_active) in layouts {
-            let is_hover = hover_pane == Some(*idx) && !*is_active;
-            if *is_active {
-                draw_rect_border(buffer, buf_width, buf_height, rect, active_px);
-            } else if is_hover {
-                draw_rect_border(buffer, buf_width, buf_height, rect, hover_px);
-            } else {
-                if rect.x > 0 {
-                    let bx = rect.x - 1;
-                    for y in rect.y..((rect.y + rect.height).min(buf_height)) {
-                        let idx = y * buf_width + bx;
-                        if idx < buffer.len() { buffer[idx] = split_px; }
-                    }
-                }
-                if rect.y > 0 {
-                    let by = rect.y - 1;
-                    let off = by * buf_width + rect.x;
-                    let end = (off + rect.width).min(buffer.len());
-                    if off < buffer.len() { buffer[off..end].fill(split_px); }
+            if *is_active { continue; }
+            let k = if hover_pane == Some(*idx) { UNFOCUSED_DIM * 0.5 } else { UNFOCUSED_DIM };
+            let k = (k.clamp(0.0, 1.0) * 256.0) as i32;
+            let x0 = rect.x.min(buf_width);
+            let x1 = rect.right().min(buf_width);
+            for y in rect.y..rect.bottom().min(buf_height) {
+                let row = &mut buffer[y * buf_width + x0..y * buf_width + x1];
+                for px in row.iter_mut() {
+                    let p = *px;
+                    let r = ((p >> 16) & 0xff) as i32;
+                    let g = ((p >> 8) & 0xff) as i32;
+                    let b = (p & 0xff) as i32;
+                    let r = r + (((bg[0] - r) * k) >> 8);
+                    let g = g + (((bg[1] - g) * k) >> 8);
+                    let b = b + (((bg[2] - b) * k) >> 8);
+                    *px = (r as u32) << 16 | (g as u32) << 8 | b as u32;
                 }
             }
         }
     }
 
-    fn render_block_indicators(
+    /// Ghostty-style 1px dividers: muted by default, tinted with the cursor
+    /// color where they touch the active pane, and a 3px highlight while
+    /// hovered or dragged.
+    fn render_pane_borders(
         &self,
-        terminal: &Terminal,
-        blocks: &crate::tools::blocks::BlockManager,
+        layouts: &[(usize, PaneRect, bool)],
+        borders: &[SplitBorder],
+        buffer: &mut [u32],
+        buf_width: usize,
+        buf_height: usize,
+        ui: &SplitUiState,
+    ) {
+        let muted = lighten(self.theme.bg, DIVIDER_LIGHTEN);
+        let muted_px = pack(muted.0, muted.1, muted.2);
+        let tint_px = blend(self.theme.cursor, muted_px, 153); // cursor @ 60%
+        let hot = self.theme.cursor;
+        let hot_px = pack(hot.0, hot.1, hot.2);
+        let active = layouts.iter().find(|l| l.2).map(|l| l.1);
+
+        for (i, b) in borders.iter().enumerate() {
+            let hot_border = match ui.dragging_border {
+                Some(d) => d == i,
+                None => ui.hover_border == Some(i),
+            };
+            let horizontal = b.dir == SplitDir::Horizontal;
+            let (span0, span1) = if horizontal {
+                (b.area.y, b.area.bottom())
+            } else {
+                (b.area.x, b.area.right())
+            };
+            // Part of the divider that touches the active pane.
+            let tinted = active.and_then(|a| {
+                let (touches, a0, a1) = if horizontal {
+                    (a.right() == b.pos || a.x == b.pos + BORDER, a.y, a.bottom())
+                } else {
+                    (a.bottom() == b.pos || a.y == b.pos + BORDER, a.x, a.right())
+                };
+                let (s, e) = (a0.max(span0), a1.min(span1));
+                (touches && s < e).then_some((s, e))
+            });
+            // Pixel at (position along the divider, offset across it).
+            let at = |t: usize, off: isize| -> Option<usize> {
+                let across = b.pos.checked_add_signed(off)?;
+                let (x, y) = if horizontal { (across, t) } else { (t, across) };
+                (x < buf_width && y < buf_height).then(|| y * buf_width + x)
+            };
+            for t in span0..span1 {
+                let px = match tinted {
+                    Some((s, e)) if t >= s && t < e => tint_px,
+                    _ => muted_px,
+                };
+                if let Some(i) = at(t, 0) { buffer[i] = px; }
+                if hot_border {
+                    if let Some(i) = at(t, 0) { buffer[i] = hot_px; }
+                    for off in [-1isize, 1] {
+                        if let Some(i) = at(t, off) {
+                            buffer[i] = blend(hot, buffer[i], 120);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Small "ZOOM" tag in the bottom-right corner of a zoomed pane.
+    fn draw_zoom_badge(&mut self, buffer: &mut [u32], buf_width: usize, buf_height: usize, rect: PaneRect) {
+        let cw = self.font.cell_width;
+        let ch = self.font.cell_height;
+        let label = "ZOOM";
+        let bw = label.len() * cw + 12;
+        let bh = ch + 4;
+        if rect.width < bw + 8 || rect.height < bh + 8 { return; }
+        let x = rect.right() - bw - 6;
+        let y = rect.bottom() - bh - 6;
+        let c = self.theme.cursor;
+        let badge_px = blend(c, pack(self.theme.bg.0, self.theme.bg.1, self.theme.bg.2), 200);
+        for yy in y..(y + bh).min(buf_height) {
+            let o = yy * buf_width;
+            if o + x + bw <= buffer.len() { buffer[o + x..o + x + bw].fill(badge_px); }
+        }
+        self.draw_char_seq(buffer, buf_width, buf_height, label, x + 6, y + 2, self.theme.bg);
+    }
+
+    /// Per visible row: 0 = no block, 1/2 = ok command/output line,
+    /// 3/4 = failed (exit != 0) command/output line, 5 = running block.
+    fn block_row_states(&self, terminal: &Terminal, blocks: &crate::tools::blocks::BlockManager) -> Vec<u8> {
+        let visible_len = terminal.visible_rows().len();
+        let scroll_top = terminal.scrollback.len().saturating_sub(terminal.scroll_offset);
+        (0..visible_len).map(|row| {
+            let abs_line = scroll_top + row;
+            match blocks.block_at_line(abs_line) {
+                Some((_, blk)) => {
+                    let is_cmd = abs_line >= blk.command_line && abs_line < blk.output_start;
+                    if blk.running {
+                        5
+                    } else if blk.exit_code.map_or(false, |c| c != 0) {
+                        if is_cmd { 3 } else { 4 }
+                    } else if is_cmd { 1 } else { 2 }
+                }
+                None => 0,
+            }
+        }).collect()
+    }
+
+    /// Warp-style command block indicators (left-side bar), drawn only on
+    /// rows that were just repainted (the rest still carry their bar).
+    fn draw_block_indicators(
+        &self,
+        states: &[u8],
+        dirty: &[bool],
         buffer: &mut [u32],
         buf_width: usize,
         rect: PaneRect,
     ) {
         let ch = self.font.cell_height;
-        let visible = terminal.visible_rows();
-        let scroll_top = terminal.scrollback.len().saturating_sub(terminal.scroll_offset);
-
         let bar_w = 3;
         let bar_x = rect.x + 2;
         let accent = self.theme.cursor;
         let accent_px = pack(accent.0, accent.1, accent.2);
         let dim_accent = dim(accent, 0.3);
         let dim_px = pack(dim_accent.0, dim_accent.1, dim_accent.2);
+        let fail = (230u8, 70u8, 70u8);
+        let fail_px = pack(fail.0, fail.1, fail.2);
+        let dim_fail = dim(fail, 0.45);
+        let dim_fail_px = pack(dim_fail.0, dim_fail.1, dim_fail.2);
 
-        for (row, _) in visible.iter().enumerate() {
-            let abs_line = scroll_top + row;
-            if let Some((_, blk)) = blocks.block_at_line(abs_line) {
-                let is_cmd_line = abs_line == blk.output_start.saturating_sub(1);
-                let px = if is_cmd_line { accent_px } else { dim_px };
-                let y0 = rect.y + row * ch;
-                for y in y0..(y0 + ch).min(rect.y + rect.height) {
-                    for dx in 0..bar_w {
-                        let idx = y * buf_width + bar_x + dx;
-                        if idx < buffer.len() { buffer[idx] = px; }
-                    }
+        for (row, state) in states.iter().enumerate() {
+            if *state == 0 || !dirty.get(row).copied().unwrap_or(true) { continue; }
+            let px = match *state {
+                1 => accent_px,
+                3 => fail_px,
+                4 => dim_fail_px,
+                _ => dim_px,
+            };
+            let y0 = rect.y + row * ch;
+            for y in y0..(y0 + ch).min(rect.y + rect.height) {
+                for dx in 0..bar_w {
+                    let idx = y * buf_width + bar_x + dx;
+                    if idx < buffer.len() { buffer[idx] = px; }
                 }
             }
         }
@@ -605,6 +1195,7 @@ impl Renderer {
 
     pub fn set_theme(&mut self, theme: Theme) {
         self.theme = theme;
+        self.invalidate();
     }
 
     pub fn render_overlay(
@@ -676,45 +1267,7 @@ impl Renderer {
     }
 }
 
-fn draw_rect_border(
-    buffer: &mut [u32],
-    buf_width: usize,
-    buf_height: usize,
-    rect: &PaneRect,
-    px: u32,
-) {
-    // Draw border INSIDE the pane rect (so it's never clipped)
-    let x1 = rect.x;
-    let y1 = rect.y;
-    let x2 = (rect.x + rect.width).min(buf_width).saturating_sub(1);
-    let y2 = (rect.y + rect.height).min(buf_height).saturating_sub(1);
-
-    // Top edge
-    for x in x1..=x2.min(buf_width.saturating_sub(1)) {
-        let idx = y1 * buf_width + x;
-        if idx < buffer.len() { buffer[idx] = px; }
-    }
-    // Bottom edge
-    if y2 < buf_height {
-        for x in x1..=x2.min(buf_width.saturating_sub(1)) {
-            let idx = y2 * buf_width + x;
-            if idx < buffer.len() { buffer[idx] = px; }
-        }
-    }
-    // Left + Right edges
-    for y in y1..=y2.min(buf_height.saturating_sub(1)) {
-        if x1 < buf_width {
-            let idx = y * buf_width + x1;
-            if idx < buffer.len() { buffer[idx] = px; }
-        }
-        if x2 < buf_width {
-            let idx = y * buf_width + x2;
-            if idx < buffer.len() { buffer[idx] = px; }
-        }
-    }
-}
-
-use crate::ui::{pack, pack_rgb, darken, dim};
+use crate::ui::{pack, pack_rgb, darken, dim, lighten};
 
 /// Blit the slice of `img` that belongs in one terminal cell (as identified
 /// by `ic.offset_x`/`offset_y`, the cell's position within the image's
@@ -804,4 +1357,256 @@ fn truncate_str(s: &str, max_len: usize) -> &str {
     let mut end = max_len;
     while end > 0 && !s.is_char_boundary(end) { end -= 1; }
     &s[..end]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::terminal::{Attrs, CursorStyle};
+
+    const COLS: usize = 200;
+    const ROWS: usize = 60;
+
+    fn test_renderer() -> Renderer {
+        let path = crate::config::find_font_path();
+        Renderer::new(&path, 28.0, Theme::catppuccin_mocha())
+    }
+
+    /// Deterministic pseudo-random "program output" for row `seed`.
+    fn fill_row(cells: &mut [Cell], seed: usize) {
+        let mut x = (seed as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+        for (i, cell) in cells.iter_mut().enumerate() {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            let r = (x >> 8) as u32;
+            cell.c = if i % 9 == 0 { ' ' } else { (b'!' + (r % 90) as u8) as char };
+            // Realistic palette use: a handful of distinct colors, not noise.
+            cell.fg = match r % 6 {
+                0 | 1 => Color::Default,
+                2 => Color::Indexed(((r >> 4) % 8) as u8 + 1),
+                3 => Color::Rgb(200, 120 + ((r >> 8) % 3) as u8 * 40, 90),
+                _ => Color::Indexed(2),
+            };
+            cell.bg = if r % 23 == 0 { Color::Indexed(4) } else { Color::Default };
+            cell.attrs = Attrs { bold: r % 7 == 0, reverse: r % 31 == 0, ..Attrs::default() };
+        }
+    }
+
+    fn make_terminal() -> Terminal {
+        let mut t = Terminal::new(COLS, ROWS);
+        for (r, row) in t.grid.iter_mut().enumerate() {
+            fill_row(row, r);
+        }
+        t.cursor_row = ROWS - 1;
+        t.cursor_col = 5;
+        t
+    }
+
+    fn rect(r: &Renderer) -> (PaneRect, usize, usize) {
+        let w = COLS * r.cell_width();
+        let h = ROWS * r.cell_height();
+        (PaneRect { x: 0, y: 0, width: w, height: h }, w, h)
+    }
+
+    /// Render `t` the way a fresh renderer would (every row, empty cache).
+    fn render_fresh(r: &mut Renderer, t: &Terminal, cmd_held: bool, start: Instant) -> Vec<u32> {
+        r.start_time = start;
+        let (rc, w, h) = rect(&r);
+        let bg = pack(r.theme.bg.0, r.theme.bg.1, r.theme.bg.2);
+        let mut buf = vec![bg; w * h];
+        r.cur_pane = NO_CACHE;
+        r.full_frame = true;
+        r.render_pane_inner(t, &mut buf, w, h, rc, true, cmd_held);
+        buf
+    }
+
+    #[test]
+    fn tile_cache_is_bounded_and_promotes() {
+        let mut c = TileCache::default();
+        for i in 0..10_000u32 {
+            c.insert(('a', i, 0), vec![i; 4].into_boxed_slice());
+            assert!(c.cur.len() + c.old.len() <= TILE_CACHE_CAP);
+        }
+        // Recent entries survive; a hit in the old generation is promoted.
+        assert!(c.promote(('a', 9_999, 0)));
+        assert!(!c.promote(('a', 0, 0)));
+        let old_key = *c.old.keys().next().unwrap();
+        assert!(c.promote(old_key));
+        assert_eq!(c.get(&old_key).len(), 4);
+    }
+
+    /// Damage-tracked rendering must be pixel-identical to a full repaint,
+    /// across edits, cursor movement/styles, scrolling and scrollback view.
+    #[test]
+    fn damage_tracking_matches_full_render() {
+        let mut r = test_renderer();
+        let (rc, w, h) = rect(&r);
+        let bg = pack(r.theme.bg.0, r.theme.bg.1, r.theme.bg.2);
+        let mut back = vec![bg; w * h];
+        let mut t = make_terminal();
+
+        let mut counter = 0usize;
+        let n = &mut counter;
+        let mut fr = test_renderer();
+        let fr = &mut fr;
+        let mut step = |r: &mut Renderer, back: &mut Vec<u32>, t: &Terminal, first: bool, cmd: bool| {
+            *n += 1;
+            r.cur_pane = 0;
+            r.full_frame = first;
+            if first { r.pane_rows.clear(); }
+            r.render_pane_inner(t, back, w, h, rc, true, cmd);
+            let fresh = render_fresh(fr, t, cmd, r.start_time);
+            let bad = back.iter().zip(&fresh).position(|(a, b)| a != b);
+            if let Some(b) = bad { eprintln!("ch={} cw={} row={} a={:08x} b={:08x}", r.cell_height(), r.cell_width(), b / w / r.cell_height(), back[b], fresh[b]); }
+            assert!(bad.is_none(), "diverged at pixel {:?} (x={}, y={}) in step {}", bad, bad.unwrap() % w, bad.unwrap() / w, *n);
+        };
+
+        step(&mut r, &mut back, &t, true, false);
+        // idle frame: nothing changes, nothing repainted
+        step(&mut r, &mut back, &t, false, false);
+        assert!(r.dirty_rows.iter().all(|d| !d));
+        // edit one row
+        fill_row(&mut t.grid[10], 999);
+        step(&mut r, &mut back, &t, false, false);
+        assert_eq!(r.dirty_rows.iter().filter(|d| **d).count(), 1);
+        // cursor moves: only old and new cursor rows repaint
+        t.cursor_row = 20;
+        t.cursor_col = 7;
+        step(&mut r, &mut back, &t, false, false);
+        assert_eq!(r.dirty_rows.iter().filter(|d| **d).count(), 2);
+        // cursor styles
+        for style in [CursorStyle::Bar, CursorStyle::Underline, CursorStyle::Block] {
+            t.cursor_style = style;
+            t.cursor_col = 8;
+            step(&mut r, &mut back, &t, false, false);
+        }
+        // wide char under the cursor
+        t.grid[20][8].c = '\u{4e2d}';
+        t.grid[20][9].c = '\0';
+        step(&mut r, &mut back, &t, false, false);
+        // scroll by one line (new text at bottom)
+        let first = t.grid.remove(0);
+        t.scrollback.push_back(first);
+        let mut last = vec![Cell::default(); COLS];
+        fill_row(&mut last, 12345);
+        t.grid.push(last);
+        step(&mut r, &mut back, &t, false, false);
+        // Cmd held (URL underline) then released
+        t.grid[3][0].c = 'h';
+        for (i, c) in "http://example.com/x".chars().enumerate() { t.grid[3][i].c = c; }
+        step(&mut r, &mut back, &t, true, true);
+        step(&mut r, &mut back, &t, true, false);
+        // scrollback view + indicator
+        t.scroll_offset = 4;
+        step(&mut r, &mut back, &t, false, false);
+        t.scroll_offset = 9;
+        step(&mut r, &mut back, &t, false, false);
+        t.scroll_offset = 0;
+        step(&mut r, &mut back, &t, false, false);
+    }
+
+    /// Reference implementation of the pre-optimisation renderer for the
+    /// common (non-cursor, narrow glyph) cells: per-pixel alpha blending.
+    fn legacy_render(r: &mut Renderer, t: &Terminal, buffer: &mut [u32], w: usize) {
+        let (cw, ch) = (r.font.cell_width, r.font.cell_height);
+        let bg = pack(r.theme.bg.0, r.theme.bg.1, r.theme.bg.2);
+        buffer.fill(bg);
+        for (row, cells) in t.grid.iter().enumerate() {
+            for (col, cell) in cells.iter().enumerate() {
+                let (x0, y0) = (col * cw, row * ch);
+                let (mut fg, mut cbg) = (r.resolve(cell.fg, true), r.resolve(cell.bg, false));
+                if cell.attrs.reverse { std::mem::swap(&mut fg, &mut cbg); }
+                if cell.bg != Color::Default {
+                    let px = pack(cbg.0, cbg.1, cbg.2);
+                    for cy in 0..ch {
+                        let o = (y0 + cy) * w + x0;
+                        buffer[o..o + cw].fill(px);
+                    }
+                }
+                if cell.c != ' ' {
+                    let fg_px = pack(fg.0, fg.1, fg.2);
+                    let bitmap = r.font.rasterize(cell.c);
+                    for cy in 0..ch {
+                        for cx in 0..cw {
+                            let cov = bitmap[cy * cw + cx] as u32;
+                            if cov == 0 { continue; }
+                            let idx = (y0 + cy) * w + x0 + cx;
+                            buffer[idx] = if cov >= 250 { fg_px } else { blend(fg, buffer[idx], cov) };
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn time_ms(frames: usize, mut f: impl FnMut(usize)) -> f64 {
+        let t0 = Instant::now();
+        for i in 0..frames { f(i); }
+        t0.elapsed().as_secs_f64() * 1000.0 / frames as f64
+    }
+
+    /// `cargo test --release --bin rift -- --ignored --nocapture bench_render`
+    #[test]
+    #[ignore]
+    fn bench_render() {
+        const N: usize = 200;
+        let mut r = test_renderer();
+        let (rc, w, h) = rect(&r);
+        let bg = pack(r.theme.bg.0, r.theme.bg.1, r.theme.bg.2);
+        let mut t = make_terminal();
+        let mut out = vec![bg; w * h]; // stands in for the softbuffer buffer
+        let mut back = vec![bg; w * h];
+        println!("grid {COLS}x{ROWS}, cell {}x{}, buffer {w}x{h}", r.cell_width(), r.cell_height());
+
+        let legacy = time_ms(N, |_| legacy_render(&mut r, &t, &mut out, w));
+
+        // Full repaint every frame (resize / theme change / worst case).
+        let full = time_ms(N, |_| {
+            r.cur_pane = 0;
+            r.full_frame = true;
+            r.pane_rows.clear();
+            r.render_pane_inner(&t, &mut back, w, h, rc, true, false);
+            out.copy_from_slice(&back);
+        });
+
+        // Nothing changed (e.g. overlay-only frame).
+        r.full_frame = false;
+        let idle = time_ms(N, |_| {
+            r.cur_pane = 0;
+            r.render_pane_inner(&t, &mut back, w, h, rc, true, false);
+            out.copy_from_slice(&back);
+        });
+
+        // Typing: one row edited + cursor moves along it.
+        let typing = time_ms(N, |i| {
+            t.grid[ROWS - 1][5 + i % 100].c = (b'a' + (i % 26) as u8) as char;
+            t.cursor_col = 6 + i % 100;
+            r.cur_pane = 0;
+            r.render_pane_inner(&t, &mut back, w, h, rc, true, false);
+            out.copy_from_slice(&back);
+        });
+
+        // `cat bigfile`: every frame scrolls ~3 lines of new text in.
+        let mut seed = 1000;
+        let cat = time_ms(N, |_| {
+            for _ in 0..3 {
+                let mut line = t.grid.remove(0);
+                fill_row(&mut line, seed);
+                seed += 1;
+                t.grid.push(line);
+            }
+            r.cur_pane = 0;
+            r.render_pane_inner(&t, &mut back, w, h, rc, true, false);
+            out.copy_from_slice(&back);
+        });
+
+        let copy = time_ms(N, |_| out.copy_from_slice(&back));
+        println!("legacy full frame (fill + per-pixel blend) : {legacy:8.3} ms");
+        println!("new    full repaint (tile cache) + memcpy  : {full:8.3} ms");
+        println!("new    idle (hash only) + memcpy           : {idle:8.3} ms");
+        println!("new    keystroke (1 row + cursor) + memcpy : {typing:8.3} ms");
+        println!("new    cat flood (3 lines/frame) + memcpy  : {cat:8.3} ms");
+        println!("       (memcpy of back buffer alone        : {copy:8.3} ms)");
+    }
 }
