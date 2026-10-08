@@ -1,0 +1,231 @@
+src/screenshot/frame.rs
+  46dcc8959d90ad53 1-321
+src/main.rs
+  46dcc8959d90ad53 25,32-35,91-92
+src/tools/hud.rs
+  46dcc8959d90ad53 78-93,460-468
+docs/screenshots/README.md
+  46dcc8959d90ad53 4-6,8-39,42,44-59
+src/tools/session.rs
+  46dcc8959d90ad53 54
+src/screenshot/page.rs
+  46dcc8959d90ad53 1-183
+src/network/browser/chrome.rs
+  46dcc8959d90ad53 327-336,349-368
+src/renderer/mod.rs
+  46dcc8959d90ad53 840,918,1137,1558,1650-1677
+docs/index.html
+  46dcc8959d90ad53 67,359
+src/window/manager.rs
+  46dcc8959d90ad53 18-19,34,40-60,85,176,186,195,214-217,297
+src/window/pane.rs
+  46dcc8959d90ad53 10-13,21,29,37,88-115,122
+src/ai/chat/mod.rs
+  46dcc8959d90ad53 169-174
+src/screenshot/mod.rs
+  46dcc8959d90ad53 1-138,140-152,154-157
+src/tools/command_palette.rs
+  46dcc8959d90ad53 572,864
+src/screenshot/shell.rs
+  46dcc8959d90ad53 1-181
+src/ai/inline/ui.rs
+  46dcc8959d90ad53 18-23,25-35,37,40-42,44,48,241-244,254-255,310-311,313-314,316-321,326-329,334-335
+src/tools/blocks.rs
+  46dcc8959d90ad53 87-92
+src/screenshot/scenes.rs
+  46dcc8959d90ad53 1-392,394-796
+src/ai/chat/stream.rs
+  46dcc8959d90ad53 67-73
+src/renderer/gpu.rs
+  46dcc8959d90ad53 302-475
+src/screenshot/png.rs
+  46dcc8959d90ad53 1-77,123-133
+src/ai/chat/render.rs
+  46dcc8959d90ad53 602-612,625
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.8-ntes.9",
+  "base_commit_sha": "b4d22351869c2fdd47a1af24f8aa365bf067a457",
+  "prompts": {
+    "46dcc8959d90ad53": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6fa63a6e-29eb-4ea1-9d68-d297cc1526ef",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "nongjiawu",
+      "messages": [],
+      "total_additions": 18158,
+      "total_deletions": 1832,
+      "accepted_lines": 17957,
+      "overriden_lines": 1,
+      "per_file_stats": {
+        "docs/screenshots/splits.png": {
+          "additions": 1348,
+          "deletions": 138,
+          "accepted_lines": 1348
+        },
+        "docs/screenshots/hud.png": {
+          "additions": 1186,
+          "deletions": 145,
+          "accepted_lines": 1186
+        },
+        "src/window/pane.rs": {
+          "additions": 36,
+          "deletions": 11,
+          "accepted_lines": 36
+        },
+        "src/screenshot/png.rs": {
+          "additions": 88,
+          "accepted_lines": 88
+        },
+        "src/tools/hud.rs": {
+          "additions": 25,
+          "deletions": 2,
+          "accepted_lines": 25
+        },
+        "docs/screenshots/browser.png": {
+          "additions": 1271,
+          "deletions": 122,
+          "accepted_lines": 1271
+        },
+        "docs/screenshots/effects-crt.png": {
+          "additions": 3235,
+          "deletions": 143,
+          "accepted_lines": 3235
+        },
+        "src/ai/chat/mod.rs": {
+          "additions": 6,
+          "accepted_lines": 6
+        },
+        "src/tools/session.rs": {
+          "additions": 1,
+          "deletions": 1,
+          "accepted_lines": 1
+        },
+        "docs/screenshots/ai-chat.png": {
+          "additions": 1312,
+          "deletions": 139,
+          "accepted_lines": 1312
+        },
+        "src/screenshot/mod.rs": {
+          "additions": 159,
+          "deletions": 4,
+          "accepted_lines": 155
+        },
+        "src/screenshot/shell.rs": {
+          "additions": 182,
+          "deletions": 1,
+          "accepted_lines": 181
+        },
+        "docs/screenshots/palette.png": {
+          "additions": 1127,
+          "deletions": 127,
+          "accepted_lines": 1127
+        },
+        "src/tools/command_palette.rs": {
+          "additions": 2,
+          "deletions": 2,
+          "accepted_lines": 2
+        },
+        "src/network/browser/chrome.rs": {
+          "additions": 33,
+          "accepted_lines": 33
+        },
+        "docs/screenshots/fix-suggestion.png": {
+          "additions": 1137,
+          "deletions": 113,
+          "accepted_lines": 1137
+        },
+        "docs/screenshots/blocks.png": {
+          "additions": 1072,
+          "deletions": 154,
+          "accepted_lines": 1072
+        },
+        "docs/screenshots/nl-command.png": {
+          "additions": 1094,
+          "deletions": 128,
+          "accepted_lines": 1094
+        },
+        "docs/screenshots/hero.png": {
+          "additions": 1174,
+          "deletions": 111,
+          "accepted_lines": 1174
+        },
+        "src/renderer/mod.rs": {
+          "additions": 32,
+          "deletions": 4,
+          "accepted_lines": 32
+        },
+        "docs/screenshots/README.md": {
+          "additions": 53,
+          "deletions": 25,
+          "accepted_lines": 53
+        },
+        "docs/screenshots/preview-accept.png": {
+          "additions": 821,
+          "deletions": 111,
+          "accepted_lines": 821
+        },
+        "src/ai/chat/stream.rs": {
+          "additions": 7,
+          "accepted_lines": 7
+        },
+        "src/screenshot/frame.rs": {
+          "additions": 321,
+          "accepted_lines": 321
+        },
+        "docs/index.html": {
+          "additions": 2,
+          "deletions": 2,
+          "accepted_lines": 2
+        },
+        "src/tools/blocks.rs": {
+          "additions": 6,
+          "accepted_lines": 6
+        },
+        "src/screenshot/page.rs": {
+          "additions": 190,
+          "deletions": 7,
+          "accepted_lines": 183
+        },
+        "src/screenshot/scenes.rs": {
+          "additions": 983,
+          "deletions": 187,
+          "accepted_lines": 795,
+          "overriden_lines": 1
+        },
+        "src/main.rs": {
+          "additions": 7,
+          "accepted_lines": 7
+        },
+        "src/window/manager.rs": {
+          "additions": 33,
+          "deletions": 7,
+          "accepted_lines": 33
+        },
+        "src/ai/chat/render.rs": {
+          "additions": 12,
+          "deletions": 3,
+          "accepted_lines": 12
+        },
+        "src/renderer/gpu.rs": {
+          "additions": 175,
+          "deletions": 1,
+          "accepted_lines": 174
+        },
+        "src/ai/inline/ui.rs": {
+          "additions": 45,
+          "deletions": 23,
+          "accepted_lines": 45
+        },
+        "docs/screenshots/cmdk.png": {
+          "additions": 983,
+          "deletions": 121,
+          "accepted_lines": 983
+        }
+      }
+    }
+  }
+}
