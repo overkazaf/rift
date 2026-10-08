@@ -5,7 +5,6 @@ use unicode_width::UnicodeWidthChar;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::Ime;
 
-use crate::ai::AiPanelKey;
 use crate::network::{SshDialogKey, WvDialogKey};
 use crate::tools::command_palette::PaletteKey;
 use crate::tools::history::{HistoryAction, HistoryKey};
@@ -48,6 +47,10 @@ fn commit_text(app: &mut App, text: &str) {
     if super::tabs::insert_text(app, text) {
         return;
     }
+    // The Cmd+K ask popover takes IME commits next.
+    if crate::ai::inline::insert_text(app, text) {
+        return;
+    }
     // Modal overlays that sit above everything and take no free text: drop input.
     if app.exec_preview.visible
         || app.timewarp_browser.active
@@ -88,10 +91,8 @@ fn commit_text(app: &mut App, text: &str) {
         for c in text.chars() {
             app.regex_playground.handle_key(RegexKey::Char(c));
         }
-    } else if app.ai_panel.visible {
-        for c in text.chars() {
-            let _ = app.ai_panel.handle_key(AiPanelKey::Char(c));
-        }
+    } else if app.chat.focused {
+        crate::ai::chat::insert_text(app, text);
     } else if app.history.visible {
         for c in text.chars() {
             if let Some(action) = app.history.handle_key(HistoryKey::Char(c)) {
@@ -176,7 +177,16 @@ pub fn update_cursor_area(
     last_area: &mut Option<(i32, i32, u32, u32)>,
     content_area: PaneRect,
 ) {
-    let (x, y, w, h) = cursor_cell_rect(wm, renderer, content_area);
+    set_cursor_area(window, last_area, cursor_cell_rect(wm, renderer, content_area));
+}
+
+/// Like [`update_cursor_area`] for an explicit pixel rect (x, y, w, h), e.g.
+/// the caret of an overlay text field.
+pub fn set_cursor_area(
+    window: &Window,
+    last_area: &mut Option<(i32, i32, u32, u32)>,
+    (x, y, w, h): (usize, usize, usize, usize),
+) {
     let area = (x as i32, y as i32, w as u32, h as u32);
     if *last_area == Some(area) {
         return;

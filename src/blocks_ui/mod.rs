@@ -39,7 +39,6 @@ const TOAST_TTL: Duration = Duration::from_millis(1800);
 /// Redraw cadence while a block is running (pulsing bar, live duration).
 const ANIM_INTERVAL: Duration = Duration::from_millis(125);
 /// Lines of output sent to the AI.
-const AI_OUTPUT_LINES: usize = 80;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Hover {
@@ -96,7 +95,6 @@ fn modal_open(app: &App) -> bool {
     app.prefs.visible
         || app.welcome.visible
         || app.ssh_dialog.visible
-        || app.ai_panel.visible
         || app.compare_view.visible
         || app.command_palette.visible
         || app.search.visible
@@ -399,43 +397,25 @@ fn copy_output(app: &mut App, pane: usize, block: usize) {
 /// `AiAction::Ask` in `app::overlays`). The single entry point P2's docked
 /// chat will replace.
 pub fn ask_ai_about_block(app: &mut App, pane: usize, block: usize) {
+    use crate::ai::hub::{AskRequest, ContextItem, Intent};
     let Some((info, out)) = block_info(app, pane, block) else { return };
-    let prompt = ai_prompt(&info.command, info.exit_code, info.running, &out);
     let shown = format!(
         "{}{}",
         crate::ui::trunc(&info.command, 48),
         info.exit_code.map_or(String::new(), |c| format!(" (exit {c})")),
     );
-    let ctx = crate::ai::context::TermContext::collect();
-    let rx = app.llm.ask(&prompt, ctx);
-    let panel = &mut app.ai_panel;
-    panel.visible = true;
-    panel.input = shown;
-    panel.response = None;
-    panel.error = None;
-    panel.set_receiver(rx); // also marks the panel as loading
-    app.advisor.clear();
-    app.request_redraw();
-}
-
-/// Prompt text for [`ask_ai_about_block`] (pure; tested).
-pub fn ai_prompt(command: &str, exit_code: Option<i32>, running: bool, output: &str) -> String {
-    let lines: Vec<&str> = output.lines().collect();
-    let skip = lines.len().saturating_sub(AI_OUTPUT_LINES);
-    let tail = lines[skip..].join("\n");
-    let status = if running {
-        "still running".to_string()
-    } else {
-        exit_code.map_or("unknown exit code".to_string(), |c| format!("exit code {c}"))
-    };
-    let omitted = if skip > 0 { format!(" ({skip} earlier lines omitted)") } else { String::new() };
-    format!(
-        "A command in my terminal needs your help.\nCommand: {command}\nResult: {status}\n\
-         Output, last {} lines{omitted}:\n{tail}\n\n\
-         Reply with the single most useful next shell command (for a failure, the fix) on the \
-         first line, then a short explanation on the following lines.",
-        lines.len() - skip,
-    )
+    let failed = info.exit_code.is_some_and(|c| c != 0);
+    let cwd = app.wm.active_tab().pane(pane).and_then(|p| p.terminal.cwd.clone());
+    let req = AskRequest::new("", if failed { Intent::Fix } else { Intent::Explain })
+        .with(ContextItem::Block {
+            command: info.command.clone(),
+            exit_code: info.exit_code,
+            output: out,
+            cwd,
+            running: info.running,
+        })
+        .display(shown);
+    crate::ai::hub::ask(app, req);
 }
 
 /// Text of absolute lines `first..=last` (soft-wrapped rows joined, trailing
@@ -468,18 +448,6 @@ pub fn output_text(t: &Terminal, first: usize, last: usize) -> String {
 mod tests {
     use super::*;
     use crate::terminal::Cell;
-
-    #[test]
-    fn ai_prompt_keeps_last_80_lines() {
-        let out: String = (0..200).map(|i| format!("line{i}\n")).collect();
-        let p = ai_prompt("make", Some(2), false, &out);
-        assert!(p.contains("Command: make"));
-        assert!(p.contains("exit code 2"));
-        assert!(p.contains("line199"));
-        assert!(p.contains("line120"));
-        assert!(!p.contains("line119\n"));
-        assert!(p.contains("120 earlier lines omitted"));
-    }
 
     #[test]
     fn output_text_joins_wrapped_rows_and_trims() {

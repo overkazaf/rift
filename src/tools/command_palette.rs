@@ -441,12 +441,7 @@ impl PaletteAction {
             PaletteAction::Menu(m) => matches!(
                 m,
                 MenuAction::CrtEffect | MenuAction::GlitchEffect | MenuAction::NeonEffect
-                    | MenuAction::MatrixEffect | MenuAction::AmberEffect | MenuAction::HologramEffect
-                    | MenuAction::PixelateEffect | MenuAction::ThermalEffect | MenuAction::RaindropEffect
-                    | MenuAction::VhsEffect | MenuAction::GridEffect | MenuAction::FilmGrainEffect
-                    | MenuAction::InvertEffect | MenuAction::DesaturateEffect | MenuAction::ChromaticEffect
-                    | MenuAction::PulseEffect | MenuAction::SnowEffect | MenuAction::UnderwaterEffect
-                    | MenuAction::NeonOutlineEffect | MenuAction::ScanlineRgbEffect | MenuAction::NoEffect
+                    | MenuAction::MatrixEffect | MenuAction::AmberEffect | MenuAction::HologramEffect | MenuAction::NoEffect
                     | MenuAction::ZoomIn | MenuAction::ZoomOut | MenuAction::ZoomReset
                     | MenuAction::HudToggle | MenuAction::BroadcastToggle | MenuAction::SecretMask
                     | MenuAction::TeachingMode | MenuAction::ObserverMode | MenuAction::AdvisorMode
@@ -1376,6 +1371,9 @@ fn catalog() -> Vec<PaletteItem> {
     v.push(entry("AI Assistant", Ai, s("Shift+A"), Menu(MenuAction::AiAssistant)));
     v.push(entry("Observer Mode", Ai, Some("Ctrl+Shift+V".into()), Menu(MenuAction::ObserverMode)));
     v.push(entry("Advisor Mode", Ai, None, Menu(MenuAction::AdvisorMode)));
+    v.push(entry("Ask AI About This", Ai, if cfg!(target_os = "macos") { s("K") } else { None }, Menu(MenuAction::AskAboutThis)));
+    v.push(entry("Toggle Auto Fix Suggestions", Ai, None, Menu(MenuAction::AutoFixToggle)));
+    v.push(entry("Toggle # Natural Language", Ai, None, Menu(MenuAction::NaturalLanguageToggle)));
 
     // Browser
     let mac = |k: &str| if cfg!(target_os = "macos") { s(k) } else { None };
@@ -1387,27 +1385,13 @@ fn catalog() -> Vec<PaletteItem> {
     v.push(entry("Browser: Close", Browser, mac("W"), Menu(MenuAction::Browser(BrowserCmd::Close))));
 
     // Effects
-    let effects: [(&str, MenuAction, Option<&str>); 21] = [
+    let effects: [(&str, MenuAction, Option<&str>); 7] = [
         ("Effect: CRT", MenuAction::CrtEffect, Some("Ctrl+Shift+1")),
         ("Effect: Glitch", MenuAction::GlitchEffect, Some("Ctrl+Shift+2")),
         ("Effect: Neon Glow", MenuAction::NeonEffect, Some("Ctrl+Shift+3")),
         ("Effect: Matrix Rain", MenuAction::MatrixEffect, Some("Ctrl+Shift+4")),
         ("Effect: Amber", MenuAction::AmberEffect, Some("Ctrl+Shift+5")),
         ("Effect: Hologram", MenuAction::HologramEffect, Some("Ctrl+Shift+6")),
-        ("Effect: Pixelate", MenuAction::PixelateEffect, Some("Ctrl+Shift+7")),
-        ("Effect: Thermal", MenuAction::ThermalEffect, Some("Ctrl+Shift+8")),
-        ("Effect: Raindrop", MenuAction::RaindropEffect, None),
-        ("Effect: VHS Tape", MenuAction::VhsEffect, None),
-        ("Effect: Cyberpunk Grid", MenuAction::GridEffect, None),
-        ("Effect: Film Grain", MenuAction::FilmGrainEffect, None),
-        ("Effect: Invert", MenuAction::InvertEffect, None),
-        ("Effect: Desaturate", MenuAction::DesaturateEffect, None),
-        ("Effect: Chromatic Shift", MenuAction::ChromaticEffect, None),
-        ("Effect: Pulse", MenuAction::PulseEffect, None),
-        ("Effect: Snow", MenuAction::SnowEffect, None),
-        ("Effect: Underwater", MenuAction::UnderwaterEffect, None),
-        ("Effect: Neon Outline", MenuAction::NeonOutlineEffect, None),
-        ("Effect: Scanline RGB", MenuAction::ScanlineRgbEffect, None),
         ("Effect: Off", MenuAction::NoEffect, Some("Ctrl+Shift+0")),
     ];
     for (name, act, sc) in effects {
@@ -1976,18 +1960,15 @@ mod tests {
             | MenuAction::ZoomIn | MenuAction::ZoomOut | MenuAction::ZoomReset | MenuAction::SplitH
             | MenuAction::SplitV | MenuAction::Recording | MenuAction::CrtEffect | MenuAction::GlitchEffect
             | MenuAction::NeonEffect | MenuAction::MatrixEffect | MenuAction::AmberEffect
-            | MenuAction::HologramEffect | MenuAction::PixelateEffect | MenuAction::ThermalEffect
-            | MenuAction::RaindropEffect | MenuAction::VhsEffect | MenuAction::GridEffect
-            | MenuAction::FilmGrainEffect | MenuAction::InvertEffect | MenuAction::DesaturateEffect
-            | MenuAction::ChromaticEffect | MenuAction::PulseEffect | MenuAction::SnowEffect
-            | MenuAction::UnderwaterEffect | MenuAction::NeonOutlineEffect | MenuAction::ScanlineRgbEffect
+            | MenuAction::HologramEffect
             | MenuAction::NoEffect | MenuAction::Preferences | MenuAction::Welcome | MenuAction::WebView
             | MenuAction::Browser(_) | MenuAction::FileManager | MenuAction::GitPanel
             | MenuAction::DockerPanel | MenuAction::CicdPanel | MenuAction::NetworkMonitor
             | MenuAction::ProcessTree | MenuAction::SystemInfo | MenuAction::PortDashboard
             | MenuAction::RegexPlayground | MenuAction::Heatmap | MenuAction::SecretMask
             | MenuAction::AuditLog | MenuAction::TeachingMode | MenuAction::AiAssistant
-            | MenuAction::ObserverMode | MenuAction::AdvisorMode | MenuAction::TimeWarp
+            | MenuAction::ObserverMode | MenuAction::AdvisorMode | MenuAction::AskAboutThis
+            | MenuAction::AutoFixToggle | MenuAction::NaturalLanguageToggle | MenuAction::TimeWarp
             | MenuAction::HudToggle | MenuAction::BroadcastToggle | MenuAction::Find | MenuAction::ClearBuffer
             | MenuAction::CompareOutput | MenuAction::UiGallery | MenuAction::Pane(_) => {}
         }
@@ -1999,13 +1980,11 @@ mod tests {
         let mut expected = vec![
             M::NewTab, M::CloseTab, M::SshConnect, M::ToggleFullScreen, M::ZoomIn, M::ZoomOut, M::ZoomReset,
             M::SplitH, M::SplitV, M::Recording, M::CrtEffect, M::GlitchEffect, M::NeonEffect, M::MatrixEffect,
-            M::AmberEffect, M::HologramEffect, M::PixelateEffect, M::ThermalEffect, M::RaindropEffect,
-            M::VhsEffect, M::GridEffect, M::FilmGrainEffect, M::InvertEffect, M::DesaturateEffect,
-            M::ChromaticEffect, M::PulseEffect, M::SnowEffect, M::UnderwaterEffect, M::NeonOutlineEffect,
-            M::ScanlineRgbEffect, M::NoEffect, M::Preferences, M::Welcome, M::WebView, M::FileManager,
+            M::AmberEffect, M::HologramEffect, M::NoEffect, M::Preferences, M::Welcome, M::WebView, M::FileManager,
             M::GitPanel, M::DockerPanel, M::CicdPanel, M::NetworkMonitor, M::ProcessTree, M::SystemInfo,
             M::PortDashboard, M::RegexPlayground, M::Heatmap, M::SecretMask, M::AuditLog, M::TeachingMode,
-            M::AiAssistant, M::ObserverMode, M::AdvisorMode, M::TimeWarp, M::HudToggle, M::BroadcastToggle,
+            M::AiAssistant, M::ObserverMode, M::AdvisorMode, M::AskAboutThis, M::AutoFixToggle,
+            M::NaturalLanguageToggle, M::TimeWarp, M::HudToggle, M::BroadcastToggle,
             M::Find, M::ClearBuffer, M::CompareOutput, M::UiGallery,
         ];
         for c in [BrowserCmd::Back, BrowserCmd::Forward, BrowserCmd::Reload, BrowserCmd::FocusAddress, BrowserCmd::Close] {

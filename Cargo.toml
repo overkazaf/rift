@@ -20,6 +20,7 @@ gpu = ["wgpu", "pollster", "bytemuck"]
 winit = "0.30"
 softbuffer = "0.4"
 fontdue = "0.9"
+ttf-parser = "0.25"
 vte = "0.13"
 portable-pty = "0.8"
 log = "0.4"

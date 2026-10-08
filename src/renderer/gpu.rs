@@ -1,75 +1,85 @@
-//! wgpu GPU rendering pipeline (Phase 2).
+//! wgpu GPU rendering pipeline (`--features gpu`).
 //!
 //! CPU text rendering (fontdue) produces a pixel buffer, which is uploaded
 //! as a GPU texture. Two render pipelines are available:
 //!   - **blit**: passthrough (no effect)
-//!   - **crt**: CRT post-processing (scanlines, curvature, chromatic aberration)
+//!   - **fx**: one WGSL fragment shader implementing the six Rift effects
+//!     (CRT, Glitch, Neon Glow, Matrix Rain, Amber, Hologram), selected by the
+//!     `effect` uniform. Uniforms: time, resolution, intensity, effect id
+//!     (plus the theme background / accent colours).
 //!
-//! Enable with `cargo build --features gpu`.
+//! While this pipeline is active the CPU `ShaderPipeline` never touches the
+//! frame, so the renderer's damage tracking stays effective.
 
-#![allow(dead_code)]
-
-#[cfg(feature = "gpu")]
 use std::sync::Arc;
-#[cfg(feature = "gpu")]
 use winit::window::Window;
 
-#[cfg(feature = "gpu")]
-use crate::effects::ShaderEffect;
+use crate::effects::ActiveEffect;
 
-// ── Uniform data sent to the CRT shader ──
+// ── Uniform block shared with `FX_WGSL` (`struct Params`, 64 bytes) ──
 
-#[cfg(feature = "gpu")]
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct ShaderUniforms {
-    scanline_intensity: f32,
-    curvature: f32,
-    chromatic_aberration: f32,
-    flicker: f32,
-    vignette: f32,
+struct FxUniforms {
     time: f32,
-    resolution_x: f32,
-    resolution_y: f32,
+    intensity: f32,
+    effect: u32,
+    _pad0: u32,
+    resolution: [f32; 2],
+    _pad1: [f32; 2],
+    /// Theme background, sRGB 0..1 (w unused).
+    bg: [f32; 4],
+    /// Theme accent, sRGB 0..1 (w unused).
+    accent: [f32; 4],
+}
+
+impl FxUniforms {
+    fn new(fx: &ActiveEffect, time: f32, width: u32, height: u32) -> Self {
+        let c = |(r, g, b): (u8, u8, u8)| [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0];
+        Self {
+            time,
+            intensity: fx.intensity.clamp(0.0, 1.0),
+            effect: fx.kind.id(),
+            _pad0: 0,
+            resolution: [width as f32, height as f32],
+            _pad1: [0.0; 2],
+            bg: c(fx.bg),
+            accent: c(fx.accent),
+        }
+    }
 }
 
 // ── GPU Pipeline ──
 
-#[cfg(feature = "gpu")]
 pub struct GpuPipeline {
     device: wgpu::Device,
     queue: wgpu::Queue,
     surface: wgpu::Surface<'static>,
     surface_config: wgpu::SurfaceConfiguration,
 
-    // Two pipelines
     blit_pipeline: wgpu::RenderPipeline,
-    crt_pipeline: wgpu::RenderPipeline,
+    fx_pipeline: wgpu::RenderPipeline,
 
-    // Shared bind group layouts
     blit_bgl: wgpu::BindGroupLayout,
-    crt_bgl: wgpu::BindGroupLayout,
+    fx_bgl: wgpu::BindGroupLayout,
 
-    // Resources
     sampler: wgpu::Sampler,
     pixel_texture: wgpu::Texture,
     pixel_view: wgpu::TextureView,
     uniform_buffer: wgpu::Buffer,
     blit_bind_group: wgpu::BindGroup,
-    crt_bind_group: wgpu::BindGroup,
+    fx_bind_group: wgpu::BindGroup,
 
     width: u32,
     height: u32,
     rgba_buffer: Vec<u8>,
 }
 
-#[cfg(feature = "gpu")]
 impl GpuPipeline {
     pub fn new(window: Arc<Window>) -> Result<Self, String> {
         let size = window.inner_size();
         let (width, height) = (size.width.max(1), size.height.max(1));
 
-        // Instance / Surface / Adapter / Device
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
             flags: wgpu::InstanceFlags::empty(),
@@ -85,15 +95,12 @@ impl GpuPipeline {
             ..Default::default()
         }))
         .map_err(|e| format!("No compatible GPU adapter: {e}"))?;
-        let (device, queue) = pollster::block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                label: Some("rift"),
-                ..Default::default()
-            },
-        ))
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("rift"),
+            ..Default::default()
+        }))
         .map_err(|e| format!("request_device: {e}"))?;
 
-        // Surface config
         let mut surface_config = surface
             .get_default_config(&adapter, width, height)
             .ok_or_else(|| "Surface not supported by adapter".to_string())?;
@@ -101,114 +108,89 @@ impl GpuPipeline {
         surface.configure(&device, &surface_config);
         let format = surface_config.format;
 
-        // Texture + sampler
         let pixel_texture = create_texture(&device, width, height);
         let pixel_view = pixel_texture.create_view(&Default::default());
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            mag_filter: wgpu::FilterMode::Nearest,
-            min_filter: wgpu::FilterMode::Nearest,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
 
-        // Uniform buffer for CRT params
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("shader_uniforms"),
-            size: std::mem::size_of::<ShaderUniforms>() as u64,
+            label: Some("fx_uniforms"),
+            size: std::mem::size_of::<FxUniforms>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
-        // ── Blit pipeline (texture + sampler only) ──
-
+        // ── Blit pipeline ──
         let blit_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("blit_bgl"),
-            entries: &[
-                tex_entry(0),
-                sampler_entry(1),
-            ],
+            entries: &[tex_entry(0), sampler_entry(1)],
         });
-
-        let blit_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("blit_bg"),
-            layout: &blit_bgl,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&pixel_view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) },
-            ],
-        });
-
+        let blit_bind_group = make_blit_bg(&device, &blit_bgl, &pixel_view, &sampler);
         let blit_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("blit_shader"),
             source: wgpu::ShaderSource::Wgsl(BLIT_WGSL.into()),
         });
-
         let blit_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("blit_layout"),
             bind_group_layouts: &[Some(&blit_bgl)],
             immediate_size: 0,
         });
+        let blit_pipeline = create_pipeline(&device, &blit_layout, &blit_shader, format, "blit");
 
-        let blit_pipeline = create_pipeline(&device, &blit_layout, &blit_shader, &blit_shader, format, "blit");
-
-        // ── CRT pipeline (texture + sampler + uniforms) ──
-
-        let crt_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("crt_bgl"),
-            entries: &[
-                tex_entry(0),
-                sampler_entry(1),
-                uniform_entry(2),
-            ],
+        // ── FX pipeline ──
+        let fx_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("fx_bgl"),
+            entries: &[tex_entry(0), sampler_entry(1), uniform_entry(2)],
         });
-
-        let crt_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("crt_bg"),
-            layout: &crt_bgl,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&pixel_view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) },
-                wgpu::BindGroupEntry { binding: 2, resource: uniform_buffer.as_entire_binding() },
-            ],
+        let fx_bind_group = make_fx_bg(&device, &fx_bgl, &pixel_view, &sampler, &uniform_buffer);
+        let fx_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("fx_shader"),
+            source: wgpu::ShaderSource::Wgsl(FX_WGSL.into()),
         });
-
-        // Combined CRT shader: vertex (fullscreen tri) + fragment (CRT effect)
-        let crt_wgsl = format!("{}\n{}", crate::effects::FULLSCREEN_QUAD_WGSL, crate::effects::CRT_SHADER_WGSL);
-        let crt_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("crt_shader"),
-            source: wgpu::ShaderSource::Wgsl(crt_wgsl.into()),
-        });
-
-        let crt_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("crt_layout"),
-            bind_group_layouts: &[Some(&crt_bgl)],
+        let fx_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("fx_layout"),
+            bind_group_layouts: &[Some(&fx_bgl)],
             immediate_size: 0,
         });
-
-        let crt_pipeline = create_pipeline(&device, &crt_layout, &crt_shader, &crt_shader, format, "crt");
+        let fx_pipeline = create_pipeline(&device, &fx_layout, &fx_shader, format, "fx");
 
         Ok(Self {
-            device, queue, surface, surface_config,
-            blit_pipeline, crt_pipeline,
-            blit_bgl, crt_bgl,
-            sampler, pixel_texture, pixel_view, uniform_buffer,
-            blit_bind_group, crt_bind_group,
-            width, height,
+            device,
+            queue,
+            surface,
+            surface_config,
+            blit_pipeline,
+            fx_pipeline,
+            blit_bgl,
+            fx_bgl,
+            sampler,
+            pixel_texture,
+            pixel_view,
+            uniform_buffer,
+            blit_bind_group,
+            fx_bind_group,
+            width,
+            height,
             rgba_buffer: Vec::new(),
         })
     }
 
-    /// Render a frame. When `effect` is `Some(Crt(..))`, the GPU CRT shader runs;
-    /// otherwise the blit (passthrough) pipeline is used. All other effects still
-    /// run on the CPU before the pixel buffer reaches this method.
+    /// Render a frame. With `effect == None` the blit pipeline presents the
+    /// buffer untouched; otherwise the FX shader runs on the GPU.
     pub fn render_frame(
         &mut self,
         pixels: &[u32],
         width: u32,
         height: u32,
-        effect: Option<&ShaderEffect>,
+        effect: Option<ActiveEffect>,
         time: f32,
     ) {
-        if width == 0 || height == 0 { return; }
+        if width == 0 || height == 0 {
+            return;
+        }
         let frame_start = std::time::Instant::now();
 
         if width != self.width || height != self.height {
@@ -223,13 +205,12 @@ impl GpuPipeline {
         }
         for (i, &px) in pixels.iter().enumerate().take(pixel_count) {
             let off = i * 4;
-            self.rgba_buffer[off]     = ((px >> 16) & 0xff) as u8;
-            self.rgba_buffer[off + 1] = ((px >>  8) & 0xff) as u8;
-            self.rgba_buffer[off + 2] = ( px        & 0xff) as u8;
+            self.rgba_buffer[off] = ((px >> 16) & 0xff) as u8;
+            self.rgba_buffer[off + 1] = ((px >> 8) & 0xff) as u8;
+            self.rgba_buffer[off + 2] = (px & 0xff) as u8;
             self.rgba_buffer[off + 3] = 255;
         }
 
-        // Upload texture
         self.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &self.pixel_texture,
@@ -246,43 +227,23 @@ impl GpuPipeline {
             wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
         );
 
-        // Select pipeline + bind group based on effect
-        let use_crt = matches!(effect, Some(ShaderEffect::Crt(_)));
-
-        if use_crt {
-            if let Some(ShaderEffect::Crt(params)) = effect {
-                let uniforms = ShaderUniforms {
-                    scanline_intensity: params.scanline_intensity,
-                    curvature: params.curvature,
-                    chromatic_aberration: params.chromatic_aberration,
-                    flicker: params.flicker,
-                    vignette: params.vignette,
-                    time,
-                    resolution_x: width as f32,
-                    resolution_y: height as f32,
-                };
-                self.queue.write_buffer(
-                    &self.uniform_buffer,
-                    0,
-                    bytemuck::bytes_of(&uniforms),
-                );
-            }
+        if let Some(fx) = effect.as_ref() {
+            let u = FxUniforms::new(fx, time, width, height);
+            self.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&u));
         }
+        let (pipeline, bind_group) = if effect.is_some() {
+            (&self.fx_pipeline, &self.fx_bind_group)
+        } else {
+            (&self.blit_pipeline, &self.blit_bind_group)
+        };
 
-        let pipeline = if use_crt { &self.crt_pipeline } else { &self.blit_pipeline };
-        let bind_group = if use_crt { &self.crt_bind_group } else { &self.blit_bind_group };
-
-        // Acquire frame
         let output = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(t)
-            | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
+            wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
                 self.surface.configure(&self.device, &self.surface_config);
                 return;
             }
-            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
-                return;
-            }
+            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => return,
             _ => {
                 log::error!("wgpu surface: unexpected status");
                 return;
@@ -290,10 +251,9 @@ impl GpuPipeline {
         };
         let view = output.texture.create_view(&Default::default());
 
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("render_enc"),
-        });
-
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("render_enc") });
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("render_pass"),
@@ -333,31 +293,48 @@ impl GpuPipeline {
         self.surface.configure(&self.device, &self.surface_config);
         self.pixel_texture = create_texture(&self.device, width, height);
         self.pixel_view = self.pixel_texture.create_view(&Default::default());
-
-        // Recreate both bind groups with new texture view
-        self.blit_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("blit_bg"),
-            layout: &self.blit_bgl,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&self.pixel_view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
-            ],
-        });
-        self.crt_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("crt_bg"),
-            layout: &self.crt_bgl,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&self.pixel_view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
-                wgpu::BindGroupEntry { binding: 2, resource: self.uniform_buffer.as_entire_binding() },
-            ],
-        });
+        self.blit_bind_group = make_blit_bg(&self.device, &self.blit_bgl, &self.pixel_view, &self.sampler);
+        self.fx_bind_group =
+            make_fx_bg(&self.device, &self.fx_bgl, &self.pixel_view, &self.sampler, &self.uniform_buffer);
     }
 }
 
-// ── Helper functions ──
+// ── Helpers ──
 
-#[cfg(feature = "gpu")]
+fn make_blit_bg(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    view: &wgpu::TextureView,
+    sampler: &wgpu::Sampler,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("blit_bg"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(view) },
+            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(sampler) },
+        ],
+    })
+}
+
+fn make_fx_bg(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    view: &wgpu::TextureView,
+    sampler: &wgpu::Sampler,
+    uniforms: &wgpu::Buffer,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("fx_bg"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(view) },
+            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(sampler) },
+            wgpu::BindGroupEntry { binding: 2, resource: uniforms.as_entire_binding() },
+        ],
+    })
+}
+
 fn create_texture(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Texture {
     device.create_texture(&wgpu::TextureDescriptor {
         label: Some("pixels"),
@@ -371,7 +348,6 @@ fn create_texture(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Textu
     })
 }
 
-#[cfg(feature = "gpu")]
 fn tex_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
@@ -385,7 +361,6 @@ fn tex_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
-#[cfg(feature = "gpu")]
 fn sampler_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
@@ -395,7 +370,6 @@ fn sampler_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
-#[cfg(feature = "gpu")]
 fn uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
@@ -409,12 +383,10 @@ fn uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
-#[cfg(feature = "gpu")]
 fn create_pipeline(
     device: &wgpu::Device,
     layout: &wgpu::PipelineLayout,
-    vs_module: &wgpu::ShaderModule,
-    fs_module: &wgpu::ShaderModule,
+    module: &wgpu::ShaderModule,
     format: wgpu::TextureFormat,
     label: &str,
 ) -> wgpu::RenderPipeline {
@@ -422,13 +394,13 @@ fn create_pipeline(
         label: Some(label),
         layout: Some(layout),
         vertex: wgpu::VertexState {
-            module: vs_module,
+            module,
             entry_point: Some("vs_main"),
             buffers: &[],
             compilation_options: Default::default(),
         },
         fragment: Some(wgpu::FragmentState {
-            module: fs_module,
+            module,
             entry_point: Some("fs_main"),
             targets: &[Some(wgpu::ColorTargetState {
                 format,
@@ -445,9 +417,9 @@ fn create_pipeline(
     })
 }
 
-// ── Blit shader (passthrough) ──
+// ── Shaders ──
 
-#[cfg(feature = "gpu")]
+/// Passthrough shader (no effect).
 const BLIT_WGSL: &str = r#"
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -469,6 +441,282 @@ fn vs_main(@builtin(vertex_index) idx: u32) -> VertexOutput {
 
 @fragment
 fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
-    return textureSample(frame_tex, frame_sampler, uv);
+    return textureSampleLevel(frame_tex, frame_sampler, uv, 0.0);
 }
 "#;
+
+/// The six Rift effects in one fragment shader; `Params.effect` selects:
+/// 1 CRT, 2 Glitch, 3 Neon Glow, 4 Matrix Rain, 5 Amber, 6 Hologram
+/// (same numbering as `EffectKind::id`). Sampling uses `textureSampleLevel`
+/// so effects may branch on per-pixel data without uniformity issues.
+pub const FX_WGSL: &str = r#"
+struct Params {
+    time: f32,
+    intensity: f32,
+    effect: u32,
+    _pad0: u32,
+    resolution: vec2<f32>,
+    _pad1: vec2<f32>,
+    bg: vec4<f32>,
+    accent: vec4<f32>,
+}
+
+@group(0) @binding(0) var frame_tex: texture_2d<f32>;
+@group(0) @binding(1) var frame_sampler: sampler;
+@group(0) @binding(2) var<uniform> P: Params;
+
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+}
+
+@vertex
+fn vs_main(@builtin(vertex_index) idx: u32) -> VertexOutput {
+    var out: VertexOutput;
+    let x = f32(i32(idx) / 2) * 4.0 - 1.0;
+    let y = f32(i32(idx) % 2) * 4.0 - 1.0;
+    out.position = vec4(x, y, 0.0, 1.0);
+    out.uv = vec2((x + 1.0) * 0.5, (1.0 - y) * 0.5);
+    return out;
+}
+
+const PI: f32 = 3.14159265;
+const GLITCH_SLOT: f32 = 0.2;
+
+fn tex(uv: vec2<f32>) -> vec3<f32> {
+    return textureSampleLevel(frame_tex, frame_sampler, uv, 0.0).rgb;
+}
+
+fn lin3(c: vec3<f32>) -> vec3<f32> {
+    return pow(c, vec3<f32>(2.2));
+}
+
+fn luma(c: vec3<f32>) -> f32 {
+    return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
+}
+
+// Same integer hash as `effects::hash_u32` on the CPU.
+fn hash_u(x: u32) -> u32 {
+    var h = x;
+    h = h ^ (h >> 16u);
+    h = h * 0x7feb352du;
+    h = h ^ (h >> 15u);
+    h = h * 0x846ca68bu;
+    h = h ^ (h >> 16u);
+    return h;
+}
+
+fn hash1(x: u32) -> f32 {
+    return f32(hash_u(x) & 0xffffffu) / 16777216.0;
+}
+
+// ── 1. CRT: curvature + scanlines + vignette + subtle chromatic aberration ──
+fn fx_crt(uv: vec2<f32>, k: f32) -> vec3<f32> {
+    let c = uv * 2.0 - 1.0;
+    let bend = 0.08 * k;
+    let q = c * vec2<f32>(1.0 + bend * c.y * c.y, 1.0 + bend * c.x * c.x);
+    let suv = q * 0.5 + 0.5;
+    let inside = step(0.0, suv.x) * step(suv.x, 1.0) * step(0.0, suv.y) * step(suv.y, 1.0);
+    let px = 1.0 / P.resolution;
+    let ca = 1.5 * k * px.x * (0.5 + length(c));
+    var col = vec3<f32>(
+        tex(suv + vec2<f32>(ca, 0.0)).r,
+        tex(suv).g,
+        tex(suv - vec2<f32>(ca, 0.0)).b,
+    );
+    let row = suv.y * P.resolution.y;
+    col = col * (1.0 - 0.30 * k * (0.5 - 0.5 * sin(row * PI)));
+    col = col * (1.0 - 0.55 * k * smoothstep(0.35, 1.25, length(c)));
+    col = col * (1.0 + 0.08 * k);
+    return col * inside;
+}
+
+// ── 2. Glitch: short, occasional bursts (~12% of 0.2s slots) ──
+fn glitch_on(t: f32) -> bool {
+    if t < 0.0 {
+        return false;
+    }
+    let slot = u32(floor(t / GLITCH_SLOT));
+    return hash_u(slot) % 100u < 12u;
+}
+
+fn fx_glitch(uv: vec2<f32>, k: f32) -> vec3<f32> {
+    if !glitch_on(P.time) {
+        return tex(uv);
+    }
+    let tick = u32(P.time * 30.0);
+    let sid = u32(floor(uv.y * 28.0));
+    var off = 0.0;
+    var hit = 0.0;
+    if hash1(sid * 7919u + tick * 104729u) < 0.30 {
+        off = (hash1(sid * 31u + tick * 17u) - 0.5) * 0.14 * (0.3 + k);
+        hit = 1.0;
+    }
+    if abs(uv.y - hash1(tick * 3u + 1u)) < 0.004 {
+        off = off + 0.05 * (0.3 + k);
+        hit = 1.0;
+    }
+    let split = (0.004 + 0.012 * k) * (0.4 + hit);
+    var col = vec3<f32>(
+        tex(vec2<f32>(uv.x + off + split, uv.y)).r,
+        tex(vec2<f32>(uv.x + off, uv.y)).g,
+        tex(vec2<f32>(uv.x + off - split, uv.y)).b,
+    );
+    col = col + lin3(P.accent.rgb) * hit * 0.06 * k;
+    return col;
+}
+
+// ── 3. Neon Glow: bloom of bright text ──
+fn fx_neon(uv: vec2<f32>, k: f32) -> vec3<f32> {
+    let base = tex(uv);
+    let px = 1.0 / P.resolution;
+    var glow = vec3<f32>(0.0);
+    var wsum = 0.0;
+    for (var r = 0; r < 3; r++) {
+        let radius = 2.5 + 4.5 * f32(r) + 1.5 * f32(r * r);
+        let w = 1.0 / (1.0 + 0.7 * f32(r) * f32(r));
+        for (var a = 0; a < 8; a++) {
+            let ang = f32(a) * (PI / 4.0);
+            let o = vec2<f32>(cos(ang), sin(ang)) * radius * px;
+            glow = glow + max(tex(uv + o) - vec3<f32>(0.35), vec3<f32>(0.0)) * w;
+            wsum = wsum + w;
+        }
+    }
+    glow = glow / wsum;
+    return base + glow * 3.5 * k;
+}
+
+// ── 4. Matrix Rain: low-alpha rain layer behind the text ──
+fn fx_matrix(uv: vec2<f32>, k: f32) -> vec3<f32> {
+    let base = tex(uv);
+    let frag = uv * P.resolution;
+    let cell = vec2<f32>(11.0, 20.0);
+    let cid = floor(frag / cell);
+    let local = frag / cell - cid;
+    let cx = u32(max(cid.x, 0.0));
+    let cy = u32(max(cid.y, 0.0));
+    let speed = 4.0 + 8.0 * hash1(cx * 7919u + 13u);
+    let rows = P.resolution.y / cell.y;
+    let trail = 8.0 + 14.0 * hash1(cx * 104729u + 7u);
+    let period = rows + trail + 6.0;
+    let head = fract(P.time * speed / period + hash1(cx * 31337u + 3u)) * period;
+    let d = head - cid.y;
+    var rain = 0.0;
+    if d >= 0.0 && d < trail {
+        rain = pow(1.0 - d / trail, 2.0);
+        if d < 1.0 {
+            rain = 1.5;
+        }
+    }
+    let tick = u32(P.time * (6.0 + 6.0 * hash1(cx * 977u + 5u)));
+    let gx = u32(floor(local.x * 4.0));
+    let gy = u32(floor(local.y * 6.0));
+    let edge = step(0.15, local.x) * step(local.x, 0.85) * step(0.1, local.y) * step(local.y, 0.9);
+    let bit = step(0.45, hash1(cx * 977u + cy * 131u + gx * 17u + gy * 29u + tick * 7919u));
+    let tint = mix(vec3<f32>(0.04, 1.0, 0.35), lin3(P.accent.rgb), 0.25);
+    // Only paint where the frame is (nearly) background so glyphs stay on top.
+    let bgness = 1.0 - smoothstep(0.015, 0.10, distance(base, lin3(P.bg.rgb)));
+    return base + tint * rain * bit * edge * (0.55 * k) * bgness;
+}
+
+// ── 5. Amber: monochrome phosphor ──
+fn fx_amber(uv: vec2<f32>, k: f32) -> vec3<f32> {
+    let c = tex(uv);
+    let l = min(luma(c) * 1.15, 1.0);
+    let amber = vec3<f32>(1.0, 0.45, 0.0) * l;
+    return mix(c, amber, 0.35 + 0.65 * k);
+}
+
+// ── 6. Hologram: cyan tint + scan sweep + flicker ──
+fn fx_holo(uv: vec2<f32>, k: f32) -> vec3<f32> {
+    let sweep = fract(P.time * 0.22);
+    let dist = uv.y - sweep;
+    let band = exp(-dist * dist / 0.0015);
+    let suv = vec2<f32>(uv.x + band * 0.004 * k, uv.y);
+    let c = tex(suv);
+    let l = luma(c);
+    let tint = vec3<f32>(0.05, 0.85, 1.0);
+    var col = mix(c, tint * l * 1.3, 0.45 + 0.45 * k);
+    col = col + tint * 0.015 * k;
+    col = col + tint * band * 0.35 * k * (0.3 + l);
+    let row = uv.y * P.resolution.y;
+    col = col * (0.93 + 0.07 * sin(row * 1.5708));
+    col = col * (1.0 - 0.06 * k * hash1(u32(P.time * 24.0)));
+    return col;
+}
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    let k = clamp(P.intensity, 0.0, 1.0);
+    var col: vec3<f32>;
+    switch P.effect {
+        case 1u: { col = fx_crt(in.uv, k); }
+        case 2u: { col = fx_glitch(in.uv, k); }
+        case 3u: { col = fx_neon(in.uv, k); }
+        case 4u: { col = fx_matrix(in.uv, k); }
+        case 5u: { col = fx_amber(in.uv, k); }
+        case 6u: { col = fx_holo(in.uv, k); }
+        default: { col = tex(in.uv); }
+    }
+    return vec4<f32>(col, 1.0);
+}
+"#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wgpu::naga;
+
+    fn parse(src: &str) -> naga::Module {
+        naga::front::wgsl::parse_str(src).unwrap_or_else(|e| panic!("WGSL parse error:\n{}", e.emit_to_string(src)))
+    }
+
+    fn validate(src: &str) -> naga::Module {
+        let module = parse(src);
+        naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
+            .validate(&module)
+            .unwrap_or_else(|e| panic!("WGSL validation error: {e:?}"));
+        module
+    }
+
+    #[test]
+    fn fx_shader_parses_and_validates() {
+        let m = validate(FX_WGSL);
+        let names: Vec<_> = m.entry_points.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&"vs_main") && names.contains(&"fs_main"), "{names:?}");
+    }
+
+    #[test]
+    fn blit_shader_parses_and_validates() {
+        validate(BLIT_WGSL);
+    }
+
+    #[test]
+    fn uniform_layout_matches_wgsl() {
+        assert_eq!(std::mem::size_of::<FxUniforms>(), 64);
+        let m = validate(FX_WGSL);
+        let (_, ty) = m
+            .types
+            .iter()
+            .find(|(_, t)| t.name.as_deref() == Some("Params"))
+            .expect("Params struct");
+        match &ty.inner {
+            naga::TypeInner::Struct { span, .. } => assert_eq!(*span, 64),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn every_effect_id_has_a_shader_case() {
+        for k in crate::effects::EffectKind::ALL {
+            assert!(FX_WGSL.contains(&format!("case {}u:", k.id())), "no case for {:?}", k);
+        }
+    }
+
+    #[test]
+    fn glitch_schedule_matches_cpu_constants() {
+        assert!(FX_WGSL.contains("const GLITCH_SLOT: f32 = 0.2;"));
+        assert!(FX_WGSL.contains("% 100u < 12u"));
+        assert!(FX_WGSL.contains("0x7feb352du") && FX_WGSL.contains("0x846ca68bu"));
+    }
+}

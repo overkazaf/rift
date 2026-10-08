@@ -1,4 +1,7 @@
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
+
+use crate::ui::kit::{Ctx, Rect, Tokens, Tone};
 
 #[allow(dead_code)]
 pub struct HudData {
@@ -31,7 +34,7 @@ impl Default for HudData {
             mem_pct: 0.0, mem_label: String::new(),
             cpu_pct: 0.0, cpu_label: "N/A".into(),
             os: String::new(), arch: String::new(),
-            rust_version: "rift v0.3.0".into(),
+            rust_version: format!("rift v{}", crate::config::VERSION),
             term: String::new(), git_branch: "-".into(),
             cwd_short: String::new(), pid: String::new(),
             disk_label: String::new(), disk_pct: 0.0,
@@ -48,7 +51,12 @@ pub struct Hud {
     cpu_usage: f32,
     cached: HudData,
     static_inited: bool,
+    cpu_hist: VecDeque<f32>,
+    mem_hist: VecDeque<f32>,
 }
+
+/// Samples kept for the sparklines (one per `update_interval`, ~80s).
+const HIST_LEN: usize = 40;
 
 impl Hud {
     pub fn new() -> Self {
@@ -60,6 +68,8 @@ impl Hud {
             cpu_usage: -1.0,
             cached: HudData::default(),
             static_inited: false,
+            cpu_hist: VecDeque::with_capacity(HIST_LEN),
+            mem_hist: VecDeque::with_capacity(HIST_LEN),
         };
         hud.update();
         hud
@@ -103,6 +113,13 @@ impl Hud {
             format!("{:.0}%", self.cpu_usage)
         } else { "N/A".into() };
 
+        for (hist, v) in [(&mut self.cpu_hist, self.cached.cpu_pct), (&mut self.mem_hist, self.cached.mem_pct)] {
+            if hist.len() == HIST_LEN {
+                hist.pop_front();
+            }
+            hist.push_back(v);
+        }
+
         self.cached.uptime = get_uptime_str();
         self.cached.git_branch = get_git_branch();
 
@@ -122,51 +139,14 @@ impl Hud {
         self.cached.load_avg = get_load_avg();
     }
 
+    /// (cpu, mem) history, oldest first, percent 0..=100.
+    pub fn history(&self) -> (Vec<f32>, Vec<f32>) {
+        (self.cpu_hist.iter().copied().collect(), self.mem_hist.iter().copied().collect())
+    }
+
     /// Returns cached data — no process forks, safe to call every frame.
     pub fn data(&self) -> &HudData {
         &self.cached
-    }
-
-    #[allow(dead_code)]
-    pub fn render_pixels(&self, _buffer: &mut [u32], _buf_width: u32, _buf_height: u32, _cell_height: usize) {
-        // Rendering is done in lifecycle.rs using data()
-    }
-
-    #[allow(dead_code)]
-    pub fn status_segments(&self) -> Vec<(String, u32)> {
-        let d = &self.cached;
-        let accent = 0x5D_E4_A7u32;
-        let blue = 0x89_B4_FAu32;
-        let yellow = 0xF9_E2_AFu32;
-        let cyan = 0x94_E2_D5u32;
-        let pink = 0xF5_C2_E7u32;
-        let dim = 0x6C_70_86u32;
-        let mem_pct = d.mem_pct as u32;
-        let mem_color = if mem_pct > 85 { 0xF3_8B_A8u32 } else if mem_pct > 60 { yellow } else { accent };
-        let cpu_bar = progress_bar(d.cpu_pct as u32, 8);
-        let mem_bar = progress_bar(mem_pct, 8);
-
-        vec![
-            (" \u{25C6} ".into(), accent),
-            (format!("{}@{}", d.user, d.host), cyan),
-            (" \u{2502} ".into(), dim),
-            ("\u{25B2} ".into(), blue),
-            (mem_bar, mem_color),
-            (format!(" {}", d.mem_label), yellow),
-            (" \u{2502} ".into(), dim),
-            ("\u{25CF} ".into(), blue),
-            (cpu_bar, if d.cpu_pct > 80.0 { 0xF3_8B_A8 } else { accent }),
-            (format!(" {}", d.cpu_label), yellow),
-            (" \u{2502} ".into(), dim),
-            ("\u{25B7} ".into(), pink),
-            (d.shell.clone(), pink),
-            (" \u{2502} ".into(), dim),
-            ("\u{21E1} ".into(), dim),
-            (d.uptime.clone(), dim),
-            (" \u{2502} ".into(), dim),
-            (d.time.clone(), blue),
-            (" \u{25C6}".into(), accent),
-        ]
     }
 
     #[cfg(target_os = "macos")]
@@ -181,7 +161,11 @@ impl Hud {
         }
         if let Ok(out) = Command::new("vm_stat").output() {
             if let Ok(s) = std::str::from_utf8(&out.stdout) {
-                let page_size: u64 = 16384;
+                let page_size: u64 = s.lines().next()
+                    .and_then(|l| l.split("page size of ").nth(1))
+                    .and_then(|r| r.split_whitespace().next())
+                    .and_then(|n| n.parse().ok())
+                    .unwrap_or(16384);
                 let mut active: u64 = 0;
                 let mut wired: u64 = 0;
                 let mut compressed: u64 = 0;
@@ -190,7 +174,7 @@ impl Hud {
                     if let Some(val) = extract_vm_stat_pages(line, "Pages wired") { wired = val; }
                     if let Some(val) = extract_vm_stat_pages(line, "Pages occupied by compressor") { compressed = val; }
                 }
-                self.mem_used_mb = (active + wired + compressed) * page_size / (1024 * 1024);
+                self.mem_used_mb = ((active + wired + compressed) * page_size / (1024 * 1024)).min(self.mem_total_mb);
             }
         }
     }
@@ -244,16 +228,6 @@ impl Hud {
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         { self.cpu_usage = -1.0; }
     }
-}
-
-#[allow(dead_code)]
-fn progress_bar(pct: u32, width: usize) -> String {
-    let filled = (pct as usize * width / 100).min(width);
-    let empty = width - filled;
-    let mut bar = String::with_capacity(width);
-    for _ in 0..filled { bar.push('\u{2588}'); }
-    for _ in 0..empty { bar.push('\u{2591}'); }
-    bar
 }
 
 pub fn get_uptime_str() -> String {
@@ -380,4 +354,129 @@ fn extract_meminfo_kb(line: &str, prefix: &str) -> Option<u64> {
     let rest = line[colon + 1..].trim();
     let num_end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
     rest[..num_end].parse().ok()
+}
+
+/// Tone for a utilisation percentage.
+fn load_tone(pct: f32) -> Tone {
+    if pct >= 85.0 { Tone::Danger } else if pct >= 60.0 { Tone::Warning } else { Tone::Accent }
+}
+
+/// Draw the HUD into the band `[y0, y0 + height)` of the buffer behind `cx`.
+/// Everything comes from the UI kit tokens: thin accent lines, monospace
+/// labels and sparklines for CPU / MEM history.
+pub fn draw(cx: &mut Ctx, hud: &Hud, y0: usize, height: usize) {
+    let tk: Tokens = *cx.tk;
+    let (w, ch, cw) = (cx.w, tk.ch, tk.cw);
+    let data = hud.data();
+    let (cpu_hist, mem_hist) = hud.history();
+
+    // Translucent panel + thin accent line with a faint glow below it.
+    cx.fill(Rect::new(0, y0, w, height), tk.bg);
+    cx.hline(0, y0, w, tk.accent);
+    cx.fill_a(Rect::new(0, y0 + 1, w, 1), tk.accent, 70);
+
+    let pad = tk.sp.md;
+    let row1 = y0 + 5;
+    let row2 = row1 + ch + 4;
+    let row3 = row2 + ch + 4;
+    let right = w.saturating_sub(pad);
+
+    // A separator: thin vertical rule, returns the x after it.
+    let sep = |cx: &mut Ctx, x: usize, y: usize| -> usize {
+        cx.vline(x + cw, y + 2, ch.saturating_sub(4), tk.border_strong);
+        x + 2 * cw
+    };
+
+    // ── Row 1: brand, identity, clock ──
+    let mut x = pad;
+    cx.text(x, row1, "\u{25C6} RIFT", tk.accent);
+    x += 7 * cw;
+    x = sep(cx, x, row1);
+    let ident = format!("{}@{}", data.user, data.host);
+    cx.text(x, row1, &ident, tk.text);
+    x += (ident.chars().count()) * cw;
+    x = sep(cx, x, row1);
+    cx.text(x, row1, &data.shell, tk.text_muted);
+    x += (data.shell.chars().count()) * cw;
+    x = sep(cx, x, row1);
+    cx.text(x, row1, &format!("UP {}", data.uptime), tk.text_faint);
+    cx.text_right(right, row1, &data.time, tk.accent);
+
+    // ── Row 2: CPU / MEM sparklines ──
+    let spark_w = (14 * cw).min(w / 4);
+    let spark_h = ch.saturating_sub(2);
+    let mut x = pad;
+    for (label, hist, pct, value) in [
+        ("CPU", &cpu_hist, data.cpu_pct, data.cpu_label.as_str()),
+        ("MEM", &mem_hist, data.mem_pct, data.mem_label.as_str()),
+    ] {
+        cx.text(x, row2, label, tk.text_muted);
+        x += 4 * cw;
+        let tone = load_tone(pct);
+        cx.sparkline(Rect::new(x, row2 + 1, spark_w, spark_h), hist, 100.0, tk.tone(tone));
+        x += spark_w + cw;
+        cx.text(x, row2, value, tk.tone(tone));
+        x += (value.chars().count()) * cw;
+        x = sep(cx, x, row2);
+    }
+
+    // ── Row 3: environment ──
+    let mut x = pad;
+    let os = format!("{}/{}", data.os, data.arch);
+    cx.text(x, row3, &os, tk.text_faint);
+    x += (os.chars().count()) * cw;
+    x = sep(cx, x, row3);
+    let git = format!("\u{2387} {}", data.git_branch);
+    cx.text(x, row3, &git, if data.git_branch == "-" { tk.text_faint } else { tk.success });
+    x += (git.chars().count()) * cw;
+    x = sep(cx, x, row3);
+    cx.text(x, row3, &data.cwd_short, tk.text);
+    x += (data.cwd_short.chars().count()) * cw;
+    x = sep(cx, x, row3);
+    cx.text(x, row3, "DSK", tk.text_muted);
+    x += 4 * cw;
+    let bar_w = 8 * cw;
+    cx.progress(Rect::new(x, row3, bar_w, ch), (data.disk_pct / 100.0).clamp(0.0, 1.0), load_tone(data.disk_pct));
+    x += bar_w + cw;
+    cx.text(x, row3, &data.disk_label, tk.text);
+    x += (data.disk_label.chars().count()) * cw;
+    x = sep(cx, x, row3);
+    cx.text(x, row3, &format!("LOAD {}", data.load_avg), tk.text_faint);
+    cx.text_right(right, row3, &format!("PID {} | {}", data.pid, data.rust_version), tk.text_faint);
+}
+
+#[cfg(test)]
+mod qa_tests {
+    use super::*;
+    use crate::ui::kit::gallery::qa::each_theme;
+
+    #[test]
+    fn hud_renders_in_every_theme_without_hardcoded_palette() {
+        let mut hud = Hud::new();
+        for _ in 0..5 {
+            hud.update();
+        }
+        each_theme("hud", |b, w, h, f, t| {
+            let tk = Tokens::new(t, f.cell_width, f.cell_height);
+            let bar_h = tk.ch * 3 + 20;
+            let mut cx = Ctx::new(b, w, h, f, &tk);
+            draw(&mut cx, &hud, h - bar_h, bar_h);
+            // the accent rule sits on the first row of the band
+            assert_eq!(cx.buf[(h - bar_h) * w + 3], pack_tk(tk.accent));
+        });
+    }
+
+    fn pack_tk(c: crate::config::Rgb) -> u32 {
+        ((c.0 as u32) << 16) | ((c.1 as u32) << 8) | c.2 as u32
+    }
+
+    #[test]
+    fn history_is_bounded() {
+        let mut hud = Hud::new();
+        for _ in 0..(HIST_LEN + 10) {
+            hud.update();
+        }
+        let (c, m) = hud.history();
+        assert_eq!((c.len(), m.len()), (HIST_LEN, HIST_LEN));
+    }
 }

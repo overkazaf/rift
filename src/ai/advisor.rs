@@ -1,7 +1,5 @@
 use std::sync::mpsc::Receiver;
 
-use crate::config::Theme;
-use crate::renderer::font::FontManager;
 use crate::ui::trunc;
 
 use super::LlmConfig;
@@ -128,70 +126,6 @@ impl Advisor {
                 }
             }
             self.rx = None;
-        }
-    }
-
-    /// Render a compact risk badge in the AI panel's title bar plus the
-    /// advisor's notes/suggestion at the bottom of the panel body. Geometry
-    /// comes from `panel::sheet_rect`, so it always lines up with the panel.
-    pub fn render_inline(
-        &self,
-        buffer: &mut [u32],
-        width: usize,
-        height: usize,
-        font: &mut FontManager,
-        theme: &Theme,
-    ) {
-        use crate::ui::kit::{Ctx, Tokens, Tone};
-        if !self.enabled {
-            return;
-        }
-        let tk = Tokens::new(theme, font.cell_width, font.cell_height);
-        let mut cx = Ctx::new(buffer, width, height, font, &tk);
-        let sheet = super::panel::sheet_rect(&cx);
-        let body = cx.panel_content(sheet, true);
-        let right = cx.title_right_edge(sheet);
-        let title_y = sheet.y + 1;
-        let title_h = cx.title_h();
-
-        if self.is_loading() {
-            let label = "advisor reviewing...";
-            let w = cx.tw(label);
-            let ty = cx.text_y(title_y, title_h);
-            cx.text(right.saturating_sub(w), ty, label, tk.text_muted);
-            return;
-        }
-
-        let Some(review) = &self.review else { return };
-
-        // Risk badge, right-aligned in the title bar next to the Esc cap.
-        let label = review.risk_level.label();
-        let tone = match review.risk_level {
-            RiskLevel::Safe => Tone::Success,
-            RiskLevel::Caution => Tone::Warning,
-            RiskLevel::Danger => Tone::Danger,
-        };
-        let bw = cx.badge_w(label);
-        cx.badge(right.saturating_sub(bw), title_y, label, tone, title_h);
-
-        // Notes + suggestion: anchored to the bottom of the panel body so
-        // they read as "below the response" whatever its length.
-        let mut rows: Vec<(String, crate::config::Rgb)> = Vec::new();
-        if let Some(ref suggestion) = review.suggestion {
-            rows.push((format!("Advisor suggests: {suggestion}"), tk.accent));
-        }
-        for note in review.notes.iter().take(2).rev() {
-            rows.push((format!("- {note}"), tk.text_muted));
-        }
-
-        let mut y = body.bottom().saturating_sub(tk.row_h);
-        let min_y = body.y + tk.input_h + tk.sp.sm;
-        for (text, color) in &rows {
-            if y < min_y {
-                break;
-            }
-            cx.line_fit(body.x + tk.sp.xs, y, body.w, text, *color);
-            y = y.saturating_sub(tk.row_h);
         }
     }
 }

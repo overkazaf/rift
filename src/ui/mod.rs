@@ -5,6 +5,7 @@ pub mod observer_summary;
 pub mod preferences;
 pub mod primitives;
 pub mod scrollbar;
+pub mod splash;
 pub mod tabbar;
 pub mod welcome;
 

@@ -28,21 +28,6 @@ fn ssh_and_webview_dialogs_render() {
 }
 
 #[test]
-fn ai_panel_states_render() {
-    let mut p = crate::ai::AiPanel::new();
-    p.visible = true;
-    p.input = "find files larger than 100MB modified this week".into();
-    p.response = Some("find . -type f -size +100M -mtime -7\nSearches the current directory for files over 100MB\nchanged in the last 7 days.".into());
-    each_theme("ai-response", |b, w, h, f, t| p.render(b, w, h, f, t));
-    p.response = None;
-    p.error = Some("connection refused: http://localhost:11434".into());
-    each_theme("ai-error", |b, w, h, f, t| p.render(b, w, h, f, t));
-    p.error = None;
-    p.loading = true;
-    each_theme("ai-loading", |b, w, h, f, t| p.render(b, w, h, f, t));
-}
-
-#[test]
 fn search_bar_renders() {
     let mut s = crate::tools::search::SearchOverlay::new();
     s.visible = true;

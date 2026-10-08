@@ -71,6 +71,31 @@ impl Terminal {
         out.trim().to_string()
     }
 
+    /// True while the shell sits at an editable prompt: OSC 133 is active, a
+    /// `B` (end of prompt) mark is pending its `C`, no command is running and
+    /// no full-screen program owns the screen.
+    pub fn at_shell_prompt(&self) -> bool {
+        !self.is_alt_screen()
+            && self.blocks.osc_seen()
+            && self.blocks.command_start_pos().is_some()
+            && self.blocks.running_osc_elapsed_ms().is_none()
+    }
+
+    /// Text typed at the prompt, from the `B` mark up to the cursor (so
+    /// ghost text such as zsh autosuggestions after the cursor is excluded).
+    /// `None` when not at a prompt.
+    pub fn typed_input(&self) -> Option<String> {
+        if !self.at_shell_prompt() {
+            return None;
+        }
+        let start = self.blocks.command_start_pos()?;
+        let end = (self.abs_cursor_line(), self.cursor_col);
+        if end < start {
+            return Some(String::new());
+        }
+        Some(self.text_between(start, end))
+    }
+
     fn push_mark(&mut self, kind: MarkKind, exit_code: Option<i32>) {
         self.marks.push(SemanticMark {
             kind,
@@ -268,6 +293,31 @@ mod tests {
         assert!(t.scrollback.len() > 0);
         assert_eq!(b.output_start, 1);
         assert_eq!(b.output_end, 4);
+    }
+
+    #[test]
+    fn typed_input_tracks_prompt_state() {
+        let mut t = Terminal::new(40, 6);
+        assert_eq!(t.typed_input(), None, "no OSC 133 yet");
+        feed(&mut t, b"\x1b]133;A\x07$ \x1b]133;B\x07");
+        assert!(t.at_shell_prompt());
+        assert_eq!(t.typed_input().as_deref(), Some(""));
+        feed(&mut t, b"# find big files");
+        assert_eq!(t.typed_input().as_deref(), Some("# find big files"));
+        // Ghost text after the cursor (autosuggestion) is not "typed".
+        feed(&mut t, b"\x1b[2m and more\x1b[0m\x1b[9D");
+        assert_eq!(t.typed_input().as_deref(), Some("# find big files"));
+        // Command accepted: no longer at a prompt.
+        feed(&mut t, b"\r\n\x1b]133;C\x07");
+        assert!(!t.at_shell_prompt());
+        assert_eq!(t.typed_input(), None);
+        feed(&mut t, b"\x1b]133;D;0\x07\x1b]133;A\x07$ ");
+        assert!(!t.at_shell_prompt(), "between A and B the prompt is still drawing");
+        // Alt screen never counts.
+        feed(&mut t, b"\x1b]133;B\x07");
+        assert!(t.at_shell_prompt());
+        feed(&mut t, b"\x1b[?1049h");
+        assert!(!t.at_shell_prompt());
     }
 
     /// Byte-for-byte shape of what zsh emits (PROMPT_SP included), captured

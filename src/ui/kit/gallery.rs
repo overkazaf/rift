@@ -242,7 +242,7 @@ pub(crate) mod qa {
 
     pub fn themes() -> Vec<Theme> {
         vec![
-            Theme::catppuccin_mocha(), Theme::hacker_green(), Theme::dracula(), Theme::nord(),
+            Theme::rift_neon(), Theme::catppuccin_mocha(), Theme::hacker_green(), Theme::dracula(), Theme::nord(),
             Theme::solarized_dark(), Theme::tokyo_night(), Theme::cyberpunk(), Theme::gruvbox(), Theme::monokai(),
         ]
     }

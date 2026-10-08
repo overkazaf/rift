@@ -130,7 +130,7 @@ impl Tokens {
         // Accent is the theme cursor colour; a near-grey cursor (Dracula,
         // Monokai...) would make the accent indistinguishable from text, so
         // fall back to the palette blue in that case.
-        let mut accent = theme.cursor;
+        let mut accent = theme.accent();
         if chroma(accent) < 24 {
             accent = if chroma(theme.palette[4]) >= 40 { theme.palette[4] } else { theme.palette[6] };
         }
@@ -214,6 +214,7 @@ mod tests {
 
     fn themes() -> Vec<Theme> {
         vec![
+            Theme::rift_neon(),
             Theme::catppuccin_mocha(),
             Theme::hacker_green(),
             Theme::dracula(),

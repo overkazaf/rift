@@ -1,336 +1,329 @@
-# Rift — Dimension Rift Terminal
+<div align="center">
 
-> A cyberpunk terminal emulator built in Rust. SSH + AI + 20 visual effects + 32 built-in developer tools.
+<img src="assets/icon.png" alt="Rift logo" width="112" height="112">
 
-Rift is a modern terminal emulator that combines the reliability of a traditional terminal with an integrated AI assistant, cyberpunk visual effects, and a comprehensive developer toolkit — all in a single binary. It's designed for developers, DevOps engineers, security researchers, and terminal enthusiasts who want more than just a shell.
+# Rift
 
-## Highlights
+**The AI-native terminal that understands your screen.**
 
-- **20 visual effects** — CRT scanlines, hologram, matrix rain, thermal vision, and more. No other terminal has this.
-- **AI assistant** — Natural language → shell commands via DeepSeek/Ollama/OpenAI. Privacy-first, local-only.
-- **Time warp** — Rewind your terminal state frame-by-frame. See what was on screen 30 seconds ago.
-- **32 built-in tools** — SSH manager, Git panel, Docker panel, CI/CD status, file manager, and more.
-- **HUD dashboard** — Cyberpunk-style system monitor with CPU/MEM/disk/git/uptime in the terminal.
-- **wgpu GPU rendering** — Optional GPU-accelerated rendering with CRT shader on the GPU.
+Native and fast like Ghostty. Blocks and AI like Warp. Local-first, bring-your-own-key, no account, and a cyberpunk look to go with it.
+
+[![License: MIT](https://img.shields.io/badge/license-MIT-ff2ebe.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/rust-stable-00e5ff.svg?logo=rust&logoColor=white)](https://www.rust-lang.org)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-7a86ff.svg)](#quickstart)
+[![Ko-fi](https://img.shields.io/badge/support-Ko--fi-ff5e5b.svg?logo=ko-fi&logoColor=white)](https://ko-fi.com/john5555555555)
+
+[**Website**](https://overkazaf.github.io/rift/) · [Quickstart](#quickstart) · [AI setup](#ai-setup) · [Shortcuts](#keyboard-shortcuts) · [Roadmap](#roadmap)
+
+<img src="docs/screenshots/hero.png" alt="Rift with command blocks, a failed cargo build showing an inline AI fix suggestion, and the AI chat sidebar docked on the right" width="900">
+
+</div>
+
+## Why Rift
+
+- **Native and fast.** Written in Rust. Rendering is damage-tracked, with an optional GPU path: a keystroke frame takes about 6 ms, down from about 42 ms before damage tracking. IME, CJK and Nerd Font fallback are built in.
+- **Understands your screen.** Shell integration turns output into command blocks. The AI gets your selection, a block or the whole screen as context, and it never runs a command without you.
+- **Yours, locally.** No account and no telemetry. Bring your own key (DeepSeek or any OpenAI-compatible API) or run fully offline with Ollama.
 
 ## Features
 
-### Terminal Core
+### Command blocks
 
-- VT100/xterm terminal emulation (~90% coverage)
-- Scrollback buffer (10,000 lines) with `Cmd+F` search
-- Multiple tabs + unlimited split panes (auto-grid layout for 3+ panes)
-- Ghostty-style tab bar with accent indicators and close buttons
-- Mouse support (SGR 1000/1002/1003) — vim, htop, less work with mouse
-- Text selection + copy/paste (`Cmd+C/V/A`, right-click paste)
-- CJK/double-width character support (Chinese, Japanese, Korean, emoji)
-- Bracketed paste mode (safe multi-line paste)
-- Cursor styles: Block, Bar (vim insert), Underline
-- Alternate charset (G0/G1) — tmux borders render correctly
-- Focus reporting, Device Attributes, OSC 52 clipboard
-- URL detection with `Cmd+Click` to open in browser (highlights on Cmd hover)
-- macOS native window transparency + Retina 2x scaling
-- Native macOS menu bar with all features accessible
+Each command and its output form one block. This works through OSC 133 hooks that Rift injects into **zsh, bash and fish** automatically. It never edits your rc files.
 
-### AI Assistant
+- Exit-code gutter, duration and exit-status chips
+- Hover toolbar: copy command, copy output, ask AI, rerun, fold
+- Fold long output, jump between blocks with `Cmd+Shift+↑/↓`, copy a block's output with `Cmd+Shift+C`
 
-- Built-in LLM integration (DeepSeek, Ollama, any OpenAI-compatible API)
-- `Cmd+Shift+A` — Open AI panel, type natural language, get shell commands
-- `Enter` — Execute the suggested command directly
-- `Tab` — Paste command into terminal for editing
-- `Shift+Enter` — Ask a follow-up question
-- AI Observer mode (`Cmd+Shift+V`) — passively learns your workflow patterns
-  - Tracks command frequency, error patterns, working directories
-  - All data stored locally only (`~/.config/rift/observer/`)
-  - 21 sensitive commands excluded (sudo, passwd, ssh-keygen, etc.)
-  - One-click data clear
-- Teaching mode (`Cmd+Shift+L`) — LLM explains each command before execution
-- Context-aware error diagnosis — detects stack traces and suggests fixes
-- API key auto-detected from environment (`$DEEPSEEK_API_KEY`, `$OPENAI_API_KEY`)
+<img src="docs/screenshots/blocks.png" alt="Command blocks with green and red exit-code gutters, duration chips and a hover toolbar" width="800">
 
-### 20 Visual Effects
+### AI that lives where you work *(preview: under active development)*
 
-| Shortcut | Effect | Description |
-|----------|--------|-------------|
-| `Ctrl+Shift+1` | **CRT** | Scanlines + chromatic aberration + barrel distortion + vignette |
-| `Ctrl+Shift+2` | **Glitch** | Random data corruption + horizontal band shifts |
-| `Ctrl+Shift+3` | **NeonGlow** | Bright pixel bloom / glow effect |
-| `Ctrl+Shift+4` | **MatrixRain** | Green falling characters overlay |
-| `Ctrl+Shift+5` | **Amber** | 80s IBM monochrome amber monitor |
-| `Ctrl+Shift+6` | **Hologram** | Blue-tinted holographic projection with scan line |
-| `Ctrl+Shift+7` | **Pixelate** | Mosaic / low-resolution pixel blocks |
-| `Ctrl+Shift+8` | **Thermal** | Heat vision colormap (black→blue→red→yellow→white) |
-| `Ctrl+Shift+0` | **Off** | Disable all effects |
+| | |
+|---|---|
+| **Docked AI chat** (`Cmd+Shift+A`): a streaming sidebar next to your panes. Works with OpenAI-compatible APIs (DeepSeek, OpenAI…) and local Ollama. | <img src="docs/screenshots/ai-chat.png" alt="AI chat sidebar docked on the right streaming an answer" width="420"> |
+| **Ask about this** (`Cmd+K`): a popover anchored to your selection, the hovered block, the last block or the screen. | <img src="docs/screenshots/cmdk.png" alt="Cmd+K popover anchored to a selected block" width="420"> |
+| **Inline fixes**: when a command fails, a corrected command appears at the prompt. `Tab` accepts it, `Esc` dismisses it. | <img src="docs/screenshots/fix-suggestion.png" alt="Failed cargo build with an inline fix suggestion bar" width="420"> |
+| **`# natural language`**: type `# find the 10 largest files` and press Enter. Rift types the generated command back into your prompt so you can review it. It is never executed for you. | <img src="docs/screenshots/nl-command.png" alt="A # comment at the prompt turned into a du and sort command" width="420"> |
 
-**Menu-only effects** (View → Effects):
+Also available: **Advisor** gives a second-opinion risk review of suggested commands. **Teaching mode** explains each command before it runs. **Observer** offers opt-in workflow insights that stay on your machine.
 
-| Effect | Description |
-|--------|-------------|
-| Raindrop | Ripple distortion from random drop points |
-| VHS | Tape degradation + tracking errors + noise |
-| CyberpunkGrid | Semi-transparent cyan grid overlay |
-| FilmGrain | Cinema-style random luminance noise |
-| Invert | Color negative / film negative |
-| Desaturate | Adjustable grayscale conversion |
-| Chromatic | Psychedelic hue rotation over time |
-| Pulse | Screen brightness breathing animation |
-| Snow | TV static / no-signal noise |
-| Underwater | Blue-green tint + wave distortion |
-| NeonOutline | Edge detection with neon-colored outlines |
-| ScanlineRGB | LCD sub-pixel stripe simulation |
+### Preview-Then-Accept
 
-### Built-in Tools (32)
+Rift intercepts dangerous commands such as `rm -rf`, `git reset --hard` and force pushes before they run, and shows a real impact analysis. Critical commands need a typed "yes".
 
-| Tool | Shortcut | Description |
-|------|----------|-------------|
-| **SSH Client** | `Cmd+Shift+S` | Saved connections with aliases, non-blocking connect, key auth |
-| **Time Warp** | `Ctrl+Shift+Z` | Rewind terminal state frame-by-frame (500 snapshots, ~50s history) |
-| **HUD Dashboard** | `Cmd+Shift+H` | 3-row cyberpunk monitor: CPU/MEM/disk/git/uptime/load |
-| **Search** | `Cmd+F` | Scrollback search with match highlighting and navigation |
-| **Git Panel** | `Cmd+Shift+G` | Branch/status/log visualization with colored file states |
-| **Docker Panel** | `Cmd+Shift+O` | Container/image listing, start/stop, log viewing |
-| **CI/CD Panel** | `Cmd+Shift+I` | GitHub Actions / GitLab CI run status |
-| **File Manager** | `Cmd+Shift+E` | Side panel file browser with type-colored icons |
-| **Recording** | `Cmd+Shift+R` | Session recording in asciinema v2 format (.cast) |
-| **Secret Masking** | `Cmd+Shift+M` | Auto-detect and hide 15 types of API keys/tokens/passwords |
-| **Heatmap** | `Cmd+Shift+Y` | GitHub-style command usage calendar |
-| **Broadcast** | `Cmd+Shift+P` | Type once, send to all panes simultaneously |
-| **Compare** | `Cmd+Shift+K` | Side-by-side diff of output across panes |
-| **Audit Log** | `Cmd+Shift+U` | Command audit trail to `~/.config/rift/audit.log` |
-| **Teaching Mode** | `Cmd+Shift+L` | LLM explains commands before execution |
-| **AI Observer** | `Cmd+Shift+V` | View workflow analysis summary |
-| **Preferences** | `Cmd+Shift+,` | GUI settings panel with live preview |
-| **Welcome** | `Cmd+Shift+?` | Interactive onboarding guide (4 pages) |
-| Error Detection | auto | 10 error patterns (Python traceback, Rust panic, Node error, etc.) |
-| Exec Preview | auto | Shows impact before dangerous commands (rm -rf, git reset --hard) |
-| Env Detection | auto | Detects .nvmrc/.python-version and suggests activation |
-| Command Blocks | auto | Tracks command boundaries and execution time |
-| Command Timer | auto | Measures execution time of each command |
-| Alias Suggest | auto | Detects repeated commands and suggests aliases |
-| Notification | auto | Desktop notification when long commands complete |
-| Autocomplete | `Ctrl+Space` | PATH commands + file paths + shell history |
-| Snippets | — | Save/search/execute command snippets |
-| Hex Viewer | — | Colored hex dump with ASCII column |
-| Base64/URL Codec | — | Encode/decode Base64, URL, hex |
-| Network Monitor | menu | Active network connections viewer |
-| Process Tree | menu | Current shell process tree |
-| SSH Tunnel View | menu | Active SSH tunnel/port forwarding viewer |
-| System Info | menu | Neofetch-style system information panel |
+<img src="docs/screenshots/preview-accept.png" alt="Preview-Then-Accept modal listing what rm -rf would delete" width="800">
 
-### 9 Themes
+### Splits, tabs and sessions
 
-| Theme | Style |
-|-------|-------|
-| `catppuccin-mocha` | Warm dark (default) |
-| `hacker-green` | Classic green-on-black |
-| `dracula` | Purple-tinted dark |
-| `nord` | Cool Nordic blue |
-| `solarized-dark` | Ethan Schoonover's classic |
-| `tokyo-night` | VS Code-inspired dark blue |
-| `cyberpunk` | Neon magenta + electric cyan |
-| `gruvbox` | Retro warm brown |
-| `monokai` | Sublime Text classic |
+Recursive splits with geometric focus, zoom, equalize, swap and drag-resize. You can rename and reorder tabs. Session restore brings back your tabs, split layouts and working directories.
 
-## Installation
+<img src="docs/screenshots/splits.png" alt="Four split panes across two tabs" width="800">
 
-### From source
+### Command palette and built-in browser
+
+| | |
+|---|---|
+| **Command palette** (`Cmd+P`): fuzzy search ranked by frecency, plus parameterized commands: `theme`, `font`, `open`, `ssh`, `cd`, `>` (shell), `?` (ask AI). | <img src="docs/screenshots/palette.png" alt="Command palette with fuzzy matches" width="420"> |
+| **Built-in browser** (`Cmd+Shift+B`): a resizable docked panel with toolbar and a smart URL-or-search address bar. `Cmd`+click a link to open it inside Rift. | <img src="docs/screenshots/browser.png" alt="Built-in browser panel docked beside the terminal" width="420"> |
+
+### Cyber identity
+
+Six screen effects (**CRT, Neon Glow, Matrix Rain, Hologram, Glitch, Amber**) on `Ctrl+Shift+1…6`. The flagship theme is **`rift-neon`**, and nine more ship with it: catppuccin-mocha, hacker-green, dracula, nord, solarized-dark, tokyo-night, cyberpunk, gruvbox, monokai.
+
+| | |
+|---|---|
+| <img src="docs/screenshots/effects-crt.png" alt="CRT effect with scanlines and curvature" width="420"> | <img src="docs/screenshots/hud.png" alt="HUD strip with CPU, memory, disk, git and uptime" width="420"> |
+
+### Power tools
+
+SSH manager · Time Warp (rewind the screen) · HUD · Git / Docker / CI panels · Port dashboard · Regex playground · History search (`Ctrl+R`) · asciinema recording · Secret masking · Inline images (Kitty graphics protocol) · Broadcast input · Compare pane output · File manager · Command heatmap · Audit log
+
+### Core
+
+Damage-tracked rendering with an optional wgpu backend · IME (Chinese input) · font fallback (Nerd Font / Powerline / CJK) · shell integration (OSC 133 / OSC 7) · smooth scrolling · rich selection · context menu · Kitty inline images · session restore
+
+## How it compares
+
+Rift is young. The others are excellent and much more mature. This table shows what Rift brings together, and where it is still catching up.
+
+| | **Rift** | Ghostty | Warp | iTerm2 |
+|---|---|---|---|---|
+| Open source | ✅ MIT | ✅ MIT | ❌ | ✅ GPL |
+| Native app | ✅ Rust | ✅ Zig | ✅ Rust | ✅ Obj-C |
+| GPU rendering | ◐ optional (wgpu) | ✅ | ✅ | ✅ Metal |
+| No account required | ✅ | ✅ | ◐ AI needs login | ✅ |
+| Command blocks | ✅ | ❌ | ✅ | ◐ marks |
+| Built-in AI chat / NL → command | ◐ preview | ❌ | ✅ | ◐ plugin |
+| Bring your own key / local models | ✅ incl. Ollama | — | ◐ | ◐ plugin |
+| Dangerous-command preview | ✅ | ❌ | ❌ | ❌ |
+| Built-in browser panel | ✅ | ❌ | ❌ | ◐ |
+| Screen effects / shaders | ✅ 6 built in | ✅ custom shaders | ❌ | ❌ |
+| Platforms | macOS, Linux | macOS, Linux | macOS, Linux, Windows | macOS |
+| Maturity | Early (v0.3) | Stable | Stable | Very mature |
+
+<sub>✅ yes · ◐ partial / in progress · ❌ no. Based on our reading of each project's public docs as of 2026. If something is wrong, please open an issue.</sub>
+
+## Quickstart
+
+You need a stable Rust toolchain. Prebuilt binaries will be published on [Releases](https://github.com/overkazaf/rift/releases).
 
 ```bash
 git clone https://github.com/overkazaf/rift.git
 cd rift
-cargo build --release
+cargo build --release --features gpu,webview
 ./target/release/rift
 ```
 
-### Optional features
+macOS app bundle (creates `target/Rift.app`):
 
 ```bash
-# GPU rendering (wgpu) — CRT effect runs on GPU
-cargo build --release --features gpu
-
-# Embedded browser (WebView)
-cargo build --release --features webview
-
-# WASM plugin system
-cargo build --release --features plugins
+./scripts/bundle_macos.sh
+open target/Rift.app
 ```
 
-### Command line
+| Feature flag | What it adds |
+|---|---|
+| `gpu` | wgpu renderer and GPU effects |
+| `webview` | Built-in browser panel (system WebView; needs WebKitGTK on Linux) |
+| `plugins` | Experimental WASM plugin host (wasmtime) |
 
 ```bash
-rift              # Start terminal
-rift --help       # Show help + all shortcuts
-rift --version    # Show version
-rift --config PATH  # Use custom config file
+rift --help            # usage
+rift --version
+rift --config PATH     # use a specific config file
 ```
 
-## Configuration
+## AI setup
 
-Config file: `~/.config/rift/config.toml` (auto-saved on exit)
+Config lives at `~/.config/rift/config.toml`. If `api_key` is omitted, Rift reads `$DEEPSEEK_API_KEY` or `$OPENAI_API_KEY` from the environment.
 
-### Configuration Reference
-
-#### General
-
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `font_size` | float | `15.0` | Font size in points (scaled for Retina) |
-| `font_family` | string | — | Font name, e.g. `"JetBrains Mono"` |
-| `font_path` | string | — | Direct path to `.ttf`/`.otf`/`.ttc` file |
-| `cols` | int | `120` | Initial terminal columns |
-| `rows` | int | `36` | Initial terminal rows |
-| `opacity` | float | `0.92` | Window opacity (0.0 = transparent, 1.0 = opaque) |
-| `theme` | string | `"catppuccin-mocha"` | Color theme name |
-
-#### LLM
-
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `provider` | string | `"ollama"` | LLM provider (`ollama` or `openai` for any OpenAI-compatible API) |
-| `model` | string | `"llama3.2"` | Model name |
-| `api_url` | string | `"http://localhost:11434"` | API endpoint URL |
-| `api_key` | string | — | API key (auto-detected from `$DEEPSEEK_API_KEY` or `$OPENAI_API_KEY`) |
-
-### Example config
+**DeepSeek** (or any OpenAI-compatible API):
 
 ```toml
-[general]
-font_size = 15.0
-font_family = "JetBrains Mono"
-cols = 120
-rows = 36
-opacity = 0.85
-theme = "cyberpunk"
-
 [llm]
-provider = "openai"
-model = "deepseek-chat"
-api_url = "https://api.deepseek.com"
-# api_key auto-detected from $DEEPSEEK_API_KEY
+provider = "openai"          # any OpenAI-compatible endpoint
+model    = "deepseek-chat"
+api_url  = "https://api.deepseek.com"
+# api_key = "..."            # optional; falls back to $DEEPSEEK_API_KEY
 ```
 
-GUI configuration: `Cmd+Shift+,` opens Preferences panel with live preview. Press `S` to save. All changes auto-saved on `Cmd+Q` exit.
+**OpenAI:**
 
-## Key Shortcuts
+```toml
+[llm]
+provider = "openai"
+model    = "gpt-4o-mini"
+api_url  = "https://api.openai.com"
+```
 
-### Window Management
+**Ollama** (fully local, no key):
+
+```toml
+[llm]
+provider = "ollama"
+model    = "llama3.2"
+api_url  = "http://localhost:11434"
+```
+
+Turn the ambient AI features on or off:
+
+```toml
+[ai]
+auto_fix = true   # suggest a fix when a command fails
+nl_hash  = true   # "# ..." at the prompt → generated command
+```
+
+Other `[general]` keys: `theme` (default `"rift-neon"`), `font_family`, `font_path`, `font_size`, `opacity`, `cols`, `rows`, `effect`, `effect_intensity`, `startup_animation`. You can also open **Preferences** (`Cmd+,`).
+
+### Privacy
+
+- No account and no telemetry.
+- AI requests go directly from your machine to the endpoint you configure. With Ollama they never leave your machine.
+- Screen or block text is sent only for an AI action you trigger, or for auto-fix on failed commands, which you can turn off with `auto_fix = false`.
+- Observer is opt-in and stores data locally under `~/.config/rift/observer/`. It skips sensitive commands and never records arguments.
+
+## Keyboard shortcuts
+
+macOS bindings. On Linux, the `Cmd+Shift+…` shortcuts use `Ctrl+Shift+…`. You can also search any action in the command palette (`Cmd+P`).
+
+**Essentials**
 
 | Shortcut | Action |
-|----------|--------|
+|---|---|
+| `Cmd+P` | Command palette |
+| `Cmd+K` | Ask AI about this (selection / block / screen) |
+| `Cmd+Shift+A` | AI chat sidebar |
+| `Tab` / `Esc` | Accept / dismiss an inline fix suggestion |
+| `# …` + `Enter` | Natural language → command |
+| `Ctrl+R` | History search |
+| `Cmd+F` | Find in scrollback |
+| `Ctrl+Space` | Autocomplete |
+| `Cmd+,` | Preferences |
+| `Cmd+C` / `Cmd+V` / `Cmd+A` | Copy / paste / select all |
+| `Cmd+=` / `Ctrl+-` / `Cmd+0` | Font size up / down / reset |
+
+**Blocks**
+
+| Shortcut | Action |
+|---|---|
+| `Cmd+Shift+↑` / `Cmd+Shift+↓` | Previous / next block |
+| `Cmd+Shift+C` | Copy output of the current block |
+| `Cmd+C` (block selected) | Copy that block's output |
+
+**Tabs and panes**
+
+| Shortcut | Action |
+|---|---|
 | `Cmd+Shift+T` | New tab |
-| `Cmd+Shift+W` | Close pane/tab |
-| `Cmd+Shift+[` | Previous tab |
-| `Cmd+Shift+]` | Next tab |
-| `Ctrl+Tab` | Cycle tabs |
-| `Cmd+D` | Split vertical (left/right) |
-| `Cmd+Shift+D` | Split horizontal (up/down) |
-| `Alt+Arrow` | Switch pane focus |
-| `Cmd+Q` | Quit (auto-saves config) |
+| `Cmd+Shift+W` | Close tab |
+| `Cmd+Shift+[` / `Cmd+Shift+]` | Previous / next tab |
+| `Ctrl+Tab` / `Ctrl+Shift+Tab` | Cycle tabs |
+| `Cmd+D` | Split right |
+| `Cmd+Shift+D` | Split down |
+| `Cmd+W` | Close pane |
+| `Cmd+Shift+Enter` | Zoom pane |
+| `Cmd+Ctrl+=` | Equalize panes |
+| `Cmd+[` / `Cmd+]` | Previous / next pane |
+| `Cmd+Alt+Arrow` (or `Alt+Arrow`) | Focus pane in that direction |
+| `Cmd+Ctrl+Arrow` | Resize pane |
+| `Cmd+Ctrl+Shift+Arrow` | Swap pane |
 
-### Editing
-
-| Shortcut | Action |
-|----------|--------|
-| `Cmd+C` | Copy selection |
-| `Cmd+V` | Paste (bracketed paste aware) |
-| `Cmd+A` | Select all |
-| `Cmd+F` | Search scrollback |
-| `Cmd+=` | Zoom in (font size +1) |
-| `Ctrl+-` | Zoom out (font size -1) |
-| `Cmd+0` | Reset zoom |
-
-### Tools
+**Browser**
 
 | Shortcut | Action |
-|----------|--------|
-| `Cmd+Shift+S` | SSH connect |
-| `Cmd+Shift+A` | AI assistant |
-| `Cmd+Shift+H` | HUD dashboard |
-| `Ctrl+Shift+Z` | Time warp |
-| `Cmd+Shift+R` | Toggle recording |
-| `Cmd+Shift+E` | File manager |
+|---|---|
+| `Cmd+Shift+B` | Toggle browser panel |
+| `Cmd+L` | Focus address bar |
+| `Cmd+R` | Reload |
+| `Cmd+[` / `Cmd+]` | Back / forward (when the browser has focus) |
+| `Cmd+W` | Close browser (when the browser has focus) |
+| `Cmd`+click a link | Open it inside Rift |
+
+**Tools**
+
+| Shortcut | Action |
+|---|---|
+| `Cmd+Shift+S` | SSH manager |
+| `Cmd+Shift+H` | HUD |
+| `Ctrl+Shift+Z` | Time Warp |
 | `Cmd+Shift+G` | Git panel |
 | `Cmd+Shift+O` | Docker panel |
 | `Cmd+Shift+I` | CI/CD panel |
+| `Cmd+Shift+E` | File manager |
+| `Cmd+Shift+X` | Regex playground |
 | `Cmd+Shift+Y` | Command heatmap |
-| `Cmd+Shift+M` | Toggle secret masking |
-| `Cmd+Shift+U` | Toggle audit log |
-| `Cmd+Shift+L` | Toggle teaching mode |
-| `Cmd+Shift+V` | Observer summary |
-| `Cmd+Shift+P` | Toggle broadcast mode |
+| `Cmd+Shift+R` | Toggle recording (asciinema) |
+| `Cmd+Shift+M` | Secret masking |
+| `Cmd+Shift+U` | Audit log |
+| `Cmd+Shift+L` | Teaching mode |
+| `Ctrl+Shift+V` | Observer summary |
+| `Cmd+Shift+P` | Broadcast input to all panes |
 | `Cmd+Shift+K` | Compare pane output |
-| `Cmd+Shift+,` | Preferences |
+| `Cmd+Alt+K` | Clear buffer |
+| `Ctrl+Cmd+F` | Full screen |
 | `Cmd+Shift+?` | Welcome guide |
-| `Ctrl+Space` | Autocomplete |
 
-### Visual Effects
-
-| Shortcut | Effect |
-|----------|--------|
-| `Ctrl+Shift+1` | CRT |
-| `Ctrl+Shift+2` | Glitch |
-| `Ctrl+Shift+3` | NeonGlow |
-| `Ctrl+Shift+4` | MatrixRain |
-| `Ctrl+Shift+5` | Amber |
-| `Ctrl+Shift+6` | Hologram |
-| `Ctrl+Shift+7` | Pixelate |
-| `Ctrl+Shift+8` | Thermal |
-| `Ctrl+Shift+0` | Off |
-
-12 additional effects available via **View → Effects** menu.
-
-## FAQ
-
-**Q: Font icons (Powerline/Nerd Font) show as blank**
-A: Configure your font in `~/.config/rift/config.toml`:
-```toml
-font_family = "MesloLGS NF"
-```
-
-**Q: `Cmd+Shift+1-5` doesn't work for effects**
-A: macOS intercepts `Cmd+Shift+1-5` for screenshots. Use `Ctrl+Shift+1-8` instead, or the **View → Effects** menu.
-
-**Q: How to use Time Warp?**
-A: Press `Ctrl+Shift+Z` to enter. Use `←/→` to browse frames, `Shift+Arrow` to jump 10 frames, `Esc` to return.
-
-**Q: AI assistant says "Error"**
-A: Configure your LLM provider in config.toml. Set `$DEEPSEEK_API_KEY` or `$OPENAI_API_KEY` environment variable.
-
-**Q: How to see the Observer analysis?**
-A: Press `Cmd+Shift+V`. Observer must be enabled first (same shortcut enables it). Data is stored locally in `~/.config/rift/observer/`.
-
-**Q: Terminal colors look wrong in vim**
-A: Ensure your shell has `TERM=xterm-256color` and `COLORTERM=truecolor` (Rift sets these automatically).
-
-**Q: How to use a custom theme?**
-A: Edit `~/.config/rift/config.toml` and add custom colors under `[theme.custom]`:
-```toml
-[theme.custom]
-fg = [220, 220, 220]
-bg = [20, 20, 30]
-cursor = [255, 100, 100]
-```
+**Effects:** `Ctrl+Shift+1` CRT · `2` Glitch · `3` Neon Glow · `4` Matrix Rain · `5` Amber · `6` Hologram · `Ctrl+Shift+0` off. Effects use `Ctrl`, not `Cmd`, because macOS reserves `Cmd+Shift+3/4/5` for screenshots. They are also under **View → Effects**.
 
 ## Architecture
 
-```
-16,000+ lines of Rust · 80 files
+About 40k lines of Rust across roughly 125 files. Single binary.
 
-src/
-├── config/       Configuration, 9 themes, font discovery
-├── app/          Application layer (mod/shortcuts/overlays/lifecycle)
-├── terminal/     VT100 parser, state machine, grid
-├── renderer/     softbuffer CPU + wgpu GPU pipeline, font manager
-├── window/       Tab, Pane, WindowManager, Selection
-├── ui/           Preferences, Welcome, Menu bar, UI primitives
-├── network/      SSH client (russh) + WebView (wry)
-├── ai/           LLM backend, Observer, Autocomplete, Teaching
-├── effects/      20 visual effects (CPU shaders + GPU CRT)
-├── tools/        32 built-in developer tools
-├── plugin/       WASM plugin system (wasmtime)
-└── platform/     macOS native integration (transparency)
 ```
+src/
+├── main.rs              CLI args, event loop bootstrap
+├── app/                 App state + input routing (shortcuts, panes, tabs, mouse, IME, overlays, lifecycle)
+├── terminal/            VT parser (vte), grid, scrollback, OSC 133/7 semantic marks, Kitty inline images
+├── renderer/            softbuffer CPU renderer with damage tracking, optional wgpu GPU path, font fallback
+├── window/              WindowManager, tabs, recursive split tree, panes, selection
+├── shell_integration/   Embedded zsh/bash/fish hooks + auto-injection (never touches rc files)
+├── blocks_ui/           Warp-style command blocks: gutter, chips, hover toolbar, folding, navigation
+├── ai/                  LLM backends, chat sidebar (streaming), inline Cmd+K / fix / # NL, advisor, observer
+├── network/             SSH (russh), built-in browser chrome + WebView (wry)
+├── tools/               Command palette, exec preview, time warp, HUD, git/docker/CI panels, history, recording…
+├── ui/                  UI kit (design tokens, widgets), menu bar, tab bar, preferences, welcome, context menu
+├── effects/             Screen effects (CRT, Neon, Matrix, Hologram, Glitch, Amber)
+├── config/              config.toml parsing, themes (rift-neon + 9)
+├── plugin/              Experimental WASM plugin host (feature `plugins`)
+└── platform/            macOS integration (transparency, native bits)
+```
+
+## Roadmap
+
+**Done**
+- Damage-tracked rendering, optional wgpu backend, IME, font fallback
+- Shell integration with auto-injected hooks for zsh, bash and fish
+- Command blocks: chips, hover toolbar, folding, navigation
+- Recursive splits, tabs, session restore
+- Command palette, built-in browser, Preview-Then-Accept, power tools
+
+**In progress**
+- AI: docked chat, `Cmd+K`, inline fixes, `# natural language`, Advisor, Teaching mode, Observer insights
+- Real screenshots and demo recordings for the website and README
+
+**Next**
+- Prebuilt, signed releases for macOS; Linux packages
+- Broader Linux testing
+- Config docs and theme customization guide
+- Plugin API stabilization
+
+Windows is not planned for the near term.
+
+## Contributing
+
+Issues and PRs are welcome.
+
+1. Fork and create a branch.
+2. `cargo build` (add `--features gpu,webview` to exercise those paths) and `cargo test`.
+3. Keep changes focused and describe what you tested. Screenshots help with UI changes.
+
+Found a bug or a wrong claim in the comparison table? [Open an issue](https://github.com/overkazaf/rift/issues).
+
+## Support
+
+Rift is built by one person, in the open. If it saves you time, [**star the repo**](https://github.com/overkazaf/rift) or [**buy me a coffee on Ko-fi**](https://ko-fi.com/john5555555555).
 
 ## License
 
-MIT — see [LICENSE](LICENSE)
+[MIT](LICENSE) © [overkazaf](https://github.com/overkazaf)

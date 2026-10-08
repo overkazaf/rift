@@ -168,11 +168,63 @@ pub fn discover_fallbacks(dirs: &[PathBuf], exclude: Option<&Path>) -> Vec<PathB
         .collect()
 }
 
+/// A fontdue font plus a corrected glyph map for U+0080..=U+00FF.
+///
+/// fontdue 0.9 merges every cmap subtable, so fonts that also ship a Mac
+/// Roman subtable (e.g. Menlo) map Latin-1 code points to the wrong glyphs
+/// (`·` renders as `∑`, `×` as `◊`, `é` as something else). We resolve that
+/// range with ttf-parser, which honours the Unicode subtable, and rasterize
+/// by glyph index.
+struct GFont {
+    font: fontdue::Font,
+    latin1: [u16; 128],
+}
+
+impl GFont {
+    fn from_bytes(data: &[u8], size: f32) -> Option<Self> {
+        let settings = fontdue::FontSettings {
+            collection_index: 0,
+            scale: size,
+            ..Default::default()
+        };
+        let font = fontdue::Font::from_bytes(data, settings).ok()?;
+        let mut latin1 = [0u16; 128];
+        match ttf_parser::Face::parse(data, 0) {
+            Ok(face) => {
+                for (i, slot) in latin1.iter_mut().enumerate() {
+                    if let Some(c) = char::from_u32(0x80 + i as u32) {
+                        *slot = face.glyph_index(c).map_or(0, |g| g.0);
+                    }
+                }
+            }
+            Err(_) => {
+                for (i, slot) in latin1.iter_mut().enumerate() {
+                    if let Some(c) = char::from_u32(0x80 + i as u32) {
+                        *slot = font.lookup_glyph_index(c);
+                    }
+                }
+            }
+        }
+        Some(Self { font, latin1 })
+    }
+
+    fn glyph(&self, c: char) -> u16 {
+        match c as u32 {
+            cp @ 0x80..=0xFF => self.latin1[(cp - 0x80) as usize],
+            _ => self.font.lookup_glyph_index(c),
+        }
+    }
+
+    fn rasterize(&self, c: char, size: f32) -> (fontdue::Metrics, Vec<u8>) {
+        self.font.rasterize_indexed(self.glyph(c), size)
+    }
+}
+
 enum Slot {
     Unloaded,
     Failed,
     /// Parsed font and the pixel size that makes its line height match the primary's.
-    Loaded(fontdue::Font, f32),
+    Loaded(GFont, f32),
 }
 
 struct Fallback {
@@ -188,7 +240,7 @@ enum Source {
 }
 
 pub struct FontManager {
-    primary: fontdue::Font,
+    primary: GFont,
     fallbacks: Vec<Fallback>,
     font_size: f32,
     primary_line_height: f32,
@@ -199,14 +251,9 @@ pub struct FontManager {
     wide_cache: HashMap<char, Vec<u8>>,
 }
 
-fn load_font(path: &Path, size: f32) -> Option<fontdue::Font> {
+fn load_font(path: &Path, size: f32) -> Option<GFont> {
     let data = std::fs::read(path).ok()?;
-    let settings = fontdue::FontSettings {
-        collection_index: 0,
-        scale: size,
-        ..Default::default()
-    };
-    fontdue::Font::from_bytes(data, settings).ok()
+    GFont::from_bytes(&data, size)
 }
 
 impl FontManager {
@@ -215,21 +262,16 @@ impl FontManager {
             .unwrap_or_else(|e| panic!("Failed to read font {font_path}: {e}"));
         log::info!("Loaded font: {font_path}");
 
-        let settings = fontdue::FontSettings {
-            collection_index: 0,
-            scale: font_size,
-            ..Default::default()
-        };
-        let font = fontdue::Font::from_bytes(font_data, settings)
-            .expect("Failed to parse font");
+        let font = GFont::from_bytes(&font_data, font_size).expect("Failed to parse font");
 
         let metrics = font
+            .font
             .horizontal_line_metrics(font_size)
             .expect("Font missing horizontal metrics");
         let cell_height = (metrics.ascent - metrics.descent + metrics.line_gap).ceil() as usize;
         let baseline = metrics.ascent.ceil() as usize;
 
-        let (m_metrics, _) = font.rasterize('M', font_size);
+        let (m_metrics, _) = font.font.rasterize('M', font_size);
         let cell_width = m_metrics.advance_width.ceil() as usize;
 
         let fallbacks = discover_fallbacks(&system_font_dirs(), Some(Path::new(font_path)))
@@ -258,7 +300,7 @@ impl FontManager {
             self.fallbacks[i].slot = match load_font(&path, self.font_size) {
                 Some(f) => {
                     // Scale so the fallback's ascent+descent fits the primary's line height.
-                    let size = match f.horizontal_line_metrics(self.font_size) {
+                    let size = match f.font.horizontal_line_metrics(self.font_size) {
                         Some(m) if m.ascent - m.descent > 0.0 => {
                             let lh = m.ascent - m.descent;
                             (self.font_size * self.primary_line_height / lh)
@@ -279,7 +321,7 @@ impl FontManager {
     }
 
     fn pick(&mut self, c: char) -> Source {
-        if self.primary.lookup_glyph_index(c) != 0 {
+        if self.primary.glyph(c) != 0 {
             return Source::Primary;
         }
         for i in 0..self.fallbacks.len() {
@@ -287,7 +329,7 @@ impl FontManager {
                 continue;
             }
             if let Slot::Loaded(f, _) = &self.fallbacks[i].slot {
-                if f.lookup_glyph_index(c) != 0 {
+                if f.glyph(c) != 0 {
                     return Source::Fallback(i);
                 }
             }
@@ -370,7 +412,7 @@ fn placeholder_box(w: usize, h: usize) -> Vec<u8> {
 /// `center`, the ink is centered horizontally.
 #[allow(clippy::too_many_arguments)]
 fn place_glyph(
-    font: &fontdue::Font,
+    font: &GFont,
     c: char,
     size: f32,
     target_w: usize,
@@ -527,4 +569,25 @@ mod tests {
         // Emoji are never blank.
         assert!(fm.rasterize_wide('😀').iter().any(|&v| v > 0));
     }
+
+    /// fontdue merges Mac Roman cmap entries over Unicode for U+0080..=U+00FF;
+    /// make sure Latin-1 glyphs come from the Unicode table (Menlo regression).
+    #[test]
+    fn latin1_glyphs_not_aliased_to_mac_roman() {
+        let path = "/System/Library/Fonts/Menlo.ttc";
+        if !Path::new(path).exists() {
+            return;
+        }
+        let mut fm = FontManager::new(path, 16.0);
+        let dot = fm.rasterize('\u{00B7}').to_vec();
+        let sum = fm.rasterize('\u{2211}').to_vec();
+        assert_ne!(dot, sum, "middle dot must not render as summation");
+        let times = fm.rasterize('\u{00D7}').to_vec();
+        let lozenge = fm.rasterize('\u{25CA}').to_vec();
+        assert_ne!(times, lozenge, "multiply sign must not render as lozenge");
+        // The middle dot is small: far less ink than the summation sign.
+        let ink = |b: &[u8]| b.iter().filter(|&&v| v > 64).count();
+        assert!(ink(&dot) * 3 < ink(&sum));
+    }
+
 }

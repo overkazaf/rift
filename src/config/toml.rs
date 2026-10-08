@@ -1,4 +1,5 @@
 use super::{Config, Rgb};
+use crate::effects::EffectKind;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -6,6 +7,18 @@ pub fn save_config(config: &Config) {
     let path = dirs::home_dir()
         .unwrap_or_default()
         .join(".config/rift/config.toml");
+    let s = config_to_toml(config);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match std::fs::write(&path, &s) {
+        Ok(_) => log::info!("Config saved: {}", path.display()),
+        Err(e) => log::error!("Save config failed: {e}"),
+    }
+}
+
+/// Serialize the config to TOML (inverse of `parse_toml_config`).
+pub fn config_to_toml(config: &Config) -> String {
     let mut s = String::new();
     s.push_str("[general]\n");
     s.push_str(&format!("font_size = {:.1}\n", config.font_size));
@@ -19,19 +32,19 @@ pub fn save_config(config: &Config) {
     if let Some(ref path) = config.font_path {
         s.push_str(&format!("font_path = \"{path}\"\n"));
     }
+    s.push_str(&format!("effect = \"{}\"\n", config.effect.map_or("none", |k| k.name())));
+    s.push_str(&format!("effect_intensity = {:.2}\n", config.effect_intensity));
+    s.push_str(&format!("startup_animation = {}\n", config.startup_animation));
+    s.push_str("\n[ai]\n");
+    s.push_str(&format!("auto_fix = {}\n", config.ai_auto_fix));
+    s.push_str(&format!("nl_hash = {}\n", config.ai_nl_hash));
     if config.llm.enabled {
         s.push_str("\n[llm]\n");
         s.push_str(&format!("provider = \"{}\"\n", config.llm.provider));
         s.push_str(&format!("model = \"{}\"\n", config.llm.model));
         s.push_str(&format!("api_url = \"{}\"\n", config.llm.api_url));
     }
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    match std::fs::write(&path, &s) {
-        Ok(_) => log::info!("Config saved: {}", path.display()),
-        Err(e) => log::error!("Save config failed: {e}"),
-    }
+    s
 }
 
 pub fn load_config() -> Config {
@@ -63,6 +76,13 @@ fn parse_toml_config(content: &str) -> Config {
     let map = parse_toml(content);
     let mut config = Config::default();
 
+    // Config files that predate the rift-neon default keep their old look.
+    if get_str(&map, "general", "theme").is_none() {
+        if let Some(theme) = Config::theme_by_name(super::LEGACY_THEME) {
+            config.theme = theme;
+            config.theme_name = super::LEGACY_THEME.to_string();
+        }
+    }
     if let Some(v) = get_str(&map, "general", "theme") {
         if let Some(theme) = Config::theme_by_name(&v) {
             config.theme = theme;
@@ -91,6 +111,19 @@ fn parse_toml_config(content: &str) -> Config {
         config.font_path = Some(v);
     }
 
+    if let Some(v) = get_str(&map, "general", "effect").or_else(|| get_str(&map, "", "effect")) {
+        match EffectKind::parse_setting(&v) {
+            Some(kind) => config.effect = kind,
+            None => log::warn!("Unknown effect '{v}' (valid: crt, glitch, neon, matrix, amber, hologram, none)"),
+        }
+    }
+    if let Some(v) = get_float(&map, "general", "effect_intensity").or_else(|| get_float(&map, "", "effect_intensity")) {
+        config.effect_intensity = v.clamp(0.0, 1.0);
+    }
+    if let Some(v) = get_int(&map, "general", "startup_animation").or_else(|| get_int(&map, "", "startup_animation")) {
+        config.startup_animation = v != 0;
+    }
+
     if let Some(fg) = get_rgb(&map, "theme.custom", "fg") {
         config.theme.fg = fg;
     }
@@ -99,6 +132,13 @@ fn parse_toml_config(content: &str) -> Config {
     }
     if let Some(cursor) = get_rgb(&map, "theme.custom", "cursor") {
         config.theme.cursor = cursor;
+    }
+
+    if let Some(v) = get_int(&map, "ai", "auto_fix") {
+        config.ai_auto_fix = v != 0;
+    }
+    if let Some(v) = get_int(&map, "ai", "nl_hash") {
+        config.ai_nl_hash = v != 0;
     }
 
     // LLM config
@@ -202,5 +242,59 @@ fn get_rgb(map: &TomlMap, section: &str, key: &str) -> Option<Rgb> {
             Some((r, g, b))
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ai_toggles_default_on_and_parse() {
+        let c = parse_toml_config("[general]\nfont_size = 14.0\n");
+        assert!(c.ai_auto_fix && c.ai_nl_hash);
+        let c = parse_toml_config("[ai]\nauto_fix = false\nnl_hash = true\n");
+        assert!(!c.ai_auto_fix && c.ai_nl_hash);
+    }
+
+    #[test]
+    fn effect_settings_round_trip() {
+        for kind in EffectKind::ALL.map(Some).into_iter().chain([None]) {
+            let mut c = Config::default();
+            c.effect = kind;
+            c.effect_intensity = 0.35;
+            c.startup_animation = false;
+            let back = parse_toml_config(&config_to_toml(&c));
+            assert_eq!(back.effect, kind);
+            assert!((back.effect_intensity - 0.35).abs() < 1e-6);
+            assert!(!back.startup_animation);
+            assert_eq!(back.theme_name, c.theme_name);
+        }
+    }
+
+    #[test]
+    fn effect_parsing_defaults_clamps_and_rejects_junk() {
+        let c = parse_toml_config("[general]\nfont_size = 14.0\n");
+        assert_eq!(c.effect, None);
+        assert!((c.effect_intensity - 0.6).abs() < 1e-6);
+        assert!(c.startup_animation);
+        let c = parse_toml_config("[general]\neffect = \"hologram\"\neffect_intensity = 7\n");
+        assert_eq!(c.effect, Some(EffectKind::Hologram));
+        assert_eq!(c.effect_intensity, 1.0);
+        let c = parse_toml_config("effect = \"crt\"\n");
+        assert_eq!(c.effect, Some(EffectKind::Crt), "top-level key accepted");
+        let c = parse_toml_config("[general]\neffect = \"pixelate\"\n");
+        assert_eq!(c.effect, None, "removed effects are ignored");
+    }
+
+    #[test]
+    fn default_theme_only_applies_to_new_configs() {
+        assert_eq!(Config::default().theme_name, "rift-neon");
+        let c = parse_toml_config("[general]\nfont_size = 14.0\n");
+        assert_eq!(c.theme_name, "catppuccin-mocha", "existing config without theme keeps legacy look");
+        let c = parse_toml_config("[general]\ntheme = \"nord\"\n");
+        assert_eq!(c.theme_name, "nord");
+        let c = parse_toml_config("[general]\ntheme = \"rift-neon\"\n");
+        assert_eq!(c.theme.name, "rift-neon");
     }
 }

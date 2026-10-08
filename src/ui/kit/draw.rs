@@ -54,6 +54,23 @@ pub fn ellipsize(s: &str, max_cols: usize) -> String {
     out
 }
 
+/// Column heights (0..=h) for a sparkline of `data` resampled to `w` columns
+/// and scaled so `max` fills `h`.
+pub fn spark_heights(data: &[f32], w: usize, h: usize, max: f32) -> Vec<usize> {
+    if data.is_empty() || w == 0 || max <= 0.0 {
+        return vec![0; w];
+    }
+    (0..w)
+        .map(|x| {
+            let pos = if w > 1 { x as f32 * (data.len() - 1) as f32 / (w - 1) as f32 } else { 0.0 };
+            let (i0, f) = (pos.floor() as usize, pos.fract());
+            let i1 = (i0 + 1).min(data.len() - 1);
+            let v = data[i0] * (1.0 - f) + data[i1] * f;
+            ((v / max).clamp(0.0, 1.0) * h as f32).round() as usize
+        })
+        .collect()
+}
+
 impl<'a> Ctx<'a> {
     #[inline]
     pub fn put(&mut self, x: usize, y: usize, c: Rgb, a: u32) {
@@ -271,6 +288,14 @@ mod tests {
         assert_eq!(ellipsize("hello", 1), "…");
         assert_eq!(ellipsize("hello", 0), "");
         assert_eq!(ellipsize("héllo wörld", 5).chars().count(), 5);
+    }
+
+    #[test]
+    fn spark_heights_resample_and_clamp() {
+        assert_eq!(spark_heights(&[], 4, 8, 100.0), vec![0; 4]);
+        assert_eq!(spark_heights(&[0.0, 100.0], 3, 8, 100.0), vec![0, 4, 8]);
+        assert_eq!(spark_heights(&[250.0], 2, 8, 100.0), vec![8, 8]);
+        assert_eq!(spark_heights(&[50.0], 0, 8, 100.0), Vec::<usize>::new());
     }
 
     #[test]

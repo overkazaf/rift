@@ -461,6 +461,26 @@ impl<'a> Ctx<'a> {
         }
     }
 
+    // ---- sparkline -----------------------------------------------------------
+
+    /// Filled area sparkline over `r`: `data` is resampled to the width and
+    /// scaled so `max` fills the height. A faint baseline anchors it.
+    pub fn sparkline(&mut self, r: Rect, data: &[f32], max: f32, c: Rgb) {
+        if r.w == 0 || r.h == 0 {
+            return;
+        }
+        let base = r.bottom() - 1;
+        self.hline(r.x, base, r.w, self.tk.border);
+        for (i, hh) in super::draw::spark_heights(data, r.w, r.h - 1, max).into_iter().enumerate() {
+            if hh == 0 {
+                continue;
+            }
+            let x = r.x + i;
+            self.fill_a(Rect::new(x, base - hh, 1, hh), c, 60);
+            self.put(x, base - hh, c, 255);
+        }
+    }
+
     // ---- toast -------------------------------------------------------------
 
     /// Toast anchored at the bottom centre of the screen.

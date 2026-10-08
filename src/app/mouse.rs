@@ -196,12 +196,13 @@ pub fn clear_buffer(app: &mut App) {
 
 /// Entry point for "Ask AI about Selection". P2 replaces this function.
 fn ask_ai_about(app: &mut App, text: &str) {
+    use crate::ai::hub::{AskRequest, ContextItem, Intent};
     let one_line: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let clipped: String = one_line.chars().take(MAX_QUERY_CHARS).collect();
-    app.ai_panel.visible = true;
-    app.ai_panel.response = None;
-    app.ai_panel.error = None;
-    app.ai_panel.input = format!("Explain this terminal output: {clipped}");
+    let label: String = one_line.chars().take(MAX_QUERY_CHARS).collect();
+    let req = AskRequest::new("", Intent::Explain)
+        .with(ContextItem::Selection(text.to_string()))
+        .display(format!("Explain: {label}"));
+    crate::ai::hub::ask(app, req);
 }
 
 // ── Wheel / trackpad ────────────────────────────────────────────────────

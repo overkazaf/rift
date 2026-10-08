@@ -16,6 +16,11 @@ pub fn mod_key() -> &'static str {
     { "Ctrl" }
 }
 
+/// Theme for brand-new configs. Existing config files without a `theme` key
+/// keep [`LEGACY_THEME`] (see `toml::parse_toml_config`).
+pub const DEFAULT_THEME: &str = "rift-neon";
+pub const LEGACY_THEME: &str = "catppuccin-mocha";
+
 pub type Rgb = (u8, u8, u8);
 
 pub struct Config {
@@ -28,6 +33,16 @@ pub struct Config {
     pub theme: Theme,
     pub theme_name: String,
     pub llm: crate::ai::LlmConfig,
+    /// AI → Auto Fix Suggestions: propose a fix when a command fails.
+    pub ai_auto_fix: bool,
+    /// AI → # Natural Language: `# request` + Enter at the prompt generates a command.
+    pub ai_nl_hash: bool,
+    /// Active visual effect (`effect = "crt"` in config.toml); `None` = off.
+    pub effect: Option<crate::effects::EffectKind>,
+    /// Effect strength 0.0..=1.0 (`effect_intensity`).
+    pub effect_intensity: f32,
+    /// Play the short RIFT logo reveal at startup (`startup_animation`).
+    pub startup_animation: bool,
 }
 
 impl Default for Config {
@@ -39,9 +54,14 @@ impl Default for Config {
             cols: 120,
             rows: 36,
             opacity: 0.92,
-            theme: Theme::catppuccin_mocha(),
-            theme_name: "catppuccin-mocha".to_string(),
+            theme: Theme::rift_neon(),
+            theme_name: DEFAULT_THEME.to_string(),
             llm: crate::ai::LlmConfig::default(),
+            ai_auto_fix: true,
+            ai_nl_hash: true,
+            effect: None,
+            effect_intensity: crate::effects::DEFAULT_INTENSITY,
+            startup_animation: true,
         }
     }
 }
@@ -49,13 +69,14 @@ impl Default for Config {
 impl Config {
     pub fn available_themes() -> &'static [&'static str] {
         &[
-            "catppuccin-mocha", "hacker-green", "dracula", "nord",
+            "rift-neon", "catppuccin-mocha", "hacker-green", "dracula", "nord",
             "solarized-dark", "tokyo-night", "cyberpunk", "gruvbox", "monokai",
         ]
     }
 
     pub fn theme_by_name(name: &str) -> Option<Theme> {
         match name {
+            "rift-neon" => Some(Theme::rift_neon()),
             "catppuccin-mocha" => Some(Theme::catppuccin_mocha()),
             "hacker-green" => Some(Theme::hacker_green()),
             "dracula" => Some(Theme::dracula()),
@@ -81,12 +102,32 @@ pub struct Theme {
 }
 
 impl Theme {
+    /// Flagship theme: deep blue-black, magenta accent, cyan secondary.
+    pub fn rift_neon() -> Self {
+        Self {
+            name: "rift-neon",
+            fg: (214, 224, 255), bg: (8, 10, 24), cursor: (255, 46, 190),
+            palette: [
+                (22, 26, 56), (255, 64, 112), (0, 240, 160), (255, 214, 64),
+                (72, 120, 255), (255, 46, 190), (0, 229, 255), (190, 202, 238),
+                (54, 62, 112), (255, 110, 150), (80, 255, 190), (255, 232, 120),
+                (120, 160, 255), (255, 110, 220), (110, 242, 255), (236, 242, 255),
+            ],
+        }
+    }
+
+    /// The accent colour used for chrome, logo and effects. By convention it
+    /// is the cursor colour; every built-in theme keeps it clearly chromatic.
+    pub fn accent(&self) -> Rgb {
+        self.cursor
+    }
+
     pub fn catppuccin_mocha() -> Self {
         Self {
             name: "catppuccin-mocha",
             fg: (205, 214, 244),
             bg: (30, 30, 46),
-            cursor: (245, 224, 220),
+            cursor: (203, 166, 247),
             palette: [
                 (69, 71, 90), (243, 139, 168), (166, 227, 161), (249, 226, 175),
                 (137, 180, 250), (245, 194, 231), (148, 226, 213), (186, 194, 222),
@@ -112,7 +153,7 @@ impl Theme {
     pub fn dracula() -> Self {
         Self {
             name: "dracula",
-            fg: (248, 248, 242), bg: (40, 42, 54), cursor: (248, 248, 242),
+            fg: (248, 248, 242), bg: (40, 42, 54), cursor: (189, 147, 249),
             palette: [
                 (68, 71, 90), (255, 85, 85), (80, 250, 123), (241, 250, 140),
                 (98, 114, 164), (255, 121, 198), (139, 233, 253), (248, 248, 242),
@@ -125,7 +166,7 @@ impl Theme {
     pub fn nord() -> Self {
         Self {
             name: "nord",
-            fg: (216, 222, 233), bg: (46, 52, 64), cursor: (216, 222, 233),
+            fg: (216, 222, 233), bg: (46, 52, 64), cursor: (136, 192, 208),
             palette: [
                 (59, 66, 82), (191, 97, 106), (163, 190, 140), (235, 203, 139),
                 (129, 161, 193), (180, 142, 173), (136, 192, 208), (229, 233, 240),
@@ -138,7 +179,7 @@ impl Theme {
     pub fn solarized_dark() -> Self {
         Self {
             name: "solarized-dark",
-            fg: (131, 148, 150), bg: (0, 43, 54), cursor: (131, 148, 150),
+            fg: (131, 148, 150), bg: (0, 43, 54), cursor: (38, 139, 210),
             palette: [
                 (7, 54, 66), (220, 50, 47), (133, 153, 0), (181, 137, 0),
                 (38, 139, 210), (211, 54, 130), (42, 161, 152), (238, 232, 213),
@@ -151,7 +192,7 @@ impl Theme {
     pub fn tokyo_night() -> Self {
         Self {
             name: "tokyo-night",
-            fg: (169, 177, 214), bg: (26, 27, 38), cursor: (192, 202, 245),
+            fg: (169, 177, 214), bg: (26, 27, 38), cursor: (122, 162, 247),
             palette: [
                 (65, 72, 104), (247, 118, 142), (158, 206, 106), (224, 175, 104),
                 (122, 162, 247), (187, 154, 247), (125, 207, 255), (169, 177, 214),
@@ -177,7 +218,7 @@ impl Theme {
     pub fn gruvbox() -> Self {
         Self {
             name: "gruvbox",
-            fg: (235, 219, 178), bg: (40, 40, 40), cursor: (235, 219, 178),
+            fg: (235, 219, 178), bg: (40, 40, 40), cursor: (254, 128, 25),
             palette: [
                 (60, 56, 54), (204, 36, 29), (152, 151, 26), (215, 153, 33),
                 (69, 133, 136), (177, 98, 134), (104, 157, 106), (168, 153, 132),
@@ -190,7 +231,7 @@ impl Theme {
     pub fn monokai() -> Self {
         Self {
             name: "monokai",
-            fg: (252, 252, 250), bg: (45, 42, 46), cursor: (252, 252, 250),
+            fg: (252, 252, 250), bg: (45, 42, 46), cursor: (255, 216, 102),
             palette: [
                 (65, 62, 66), (255, 97, 136), (169, 220, 118), (255, 216, 102),
                 (120, 220, 232), (171, 157, 242), (120, 220, 232), (252, 252, 250),
@@ -299,4 +340,31 @@ pub fn find_font_path() -> String {
     }
     log::error!("No monospace font found!");
     candidates[0].to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_theme_resolves_and_has_a_chromatic_accent() {
+        for name in Config::available_themes() {
+            let t = Config::theme_by_name(name).unwrap_or_else(|| panic!("{name} unresolved"));
+            assert_eq!(t.name, *name);
+            let a = t.accent();
+            let chroma = a.0.max(a.1).max(a.2) - a.0.min(a.1).min(a.2);
+            assert!(chroma >= 60, "{name}: accent {a:?} too grey");
+            assert_ne!(a, t.bg, "{name}");
+        }
+        assert_eq!(Config::available_themes().len(), 10);
+    }
+
+    #[test]
+    fn new_configs_default_to_rift_neon() {
+        let c = Config::default();
+        assert_eq!(c.theme_name, "rift-neon");
+        assert_eq!(c.theme.name, "rift-neon");
+        assert_eq!(c.effect, None);
+        assert!(c.startup_animation);
+    }
 }

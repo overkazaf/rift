@@ -125,7 +125,9 @@ pub fn on_cursor_moved(app: &mut App) -> bool {
     let (x, y) = (app.cursor_x, app.cursor_y);
 
     if app.browser.divider_drag {
-        let win_w = app.window.as_ref().map_or(1, |w| w.inner_size().width as usize).max(1);
+        // The browser's ratio is relative to the width left of the chat dock.
+        let full_w = app.window.as_ref().map_or(1, |w| w.inner_size().width as usize).max(1);
+        let win_w = full_w.saturating_sub(app.chat.dock_w(full_w)).max(1);
         let ratio = ((win_w.saturating_sub(x)) as f32 / win_w as f32).clamp(MIN_RATIO, MAX_RATIO);
         if (ratio - app.browser.ratio).abs() * win_w as f32 >= 1.0 {
             app.browser.ratio = ratio;

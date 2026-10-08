@@ -94,8 +94,10 @@ impl App {
                 let s = win.inner_size();
                 (s.width as usize, s.height as usize, win.scale_factor())
             });
+        // The chat dock owns the far right edge; the browser lays out in
+        // what is left (terminal | browser | chat).
         BrowserLayout::compute(
-            w,
+            w - self.chat.dock_w(w).min(w),
             h,
             self.tab_bar_height(),
             self.renderer.cell_width(),
@@ -124,9 +126,10 @@ impl App {
 
     /// Width available to terminal panes for a window `win_w` pixels wide.
     pub fn terminal_width(&self, win_w: usize) -> usize {
+        let avail = win_w - self.chat.dock_w(win_w).min(win_w);
         match self.browser_layout() {
-            Some(l) => l.terminal_w.min(win_w),
-            None => win_w,
+            Some(l) => l.terminal_w.min(avail),
+            None => avail,
         }
     }
 }

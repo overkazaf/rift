@@ -14,7 +14,8 @@ use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::ModifiersState;
 use winit::window::{Window, WindowId};
 
-use crate::ai::{AiPanel, Advisor, Autocomplete, LlmManager};
+use crate::ai::chat::ChatUi;
+use crate::ai::{Advisor, Autocomplete, LlmManager};
 use crate::ai::observer::Observer;
 use crate::config::Config;
 use crate::network::{SshConnectRequest, SshDialog, SshPty, WebViewDialog, WebViewPane};
@@ -64,7 +65,8 @@ pub struct App {
     pub webview_pane: Option<usize>,
     pub webview_maximized: bool,
     pub llm: LlmManager,
-    pub ai_panel: AiPanel,
+    /// Docked AI chat sidebar (see `ai::chat`).
+    pub chat: ChatUi,
     pub advisor: Advisor,
     pub menubar: AppMenuBar,
     pub cursor_x: usize,
@@ -98,6 +100,8 @@ pub struct App {
     pub blocks: BlockManager,
     /// Warp-style block chrome state (hover, selection, toast).
     pub blocks_ui: crate::blocks_ui::BlocksUi,
+    /// Ambient AI: Cmd+K popover, proactive fixes, `#` natural language.
+    pub inline_ai: crate::ai::inline::InlineAi,
     pub error_detector: ErrorDetector,
     pub error_notif: ErrorNotification,
     pub exec_preview: ExecPreview,
@@ -121,6 +125,8 @@ pub struct App {
 
     pub needs_render: bool,
     pub startup_time: std::time::Instant,
+    /// Set by any key press / click to cut the startup splash short.
+    pub startup_skipped: bool,
 
     #[cfg(feature = "gpu")]
     pub gpu_pipeline: Option<crate::renderer::gpu::GpuPipeline>,
@@ -140,6 +146,7 @@ impl App {
         let prefs = Preferences::new(&config);
         let welcome = Welcome::new_auto();
         let menubar = AppMenuBar::new();
+        menubar.set_ai_checks(config.ai_auto_fix, config.ai_nl_hash);
         let llm = LlmManager::new(config.llm.clone());
 
         // Restore the previous session (tabs, titles, working dirs,
@@ -162,7 +169,7 @@ impl App {
             webview_pane: None,
             webview_maximized: false,
             llm,
-            ai_panel: AiPanel::new(),
+            chat: ChatUi::new(),
             advisor: Advisor::new(),
             menubar,
             cursor_x: 0,
@@ -190,6 +197,7 @@ impl App {
 
             blocks: BlockManager::new(),
             blocks_ui: crate::blocks_ui::BlocksUi::new(),
+            inline_ai: crate::ai::inline::InlineAi::new(),
             error_detector: ErrorDetector::new(),
             error_notif: ErrorNotification::new(),
             exec_preview: ExecPreview::hidden(),
@@ -213,6 +221,7 @@ impl App {
             history: HistorySearch::new(),
 
             startup_time: std::time::Instant::now(),
+            startup_skipped: false,
 
             #[cfg(feature = "gpu")]
             gpu_pipeline: None,
@@ -320,6 +329,18 @@ impl ApplicationHandler for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        // Any key press or click skips the startup splash (the event still goes through).
+        if lifecycle::startup_active(self) {
+            let pressed = match &event {
+                WindowEvent::KeyboardInput { event: k, .. } => k.state.is_pressed(),
+                WindowEvent::MouseInput { state, .. } => state.is_pressed(),
+                _ => false,
+            };
+            if pressed {
+                self.startup_skipped = true;
+                self.request_redraw();
+            }
+        }
         match event {
             WindowEvent::CloseRequested => {
                 // Auto-save config and terminal session on exit
@@ -345,6 +366,11 @@ impl ApplicationHandler for App {
                 // Command palette: hover highlights rows; swallow the move.
                 if self.command_palette.visible {
                     overlays::palette_cursor_moved(self);
+                    return;
+                }
+
+                // Docked AI chat: divider drag, hover, resize cursor.
+                if crate::ai::chat::on_cursor_moved(self) {
                     return;
                 }
 
@@ -417,15 +443,33 @@ impl ApplicationHandler for App {
                 }
                 let mouse_mode = self.wm.active_pane().terminal.mouse_mode;
 
+                // Other buttons over the chat dock are swallowed.
+                if state == ElementState::Pressed
+                    && button != MouseButton::Left
+                    && crate::ai::chat::contains(self, self.cursor_x, self.cursor_y)
+                {
+                    return;
+                }
+
                 match (state, button) {
                     (ElementState::Pressed, MouseButton::Left) => {
                         self.mouse_pressed = true;
+                        // Docked AI chat: focus, buttons, divider grab.
+                        if crate::ai::chat::on_mouse_press(self) {
+                            self.mouse_pressed = false;
+                            return;
+                        }
                         // Browser toolbar / divider / focus handoff
                         if crate::network::browser::on_mouse_press(self) {
                             return;
                         }
                         // Context menu, tab rename commit, scrollbar.
                         if mouse::on_left_press(self, event_loop) {
+                            self.mouse_pressed = false;
+                            return;
+                        }
+                        // Inline AI: suggestion bar buttons / popover
+                        if crate::ai::inline::on_click(self) {
                             self.mouse_pressed = false;
                             return;
                         }
@@ -480,6 +524,9 @@ impl ApplicationHandler for App {
                     }
                     (ElementState::Released, MouseButton::Left) => {
                         let was_pressed = std::mem::replace(&mut self.mouse_pressed, false);
+                        if crate::ai::chat::on_mouse_release(self) {
+                            return;
+                        }
                         if crate::network::browser::on_mouse_release(self) {
                             return;
                         }
@@ -545,6 +592,9 @@ impl ApplicationHandler for App {
                         }
                     };
                     overlays::palette_wheel(self, lines);
+                    return;
+                }
+                if crate::ai::chat::on_wheel(self, delta) {
                     return;
                 }
                 // Notches = 3 lines, trackpad pixels accumulate; mouse

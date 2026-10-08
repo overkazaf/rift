@@ -104,11 +104,13 @@ impl Welcome {
             }
             2 => {
                 let items: Vec<(String, &str)> = vec![
-                    (format!("{}+Shift+1", mk), "CRT effect"),
-                    (format!("{}+Shift+2", mk), "Glitch"),
-                    (format!("{}+Shift+3", mk), "NeonGlow"),
-                    (format!("{}+Shift+4", mk), "MatrixRain"),
-                    (format!("{}+Shift+0", mk), "Effects off"),
+                    ("Ctrl+Shift+1".into(), "CRT"),
+                    ("Ctrl+Shift+2".into(), "Glitch"),
+                    ("Ctrl+Shift+3".into(), "Neon Glow"),
+                    ("Ctrl+Shift+4".into(), "Matrix Rain"),
+                    ("Ctrl+Shift+5".into(), "Amber"),
+                    ("Ctrl+Shift+6".into(), "Hologram"),
+                    ("Ctrl+Shift+0".into(), "Effects off"),
                     (format!("{}+Shift+R", mk), "Record toggle"),
                 ];
                 Self::page_shortcuts(&mut cx, content, &items, &["Recordings: .cast (asciinema v2)"]);
@@ -195,7 +197,7 @@ impl Welcome {
         cx.section(r.x, y, r.w, "Built-in");
         y += tk.row_h;
         for line in [
-            "9 themes, WASM plugins, SSH,",
+            "10 themes, WASM plugins, SSH,",
             "Hex viewer, Base64 codec,",
             "Snippets, Fuzzy search,",
             "Time warp, HUD status",

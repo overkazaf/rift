@@ -1,15 +1,16 @@
 pub mod advisor;
+pub mod hub;
+pub mod inline;
 pub mod autocomplete;
 pub mod backend;
+pub mod chat;
 pub mod context;
 pub mod knowledge;
 pub mod observer;
-pub mod panel;
 pub mod profile;
 
 pub use advisor::Advisor;
 pub use autocomplete::Autocomplete;
-pub use panel::{AiAction, AiPanel, AiPanelKey};
 
 #[derive(Clone)]
 pub struct LlmConfig {

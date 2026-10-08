@@ -362,12 +362,12 @@ impl Renderer {
         }
         tsig = mix(tsig, self.chrome.tab_sig());
 
-        // A shader post-processes every frame, so keep that path simple:
-        // full redraw (the back buffer itself stays unshaded).
+        // Effects (GPU shader, or the cheap CPU fallback) post-process the
+        // output copy only; the back buffer stays unshaded, so damage
+        // tracking keeps working with an effect active.
         let full = self.force_full
             || self.back.len() != n
-            || sig != self.frame_sig
-            || self.shader.has_effect();
+            || sig != self.frame_sig;
         self.force_full = false;
         self.frame_sig = sig;
         self.full_frame = full;
@@ -429,6 +429,17 @@ impl Renderer {
         let elapsed = self.start_time.elapsed().as_secs_f32();
         self.shader.apply(buffer, width, height, elapsed);
         self.prof_add(Phase::Render, t_start.elapsed());
+    }
+
+    /// Effect to hand to the GPU pipeline this frame (None = passthrough).
+    #[cfg(feature = "gpu")]
+    pub fn active_effect(&self) -> Option<crate::effects::ActiveEffect> {
+        self.shader.kind().map(|kind| crate::effects::ActiveEffect {
+            kind,
+            intensity: self.shader.intensity(),
+            bg: self.theme.bg,
+            accent: self.theme.accent(),
+        })
     }
 
     fn render_tab_bar(

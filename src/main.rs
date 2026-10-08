@@ -62,6 +62,8 @@ fn main() {
     let theme = config.theme.clone();
     let mut renderer = renderer::Renderer::new(&font_path, config.font_size, theme);
     renderer.opacity = config.opacity;
+    renderer.shader.set_intensity(config.effect_intensity);
+    renderer.shader.set_effect(config.effect);
 
     let event_loop = EventLoop::new().unwrap();
     let proxy = event_loop.create_proxy();
@@ -97,7 +99,7 @@ fn print_help() {
     println!("  {mk}+Shift+Z        Time warp (history replay)");
     println!("  {mk}+Shift+E        File manager");
     println!("  {mk}+Shift+G        Git panel");
-    println!("  {mk}+Shift+1-4      Visual effects (CRT/Glitch/Neon/Matrix)");
+    println!("  Ctrl+Shift+1-6    Effects: CRT/Glitch/Neon/Matrix/Amber/Hologram (0 = off, +/- intensity)");
     println!("  {mk}+Shift+,        Preferences");
     println!("  {mk}+Shift+?        Welcome guide");
     println!("  {mk}+Q              Quit");

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::window::tab::{Direction, PaneCmd};
 use muda::{
-    accelerator::Accelerator, AboutMetadata, Menu, MenuEvent, MenuItem, MenuId,
+    accelerator::Accelerator, AboutMetadata, CheckMenuItem, Menu, MenuEvent, MenuItem, MenuId,
     PredefinedMenuItem, Submenu,
 };
 
@@ -25,20 +25,6 @@ pub enum MenuAction {
     MatrixEffect,
     AmberEffect,
     HologramEffect,
-    PixelateEffect,
-    ThermalEffect,
-    RaindropEffect,
-    VhsEffect,
-    GridEffect,
-    FilmGrainEffect,
-    InvertEffect,
-    DesaturateEffect,
-    ChromaticEffect,
-    PulseEffect,
-    SnowEffect,
-    UnderwaterEffect,
-    NeonOutlineEffect,
-    ScanlineRgbEffect,
     NoEffect,
     Preferences,
     Welcome,
@@ -62,6 +48,10 @@ pub enum MenuAction {
     AiAssistant,
     ObserverMode,
     AdvisorMode,
+    /// Cmd+K: ask about the selection / block / screen.
+    AskAboutThis,
+    AutoFixToggle,
+    NaturalLanguageToggle,
     TimeWarp,
     HudToggle,
     BroadcastToggle,
@@ -74,6 +64,10 @@ pub enum MenuAction {
 pub struct AppMenuBar {
     menu: Menu,
     actions: HashMap<MenuId, MenuAction>,
+    ai_auto_fix: CheckMenuItem,
+    ai_nl_hash: CheckMenuItem,
+    /// Effects submenu items, so GPU-only ones can be disabled without a GPU.
+    fx_items: Vec<(MenuItem, crate::effects::EffectKind)>,
 }
 
 impl AppMenuBar {
@@ -171,28 +165,24 @@ impl AppMenuBar {
         let items_fx: Vec<(MenuItem, MenuAction)> = vec![
             (MenuItem::new("CRT", true, None::<Accelerator>), MenuAction::CrtEffect),
             (MenuItem::new("Glitch", true, None::<Accelerator>), MenuAction::GlitchEffect),
-            (MenuItem::new("NeonGlow", true, None::<Accelerator>), MenuAction::NeonEffect),
-            (MenuItem::new("MatrixRain", true, None::<Accelerator>), MenuAction::MatrixEffect),
+            (MenuItem::new("Neon Glow", true, None::<Accelerator>), MenuAction::NeonEffect),
+            (MenuItem::new("Matrix Rain", true, None::<Accelerator>), MenuAction::MatrixEffect),
             (MenuItem::new("Amber", true, None::<Accelerator>), MenuAction::AmberEffect),
             (MenuItem::new("Hologram", true, None::<Accelerator>), MenuAction::HologramEffect),
-            (MenuItem::new("Pixelate", true, None::<Accelerator>), MenuAction::PixelateEffect),
-            (MenuItem::new("Thermal", true, None::<Accelerator>), MenuAction::ThermalEffect),
-            (MenuItem::new("Raindrop", true, None::<Accelerator>), MenuAction::RaindropEffect),
-            (MenuItem::new("VHS Tape", true, None::<Accelerator>), MenuAction::VhsEffect),
-            (MenuItem::new("Cyberpunk Grid", true, None::<Accelerator>), MenuAction::GridEffect),
-            (MenuItem::new("Film Grain", true, None::<Accelerator>), MenuAction::FilmGrainEffect),
-            (MenuItem::new("Invert", true, None::<Accelerator>), MenuAction::InvertEffect),
-            (MenuItem::new("Desaturate", true, None::<Accelerator>), MenuAction::DesaturateEffect),
-            (MenuItem::new("Chromatic Shift", true, None::<Accelerator>), MenuAction::ChromaticEffect),
-            (MenuItem::new("Pulse", true, None::<Accelerator>), MenuAction::PulseEffect),
-            (MenuItem::new("Snow", true, None::<Accelerator>), MenuAction::SnowEffect),
-            (MenuItem::new("Underwater", true, None::<Accelerator>), MenuAction::UnderwaterEffect),
-            (MenuItem::new("Neon Outline", true, None::<Accelerator>), MenuAction::NeonOutlineEffect),
-            (MenuItem::new("Scanline RGB", true, None::<Accelerator>), MenuAction::ScanlineRgbEffect),
         ];
-        for (item, act) in &items_fx {
-            actions.insert(item.id().clone(), *act);
-            let _ = effects_menu.append(item);
+        let mut fx_items = Vec::new();
+        for (item, act) in items_fx {
+            actions.insert(item.id().clone(), act);
+            let _ = effects_menu.append(&item);
+            let kind = match act {
+                MenuAction::CrtEffect => crate::effects::EffectKind::Crt,
+                MenuAction::GlitchEffect => crate::effects::EffectKind::Glitch,
+                MenuAction::NeonEffect => crate::effects::EffectKind::Neon,
+                MenuAction::MatrixEffect => crate::effects::EffectKind::Matrix,
+                MenuAction::AmberEffect => crate::effects::EffectKind::Amber,
+                _ => crate::effects::EffectKind::Hologram,
+            };
+            fx_items.push((item, kind));
         }
         let no_fx = MenuItem::new("No Effect", true, None::<Accelerator>);
         actions.insert(no_fx.id().clone(), MenuAction::NoEffect);
@@ -339,7 +329,22 @@ impl AppMenuBar {
         actions.insert(ai_assist.id().clone(), MenuAction::AiAssistant);
         actions.insert(observer.id().clone(), MenuAction::ObserverMode);
         actions.insert(advisor.id().clone(), MenuAction::AdvisorMode);
-        let _ = ai_menu.append_items(&[&ai_assist, &observer, &advisor]);
+        let ask_this = MenuItem::new("Ask AI About This", true, accel_mac("CmdOrCtrl+K"));
+        let ai_auto_fix = CheckMenuItem::new("Auto Fix Suggestions", true, true, None::<Accelerator>);
+        let ai_nl_hash = CheckMenuItem::new("# Natural Language", true, true, None::<Accelerator>);
+        actions.insert(ask_this.id().clone(), MenuAction::AskAboutThis);
+        actions.insert(ai_auto_fix.id().clone(), MenuAction::AutoFixToggle);
+        actions.insert(ai_nl_hash.id().clone(), MenuAction::NaturalLanguageToggle);
+        let _ = ai_menu.append_items(&[
+            &ai_assist,
+            &ask_this,
+            &PredefinedMenuItem::separator(),
+            &ai_auto_fix,
+            &ai_nl_hash,
+            &PredefinedMenuItem::separator(),
+            &observer,
+            &advisor,
+        ]);
 
         // ── Window menu ──
         let window_menu = Submenu::new("Window", true);
@@ -373,7 +378,22 @@ impl AppMenuBar {
             &help_menu,
         ]);
 
-        Self { menu, actions }
+        Self { menu, actions, ai_auto_fix, ai_nl_hash, fx_items }
+    }
+
+    /// Sync the AI toggle check marks with the config (muda flips a check
+    /// item on click; this makes the config the single source of truth).
+    pub fn set_ai_checks(&self, auto_fix: bool, nl_hash: bool) {
+        self.ai_auto_fix.set_checked(auto_fix);
+        self.ai_nl_hash.set_checked(nl_hash);
+    }
+
+    /// Enable / disable the effects the current renderer can draw. Without a
+    /// GPU only the CPU-capable ones (CRT, Amber, Hologram) stay enabled.
+    pub fn set_gpu_effects(&self, gpu: bool) {
+        for (item, kind) in &self.fx_items {
+            item.set_enabled(gpu || kind.cpu_capable());
+        }
     }
 
     pub fn init_for_nsapp(&self) {

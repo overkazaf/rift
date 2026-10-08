@@ -63,6 +63,7 @@ pub fn on_resumed(app: &mut App, event_loop: &ActiveEventLoop) {
         match crate::renderer::gpu::GpuPipeline::new(window.clone()) {
             Ok(pipeline) => {
                 app.gpu_pipeline = Some(pipeline);
+                app.renderer.shader.set_gpu_active(true);
                 log::info!("wgpu GPU pipeline initialized");
             }
             Err(e) => {
@@ -71,6 +72,8 @@ pub fn on_resumed(app: &mut App, event_loop: &ActiveEventLoop) {
         }
     }
 
+    app.menubar.set_gpu_effects(app.renderer.shader.gpu_active());
+
     app.window = Some(window);
     app.context = Some(context);
     app.surface = Some(surface);
@@ -78,7 +81,15 @@ pub fn on_resumed(app: &mut App, event_loop: &ActiveEventLoop) {
 
 // ── Redraw ──
 
+/// True while the startup splash should be on screen.
+pub fn startup_active(app: &App) -> bool {
+    app.config.startup_animation
+        && !app.startup_skipped
+        && app.startup_time.elapsed().as_secs_f32() < crate::ui::splash::SPLASH_SECS
+}
+
 pub fn redraw(app: &mut App) {
+    let splash = startup_active(app);
     let Some(window) = &app.window else { return };
     let Some(surface) = &mut app.surface else { return };
 
@@ -101,70 +112,24 @@ pub fn redraw(app: &mut App) {
         return;
     };
 
-    // Startup animation (first 2.5 seconds)
-    let startup_elapsed = app.startup_time.elapsed().as_secs_f32();
-    if startup_elapsed < 2.5 {
-        let w = width as usize;
-        let h = height as usize;
-        let bg = app.renderer.theme.bg;
-        let accent = app.renderer.theme.cursor;
-
-        let bg_px = crate::ui::pack(bg.0, bg.1, bg.2);
-        buffer.fill(bg_px);
-
-        // Fade: 0→1 in 1.0s, hold 1.0s, 1→0 in last 0.5s
-        let alpha = if startup_elapsed < 1.0 {
-            startup_elapsed / 1.0
-        } else if startup_elapsed > 2.0 {
-            1.0 - (startup_elapsed - 2.0) / 0.5
-        } else {
-            1.0
-        }.clamp(0.0, 1.0);
-
-        let ch = app.renderer.cell_height();
-        let cw = app.renderer.cell_width();
-
-        let logo = "R I F T";
-        let subtitle = "dimension rift terminal";
-        let version = format!("v{}", crate::config::VERSION);
-        let author = format!("by {}", crate::config::AUTHOR);
-        let kofi = "ko-fi.com/john5555555555";
-
-        let logo_x = w.saturating_sub(logo.len() * cw) / 2;
-        let logo_y = h / 2 - ch * 3;
-        let sub_x = w.saturating_sub(subtitle.len() * cw) / 2;
-        let sub_y = logo_y + ch * 2;
-        let ver_x = w.saturating_sub(version.len() * cw) / 2;
-        let ver_y = sub_y + ch + ch / 2;
-        let author_x = w.saturating_sub(author.len() * cw) / 2;
-        let author_y = ver_y + ch + 4;
-        let kofi_x = w.saturating_sub(kofi.len() * cw) / 2;
-        let kofi_y = author_y + ch + 4;
-
-        let logo_color = crate::ui::dim(accent, alpha);
-        let sub_color = crate::ui::dim(app.renderer.theme.fg, alpha * 0.5);
-        let ver_color = crate::ui::dim(app.renderer.theme.fg, alpha * 0.3);
-        let author_color = crate::ui::dim(app.renderer.theme.fg, alpha * 0.35);
-        let kofi_color = crate::ui::dim((255, 90, 90), alpha * 0.5);
-
-        crate::ui::render_text(&mut buffer, w, &mut app.renderer.font, logo, logo_x, logo_y, logo_color);
-        crate::ui::render_text(&mut buffer, w, &mut app.renderer.font, subtitle, sub_x, sub_y, sub_color);
-        crate::ui::render_text(&mut buffer, w, &mut app.renderer.font, &version, ver_x, ver_y, ver_color);
-        crate::ui::render_text(&mut buffer, w, &mut app.renderer.font, &author, author_x, author_y, author_color);
-        crate::ui::render_text(&mut buffer, w, &mut app.renderer.font, kofi, kofi_x, kofi_y, kofi_color);
-
-        // Accent line under logo
-        let line_w = logo.len() * cw + 40;
-        let line_x = w.saturating_sub(line_w) / 2;
-        let line_y = logo_y + ch + 4;
-        let line_px = crate::ui::pack_rgb(crate::ui::dim(accent, alpha * 0.6));
-        for x in line_x..(line_x + line_w).min(w) {
-            crate::ui::set_px(&mut buffer, w, line_y, x, line_px);
+    // Startup splash (<= 1.2s, skippable, `startup_animation = false` disables)
+    if splash {
+        let t = app.startup_time.elapsed().as_secs_f32();
+        let (cw, ch) = (app.renderer.cell_width(), app.renderer.cell_height());
+        let tk = crate::ui::kit::Tokens::new(&app.renderer.theme, cw, ch);
+        let secondary = app.renderer.theme.palette[6];
+        let footer = format!(
+            "v{}  |  by {}  |  ko-fi.com/john5555555555",
+            crate::config::VERSION, crate::config::AUTHOR
+        );
+        {
+            let mut cx = crate::ui::kit::Ctx::new(&mut buffer, width as usize, height as usize, &mut app.renderer.font, &tk);
+            crate::ui::splash::draw(&mut cx, t, secondary, &footer);
         }
 
         #[cfg(feature = "gpu")]
         if let Some(ref mut gpu) = app.gpu_pipeline {
-            let effect = app.renderer.shader.active_effect();
+            let effect = app.renderer.active_effect();
             let time = app.renderer.start_time.elapsed().as_secs_f32();
             gpu.render_frame(&buffer, width, height, effect, time);
             drop(buffer);
@@ -179,14 +144,18 @@ pub fn redraw(app: &mut App) {
     // Reserve space for HUD at bottom when visible
     let ch = app.renderer.cell_height();
     let hud_h = if app.hud_visible { ch * 3 + 20 } else { 0 };
+    // Chat dock takes the far right edge; browser + terminal share the rest
+    // (same rule as `App::terminal_width` / `App::browser_geometry`).
+    let chat_w = app.chat.dock_w(width as usize);
+    let avail_w = width as usize - chat_w;
     let blayout = app.webview.as_ref().filter(|wv| wv.visible).map(|_| {
         crate::network::browser::chrome::BrowserLayout::compute(
-            width as usize, height as usize, tbh,
+            avail_w, height as usize, tbh,
             app.renderer.cell_width(), app.renderer.cell_height(),
             window.scale_factor(), app.browser.ratio, app.webview_maximized,
         )
     });
-    let content_w = blayout.map_or(width as usize, |l| l.terminal_w);
+    let content_w = blayout.map_or(avail_w, |l| l.terminal_w.min(avail_w));
     let content_area = PaneRect {
         x: 0,
         y: tbh,
@@ -228,7 +197,7 @@ pub fn redraw(app: &mut App) {
 
         #[cfg(feature = "gpu")]
         if let Some(ref mut gpu) = app.gpu_pipeline {
-            let effect = app.renderer.shader.active_effect();
+            let effect = app.renderer.active_effect();
             let time = app.renderer.start_time.elapsed().as_secs_f32();
             gpu.render_frame(&buffer, width, height, effect, time);
             drop(buffer);
@@ -268,9 +237,16 @@ pub fn redraw(app: &mut App) {
 
     // IME: position the OS candidate window and draw inline preedit text
     // (While renaming a tab the preedit belongs to the rename field instead.)
-    if app.mui.tabs.editor.is_none() {
+    // (While the Cmd+K popover is open the preedit belongs to its input.)
+    if app.mui.tabs.editor.is_none() && app.inline_ai.popover.is_none() && !app.chat.focused {
         super::ime::update_cursor_area(&app.wm, &app.renderer, window, &mut app.ime_area, content_area);
         super::ime::render_preedit(&app.wm, &mut app.renderer, &app.ime_preedit, &mut buffer, width as usize, content_area);
+    }
+
+    // Inline AI: Cmd+K popover, suggestion / hint bars, toast
+    crate::ai::inline::draw(&app.wm, &mut app.renderer, &mut app.inline_ai, &mut buffer, width as usize, height as usize, content_area, &app.ime_preedit);
+    if let Some(r) = app.inline_ai.ime_hint() {
+        super::ime::set_cursor_area(window, &mut app.ime_area, (r.x, r.y, r.w, r.h));
     }
 
     // Search match highlights
@@ -317,175 +293,15 @@ pub fn redraw(app: &mut App) {
         }
     }
 
-    // HUD — cyberpunk dashboard at bottom
+    // HUD — cyberpunk dashboard at bottom (UI kit: tokens + Ctx)
     if app.hud_visible {
-        let cw = app.renderer.cell_width();
         let ch = app.renderer.cell_height();
-        let w = width as usize;
-        let h = height as usize;
         let bar_h = ch * 3 + 20; // three rows + padding
+        let h = height as usize;
         if h > bar_h + 4 {
-            let y_start = h - bar_h;
-            let accent = app.renderer.theme.cursor;
-
-            // 1. Gradient background (darker at bottom)
-            for y in y_start..h {
-                let progress = (y - y_start) as f32 / bar_h as f32;
-                let dim_factor = 0.12 + progress * 0.08;
-                for x in 0..w {
-                    let idx = y * w + x;
-                    if idx < buffer.len() {
-                        let px = buffer[idx];
-                        let r = (((px >> 16) & 0xff) as f32 * dim_factor) as u32;
-                        let g = (((px >> 8) & 0xff) as f32 * dim_factor) as u32;
-                        let b = ((px & 0xff) as f32 * dim_factor) as u32;
-                        buffer[idx] = (r << 16) | (g << 8) | b;
-                    }
-                }
-            }
-
-            // 2. Glowing top border (accent + glow)
-            let accent_px = crate::ui::pack(accent.0, accent.1, accent.2);
-            let glow = crate::ui::dim(accent, 0.3);
-            let glow_px = crate::ui::pack(glow.0, glow.1, glow.2);
-            for x in 0..w {
-                let i1 = y_start * w + x;
-                let i2 = (y_start + 1) * w + x;
-                if i1 < buffer.len() { buffer[i1] = accent_px; }
-                if i2 < buffer.len() { buffer[i2] = glow_px; }
-            }
-
-            let data = app.hud.data();
-            let blue: (u8,u8,u8) = (137, 180, 250);
-            let yellow: (u8,u8,u8) = (249, 226, 175);
-            let cyan: (u8,u8,u8) = (148, 226, 213);
-            let pink: (u8,u8,u8) = (245, 194, 231);
-            let dim_c: (u8,u8,u8) = (108, 112, 134);
-            let accent_rgb: (u8,u8,u8) = (accent.0, accent.1, accent.2);
-
-            // === Row 1: brand + system info ===
-            let r1y = y_start + 5;
-            let mut tx = 12;
-
-            // ◆ RIFT
-            crate::ui::render_text(&mut buffer, w, &mut app.renderer.font, "\u{25C6} RIFT", tx, r1y, accent_rgb);
-            tx += 7 * cw;
-
-            // Separator
-            hud_separator(&mut buffer, w, tx, y_start + 4, y_start + 4 + ch, dim_c);
-            tx += cw;
-
-            // user@host
-            let ident = format!("{}@{}", data.user, data.host);
-            crate::ui::render_text(&mut buffer, w, &mut app.renderer.font, &ident, tx, r1y, cyan);
-            tx += (ident.len() + 1) * cw;
-
-            hud_separator(&mut buffer, w, tx, y_start + 4, y_start + 4 + ch, dim_c);
-            tx += cw;
-
-            // shell
-            crate::ui::render_text(&mut buffer, w, &mut app.renderer.font, &data.shell, tx, r1y, pink);
-            tx += (data.shell.len() + 1) * cw;
-
-            hud_separator(&mut buffer, w, tx, y_start + 4, y_start + 4 + ch, dim_c);
-            tx += cw;
-
-            // uptime
-            let up_label = format!("up {}", data.uptime);
-            crate::ui::render_text(&mut buffer, w, &mut app.renderer.font, &up_label, tx, r1y, dim_c);
-
-            // Time (right-aligned, row 1)
-            let time_x = w.saturating_sub((data.time.len() + 2) * cw);
-            crate::ui::render_text(&mut buffer, w, &mut app.renderer.font, &data.time, time_x, r1y, blue);
-
-            // === Row 2: metrics with pixel progress bars ===
-            let r2y = y_start + 5 + ch + 4;
-            let bar_px_w = 12 * cw; // progress bar width in pixels
-            let bar_px_h = (ch / 2).max(6); // half cell height
-            let bar_y_center = r2y + (ch - bar_px_h) / 2; // vertically centered
-            let mut tx = 12;
-
-            // MEM label
-            crate::ui::render_text(&mut buffer, w, &mut app.renderer.font, "MEM", tx, r2y, blue);
-            tx += 4 * cw;
-
-            // MEM progress bar (pixel-level gradient)
-            let mem_frac = (data.mem_pct / 100.0).clamp(0.0, 1.0);
-            let mem_low: (u8,u8,u8) = (93, 228, 167);   // green
-            let mem_high: (u8,u8,u8) = (243, 139, 168);  // red
-            let bar_bg: (u8,u8,u8) = (30, 32, 48);
-            hud_progress_bar(&mut buffer, w, tx, bar_y_center, bar_px_w, bar_px_h, mem_frac, mem_low, mem_high, bar_bg);
-            tx += bar_px_w + cw;
-
-            // MEM value
-            crate::ui::render_text(&mut buffer, w, &mut app.renderer.font, &data.mem_label, tx, r2y, yellow);
-            tx += (data.mem_label.len() + 2) * cw;
-
-            hud_separator(&mut buffer, w, tx, r2y, r2y + ch, dim_c);
-            tx += cw + cw / 2;
-
-            // CPU label
-            crate::ui::render_text(&mut buffer, w, &mut app.renderer.font, "CPU", tx, r2y, blue);
-            tx += 4 * cw;
-
-            // CPU progress bar
-            let cpu_frac = (data.cpu_pct / 100.0).clamp(0.0, 1.0);
-            hud_progress_bar(&mut buffer, w, tx, bar_y_center, bar_px_w, bar_px_h, cpu_frac, mem_low, mem_high, bar_bg);
-            tx += bar_px_w + cw;
-
-            // CPU value
-            crate::ui::render_text(&mut buffer, w, &mut app.renderer.font, &data.cpu_label, tx, r2y, yellow);
-
-            // === Row 3: extra system info ===
-            let r3y = r2y + ch + 4;
-            let mut tx = 12;
-            let very_dim: (u8,u8,u8) = (80, 84, 108);
-
-            // OS + arch
-            let os_info = format!("{}/{}", data.os, data.arch);
-            crate::ui::render_text(&mut buffer, w, &mut app.renderer.font, &os_info, tx, r3y, dim_c);
-            tx += (os_info.len() + 1) * cw;
-
-            hud_separator(&mut buffer, w, tx, r3y, r3y + ch, very_dim);
-            tx += cw;
-
-            // Git branch
-            let git_label = format!("\u{2387} {}", data.git_branch); // ⎇
-            let git_color = if data.git_branch == "-" { dim_c } else { (166, 227, 161) }; // green if on branch
-            crate::ui::render_text(&mut buffer, w, &mut app.renderer.font, &git_label, tx, r3y, git_color);
-            tx += (git_label.chars().count() + 1) * cw;
-
-            hud_separator(&mut buffer, w, tx, r3y, r3y + ch, very_dim);
-            tx += cw;
-
-            // CWD
-            crate::ui::render_text(&mut buffer, w, &mut app.renderer.font, &data.cwd_short, tx, r3y, cyan);
-            tx += (data.cwd_short.chars().count() + 1) * cw;
-
-            hud_separator(&mut buffer, w, tx, r3y, r3y + ch, very_dim);
-            tx += cw;
-
-            // Disk
-            let disk_frac = (data.disk_pct / 100.0).clamp(0.0, 1.0);
-            crate::ui::render_text(&mut buffer, w, &mut app.renderer.font, "DSK", tx, r3y, blue);
-            tx += 4 * cw;
-            let disk_bar_w = 8 * cw;
-            hud_progress_bar(&mut buffer, w, tx, r3y + (ch - bar_px_h) / 2, disk_bar_w, bar_px_h, disk_frac, mem_low, mem_high, bar_bg);
-            tx += disk_bar_w + cw;
-            crate::ui::render_text(&mut buffer, w, &mut app.renderer.font, &data.disk_label, tx, r3y, yellow);
-            tx += (data.disk_label.len() + 1) * cw;
-
-            hud_separator(&mut buffer, w, tx, r3y, r3y + ch, very_dim);
-            tx += cw;
-
-            // Load average
-            let load_label = format!("LOAD {}", data.load_avg);
-            crate::ui::render_text(&mut buffer, w, &mut app.renderer.font, &load_label, tx, r3y, dim_c);
-
-            // PID + version (right-aligned, row 3)
-            let right_label = format!("PID {} | {}", data.pid, data.rust_version);
-            let right_x = w.saturating_sub((right_label.len() + 2) * cw);
-            crate::ui::render_text(&mut buffer, w, &mut app.renderer.font, &right_label, right_x, r3y, very_dim);
+            let tk = crate::ui::kit::Tokens::new(&app.renderer.theme, app.renderer.cell_width(), ch);
+            let mut cx = crate::ui::kit::Ctx::new(&mut buffer, width as usize, h, &mut app.renderer.font, &tk);
+            crate::tools::hud::draw(&mut cx, &app.hud, h - bar_h, bar_h);
         }
     }
 
@@ -508,18 +324,22 @@ pub fn redraw(app: &mut App) {
         );
     }
 
-    // AI panel
-    if app.ai_panel.visible {
-        app.ai_panel.render(
+    // Docked AI chat sidebar (right edge, below the tab bar / above the HUD).
+    if let Some(area) = app.chat.dock_rect(width as usize, height as usize, tbh, hud_h) {
+        app.chat.render(
             &mut buffer, width as usize, height as usize,
             &mut app.renderer.font, &app.renderer.theme,
+            area, &app.advisor, &app.ime_preedit,
         );
-
-        // Advisor Mode — inline safety badge/notes next to the AI response.
-        app.advisor.render_inline(
-            &mut buffer, width as usize, height as usize,
-            &mut app.renderer.font, &app.renderer.theme,
-        );
+        // Keep the OS candidate window next to the composer caret.
+        if app.chat.focused {
+            if let Some((x, y, w, h)) = app.chat.take_ime_area() {
+                window.set_ime_cursor_area(
+                    winit::dpi::PhysicalPosition::new(x, y),
+                    winit::dpi::PhysicalSize::new(w.max(1), h.max(1)),
+                );
+            }
+        }
     }
 
     // Search overlay
@@ -734,7 +554,7 @@ pub fn redraw(app: &mut App) {
     // GPU rendering path: upload pixel buffer to GPU, present via wgpu
     #[cfg(feature = "gpu")]
     if let Some(ref mut gpu) = app.gpu_pipeline {
-        let effect = app.renderer.shader.active_effect();
+        let effect = app.renderer.active_effect();
         let time = app.renderer.start_time.elapsed().as_secs_f32();
         gpu.render_frame(&buffer, width, height, effect, time);
         drop(buffer);
@@ -759,56 +579,6 @@ fn finish_frame(app: &mut App, t_present: std::time::Instant) {
         s.last_redraw = Some(std::time::Instant::now());
         s.redraw_pending = false;
     });
-}
-
-// ── HUD pixel helpers ──
-
-fn hud_separator(buffer: &mut [u32], buf_w: usize, x: usize, y_top: usize, y_bot: usize, color: (u8,u8,u8)) {
-    let px = crate::ui::pack(color.0, color.1, color.2);
-    for y in y_top..y_bot {
-        let idx = y * buf_w + x;
-        if idx < buffer.len() { buffer[idx] = px; }
-    }
-}
-
-fn hud_progress_bar(
-    buffer: &mut [u32], buf_w: usize,
-    x: usize, y: usize, w: usize, h: usize,
-    pct: f32,
-    color_low: (u8,u8,u8), color_high: (u8,u8,u8), bg: (u8,u8,u8),
-) {
-    let filled = (w as f32 * pct) as usize;
-    let bg_px = crate::ui::pack(bg.0, bg.1, bg.2);
-    for row in y..y + h {
-        for col in x..x + w {
-            let idx = row * buf_w + col;
-            if idx >= buffer.len() { continue; }
-            if col - x < filled {
-                let t = (col - x) as f32 / w as f32;
-                let r = (color_low.0 as f32 * (1.0 - t) + color_high.0 as f32 * t) as u8;
-                let g = (color_low.1 as f32 * (1.0 - t) + color_high.1 as f32 * t) as u8;
-                let b = (color_low.2 as f32 * (1.0 - t) + color_high.2 as f32 * t) as u8;
-                buffer[idx] = crate::ui::pack(r, g, b);
-            } else {
-                buffer[idx] = bg_px;
-            }
-        }
-    }
-    // Subtle border
-    let border = crate::ui::dim(color_low, 0.3);
-    let bp = crate::ui::pack(border.0, border.1, border.2);
-    for col in x..x + w {
-        let top = y * buf_w + col;
-        let bot = (y + h.saturating_sub(1)) * buf_w + col;
-        if top < buffer.len() { buffer[top] = bp; }
-        if bot < buffer.len() { buffer[bot] = bp; }
-    }
-    for row in y..y + h {
-        let left = row * buf_w + x;
-        let right = row * buf_w + x + w.saturating_sub(1);
-        if left < buffer.len() { buffer[left] = bp; }
-        if right < buffer.len() { buffer[right] = bp; }
-    }
 }
 
 // ── Resize ──
@@ -850,8 +620,9 @@ thread_local! {
 }
 
 pub fn about_to_wait(app: &mut App, event_loop: &ActiveEventLoop) {
-    let has_shader = app.renderer.shader.has_effect();
-    let in_startup = app.startup_time.elapsed().as_secs_f32() < 2.5;
+    // Animated effects redraw at ~60fps only while they are actually animating.
+    let has_shader = app.renderer.shader.animating(app.renderer.start_time.elapsed().as_secs_f32());
+    let in_startup = startup_active(app);
 
     // PTY reader thread calls proxy.send_event(()) which wakes the loop from Wait.
     // Use 16ms for animations, otherwise a short poll for responsiveness.
@@ -903,24 +674,12 @@ pub fn about_to_wait(app: &mut App, event_loop: &ActiveEventLoop) {
         }
     }
 
-    // Poll AI response, then kick off an Advisor Mode safety review for any
-    // freshly-arrived suggested command.
-    if let Some(cmd) = app.ai_panel.poll() {
-        if app.advisor.enabled {
-            let ctx = crate::ai::context::TermContext::collect();
-            let context = format!(
-                "OS: {}, Shell: {}, CWD: {}{}",
-                ctx.os,
-                ctx.shell,
-                ctx.cwd,
-                ctx.git_branch
-                    .map(|b| format!(", git branch: {b}"))
-                    .unwrap_or_default(),
-            );
-            app.advisor.review_command(&cmd, &context, &app.llm.config);
-        }
-    }
+    // Chat: drain streamed deltas (the stream thread wakes the loop; the
+    // chat kicks off the Advisor review itself when an answer completes).
+    let chat_changed = crate::ai::chat::poll(app);
+    let advisor_busy = app.advisor.is_loading();
     app.advisor.poll();
+    let advisor_changed = advisor_busy && !app.advisor.is_loading();
 
     // Process PTY output from all panes
     let t_pty = std::time::Instant::now();
@@ -1025,14 +784,17 @@ pub fn about_to_wait(app: &mut App, event_loop: &ActiveEventLoop) {
     // Command blocks: running-block animation + toast expiry
     crate::blocks_ui::tick(app, &mut wake_at);
 
+    // Inline AI: background fix / `#` results, failure detection, spinner
+    crate::ai::inline::tick(app, &mut wake_at);
+
     // Request redraw if anything needs it
     let ssh_pending = app.ssh_connecting.is_some();
-    let ai_waiting = app.ai_panel.is_waiting();
+    // Streaming answers animate (caret, spinner); redraw while they run.
+    let ai_waiting = app.chat.animating() || chat_changed || advisor_changed || (advisor_busy && app.chat.visible);
     let any_overlay = app.prefs.visible
         || app.welcome.visible
         || app.ssh_dialog.visible
         || app.autocomplete.visible
-        || app.ai_panel.visible
         || app.compare_view.visible
         || app.command_palette.visible
         || app.search.visible

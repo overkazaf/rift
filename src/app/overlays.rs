@@ -2,7 +2,6 @@ use winit::event::KeyEvent;
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{Key, NamedKey};
 
-use crate::ai::{AiAction, AiPanelKey};
 use crate::tools::cicd::CicdKey;
 use crate::tools::command_palette::{
     parse_ssh_spec, shell_quote_path, PaletteAction, PaletteContext, PaletteKey, Preview, SshHostInfo,
@@ -117,8 +116,10 @@ pub fn try_intercept(app: &mut App, event: &KeyEvent, event_loop: &ActiveEventLo
     if app.regex_playground.visible {
         return handle_regex_playground(app, event);
     }
-    if app.ai_panel.visible {
-        return handle_ai(app, event);
+    // Docked AI chat: keys go to its composer while it has focus; chords it
+    // doesn't use (Cmd+T, Cmd+P, ...) fall through to the global shortcuts.
+    if app.chat.focused && crate::ai::chat::handle_key(app, event) {
+        return true;
     }
     if app.history.visible {
         return handle_history(app, event);
@@ -297,47 +298,6 @@ fn handle_webview_dialog(app: &mut App, event: &KeyEvent) -> bool {
     if let Some(k) = wk {
         if let Some(url) = app.webview_dialog.handle_key(k) {
             super::shortcuts::open_webview(app, &url);
-        }
-        app.request_redraw();
-    }
-    true
-}
-
-fn handle_ai(app: &mut App, event: &KeyEvent) -> bool {
-    let ak = match event.logical_key {
-        Key::Named(NamedKey::Escape) => Some(AiPanelKey::Escape),
-        Key::Named(NamedKey::Backspace) => Some(AiPanelKey::Backspace),
-        Key::Named(NamedKey::Enter) => {
-            if app.modifiers.shift_key() {
-                Some(AiPanelKey::ShiftEnter)
-            } else {
-                Some(AiPanelKey::Enter)
-            }
-        }
-        Key::Named(NamedKey::Tab) => Some(AiPanelKey::Tab),
-        Key::Named(NamedKey::Space) => Some(AiPanelKey::Char(' ')),
-        Key::Character(ref s) => s.chars().next().map(AiPanelKey::Char),
-        _ => None,
-    };
-    if let Some(k) = ak {
-        if let Some(action) = app.ai_panel.handle_key(k) {
-            match action {
-                AiAction::Ask(question) => {
-                    let ctx = crate::ai::context::TermContext::collect();
-                    let rx = app.llm.ask(&question, ctx);
-                    app.ai_panel.set_receiver(rx);
-                    // A new question invalidates any review of the previous
-                    // suggested command — drop it so the badge doesn't show
-                    // stale advice next to an unrelated response.
-                    app.advisor.clear();
-                }
-                AiAction::Execute(cmd) => {
-                    app.wm.active_pane_mut().write(format!("{cmd}\n").as_bytes());
-                }
-                AiAction::CopyToTerminal(cmd) => {
-                    app.wm.active_pane_mut().write(cmd.as_bytes());
-                }
-            }
         }
         app.request_redraw();
     }
@@ -660,16 +620,9 @@ fn dispatch_palette_action(app: &mut App, action: PaletteAction, event_loop: &Ac
             app.wm.active_pane_mut().write(format!("{cmd}\n").as_bytes());
         }
         PaletteAction::AskAi(question) => {
-            // Prefill the AI panel with the question and submit it right away.
-            app.ai_panel.visible = true;
-            app.ai_panel.input = question.clone();
-            app.ai_panel.response = None;
-            app.ai_panel.error = None;
-            app.ai_panel.loading = true;
-            let ctx = crate::ai::context::TermContext::collect();
-            let rx = app.llm.ask(&question, ctx);
-            app.ai_panel.set_receiver(rx);
-            app.advisor.clear();
+            // Open the chat sidebar and send the question right away.
+            let req = crate::ai::hub::AskRequest::new(question, crate::ai::hub::Intent::Explain);
+            crate::ai::hub::ask(app, req);
         }
         PaletteAction::SwitchTab(i) => {
             if i < app.wm.tab_count() {

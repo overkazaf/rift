@@ -5,10 +5,7 @@ use winit::keyboard::{Key, ModifiersState, NamedKey};
 use crate::input;
 use crate::tools::exec_preview::ExecPreview;
 use crate::ui::MenuAction;
-use crate::effects::{CrtParams, GlitchParams, MatrixParams, NeonParams, ShaderEffect,
-                     AmberParams, HologramParams, PixelateParams, ThermalParams,
-                     RaindropParams, VhsParams, GridParams, FilmGrainParams, InvertParams, DesaturateParams,
-                     ChromaticParams, PulseParams, SnowParams, UnderwaterParams, NeonOutlineParams, ScanlineRgbParams};
+use crate::effects::EffectKind;
 use crate::network::{AuthMethod, SshConfig, SshPty, SshConnectRequest};
 
 use crate::window::tab::PaneCmd;
@@ -24,6 +21,35 @@ fn cmd_or_ctrl(modifiers: &ModifiersState) -> bool {
     { modifiers.control_key() }
 }
 
+// ── Effects ──
+
+/// Select (or clear) the visual effect, persist it to config.toml and repaint.
+/// Effects the current renderer cannot draw (GPU-only without a GPU) are
+/// refused with a log message instead of silently doing nothing.
+pub fn set_effect(app: &mut App, kind: Option<EffectKind>) {
+    if let Some(k) = kind {
+        if !app.renderer.shader.supports(k) {
+            log::warn!("Effect '{}' needs the GPU renderer (cargo build --features gpu); not applied", k.name());
+            return;
+        }
+    }
+    app.renderer.shader.set_effect(kind);
+    app.config.effect = kind;
+    crate::config::toml::save_config(&app.config);
+    app.request_redraw();
+}
+
+/// Ctrl+Shift+= / Ctrl+Shift+-: change `effect_intensity` by `delta` and persist.
+pub fn adjust_effect_intensity(app: &mut App, delta: f32) {
+    let v = ((app.config.effect_intensity + delta) * 10.0).round() / 10.0;
+    let v = v.clamp(0.0, 1.0);
+    app.config.effect_intensity = v;
+    app.renderer.shader.set_intensity(v);
+    log::info!("Effect intensity: {v:.1}");
+    crate::config::toml::save_config(&app.config);
+    app.request_redraw();
+}
+
 // ── Keyboard ──
 
 pub fn handle_key(app: &mut App, event: &KeyEvent, event_loop: &ActiveEventLoop) {
@@ -37,6 +63,11 @@ pub fn handle_key(app: &mut App, event: &KeyEvent, event_loop: &ActiveEventLoop)
         return;
     }
 
+    // 0. Inline AI popover (Cmd+K) owns the keyboard while open.
+    if crate::ai::inline::on_key_modal(app, event) {
+        return;
+    }
+
     // 1. Overlay interception (priority order)
     if overlays::try_intercept(app, event, event_loop) {
         return;
@@ -44,6 +75,11 @@ pub fn handle_key(app: &mut App, event: &KeyEvent, event_loop: &ActiveEventLoop)
 
     // 1b. Command blocks: Cmd+Shift+Up/Down/C, Cmd+C on a selected block
     if crate::blocks_ui::on_key(app, event) {
+        return;
+    }
+
+    // 1c. Inline AI: Cmd+K, Tab accepts a suggested fix, Esc dismisses/clears
+    if crate::ai::inline::on_key(app, event) {
         return;
     }
 
@@ -175,15 +211,15 @@ pub fn handle_key(app: &mut App, event: &KeyEvent, event_loop: &ActiveEventLoop)
     if app.modifiers.control_key() && app.modifiers.shift_key() {
         if let Key::Character(ref s) = event.logical_key {
             let effect_handled = match s.as_str() {
-                "1" | "!" => { app.renderer.shader.set_effect(Some(ShaderEffect::Crt(CrtParams::default()))); true }
-                "2" | "@" => { app.renderer.shader.set_effect(Some(ShaderEffect::Glitch(GlitchParams::default()))); true }
-                "3" | "#" => { app.renderer.shader.set_effect(Some(ShaderEffect::NeonGlow(NeonParams::default()))); true }
-                "4" | "$" => { app.renderer.shader.set_effect(Some(ShaderEffect::MatrixRain(MatrixParams::default()))); true }
-                "5" | "%" => { app.renderer.shader.set_effect(Some(ShaderEffect::Amber(AmberParams::default()))); true }
-                "6" | "^" => { app.renderer.shader.set_effect(Some(ShaderEffect::Hologram(HologramParams::default()))); true }
-                "7" | "&" => { app.renderer.shader.set_effect(Some(ShaderEffect::Pixelate(PixelateParams::default()))); true }
-                "8" | "*" => { app.renderer.shader.set_effect(Some(ShaderEffect::Thermal(ThermalParams::default()))); true }
-                "0" | ")" => { app.renderer.shader.set_effect(None); true }
+                "1" | "!" => { set_effect(app, Some(EffectKind::Crt)); true }
+                "2" | "@" => { set_effect(app, Some(EffectKind::Glitch)); true }
+                "3" | "#" => { set_effect(app, Some(EffectKind::Neon)); true }
+                "4" | "$" => { set_effect(app, Some(EffectKind::Matrix)); true }
+                "5" | "%" => { set_effect(app, Some(EffectKind::Amber)); true }
+                "6" | "^" => { set_effect(app, Some(EffectKind::Hologram)); true }
+                "0" | ")" => { set_effect(app, None); true }
+                "=" | "+" => { adjust_effect_intensity(app, 0.1); true }
+                "-" | "_" => { adjust_effect_intensity(app, -0.1); true }
                 _ => false,
             };
             if effect_handled && !event.repeat {
@@ -257,6 +293,10 @@ pub fn handle_key(app: &mut App, event: &KeyEvent, event_loop: &ActiveEventLoop)
     if let Some(bytes) = input::encode_key(event, app.modifiers, app_cursor) {
         // Enter key: feed observer + block tracking
         if bytes == b"\r" {
+            // `# natural language` at the prompt: generate instead of running.
+            if crate::ai::inline::on_enter(app) {
+                return;
+            }
             let (cmd_opt, scrollback_line) = {
                 let term = &app.wm.active_pane().terminal;
                 let row = term.cursor_row.min(term.grid.len().saturating_sub(1));
@@ -377,27 +417,13 @@ pub fn handle_menu_action(app: &mut App, action: MenuAction, event_loop: &Active
         MenuAction::Pane(cmd) => super::panes::run_pane_cmd(app, cmd, event_loop),
         MenuAction::Recording => app.toggle_recording(),
         // Effects
-        MenuAction::CrtEffect => app.renderer.shader.set_effect(Some(ShaderEffect::Crt(CrtParams::default()))),
-        MenuAction::GlitchEffect => app.renderer.shader.set_effect(Some(ShaderEffect::Glitch(GlitchParams::default()))),
-        MenuAction::NeonEffect => app.renderer.shader.set_effect(Some(ShaderEffect::NeonGlow(NeonParams::default()))),
-        MenuAction::MatrixEffect => app.renderer.shader.set_effect(Some(ShaderEffect::MatrixRain(MatrixParams::default()))),
-        MenuAction::AmberEffect => app.renderer.shader.set_effect(Some(ShaderEffect::Amber(AmberParams::default()))),
-        MenuAction::HologramEffect => app.renderer.shader.set_effect(Some(ShaderEffect::Hologram(HologramParams::default()))),
-        MenuAction::PixelateEffect => app.renderer.shader.set_effect(Some(ShaderEffect::Pixelate(PixelateParams::default()))),
-        MenuAction::ThermalEffect => app.renderer.shader.set_effect(Some(ShaderEffect::Thermal(ThermalParams::default()))),
-        MenuAction::RaindropEffect => app.renderer.shader.set_effect(Some(ShaderEffect::Raindrop(RaindropParams::default()))),
-        MenuAction::VhsEffect => app.renderer.shader.set_effect(Some(ShaderEffect::Vhs(VhsParams::default()))),
-        MenuAction::GridEffect => app.renderer.shader.set_effect(Some(ShaderEffect::CyberpunkGrid(GridParams::default()))),
-        MenuAction::FilmGrainEffect => app.renderer.shader.set_effect(Some(ShaderEffect::FilmGrain(FilmGrainParams::default()))),
-        MenuAction::InvertEffect => app.renderer.shader.set_effect(Some(ShaderEffect::Invert(InvertParams::default()))),
-        MenuAction::DesaturateEffect => app.renderer.shader.set_effect(Some(ShaderEffect::Desaturate(DesaturateParams::default()))),
-        MenuAction::ChromaticEffect => app.renderer.shader.set_effect(Some(ShaderEffect::Chromatic(ChromaticParams::default()))),
-        MenuAction::PulseEffect => app.renderer.shader.set_effect(Some(ShaderEffect::Pulse(PulseParams::default()))),
-        MenuAction::SnowEffect => app.renderer.shader.set_effect(Some(ShaderEffect::Snow(SnowParams::default()))),
-        MenuAction::UnderwaterEffect => app.renderer.shader.set_effect(Some(ShaderEffect::Underwater(UnderwaterParams::default()))),
-        MenuAction::NeonOutlineEffect => app.renderer.shader.set_effect(Some(ShaderEffect::NeonOutline(NeonOutlineParams::default()))),
-        MenuAction::ScanlineRgbEffect => app.renderer.shader.set_effect(Some(ShaderEffect::ScanlineRgb(ScanlineRgbParams::default()))),
-        MenuAction::NoEffect => app.renderer.shader.set_effect(None),
+        MenuAction::CrtEffect => set_effect(app, Some(EffectKind::Crt)),
+        MenuAction::GlitchEffect => set_effect(app, Some(EffectKind::Glitch)),
+        MenuAction::NeonEffect => set_effect(app, Some(EffectKind::Neon)),
+        MenuAction::MatrixEffect => set_effect(app, Some(EffectKind::Matrix)),
+        MenuAction::AmberEffect => set_effect(app, Some(EffectKind::Amber)),
+        MenuAction::HologramEffect => set_effect(app, Some(EffectKind::Hologram)),
+        MenuAction::NoEffect => set_effect(app, None),
         // UI panels
         MenuAction::Preferences => app.prefs.toggle(),
         MenuAction::Welcome => app.welcome.toggle(),
@@ -427,7 +453,7 @@ pub fn handle_menu_action(app: &mut App, action: MenuAction, event_loop: &Active
         MenuAction::AuditLog => app.audit.toggle(),
         MenuAction::TeachingMode => app.teaching.toggle(),
         // AI
-        MenuAction::AiAssistant => app.ai_panel.toggle(),
+        MenuAction::AiAssistant => crate::ai::chat::toggle(app),
         MenuAction::ObserverMode => {
             app.observer.toggle();
             if app.observer.enabled {
@@ -435,6 +461,15 @@ pub fn handle_menu_action(app: &mut App, action: MenuAction, event_loop: &Active
             } else {
                 log::info!("Observer: disabled");
             }
+        }
+        MenuAction::AskAboutThis => crate::ai::inline::open(app),
+        MenuAction::AutoFixToggle => {
+            let on = !app.config.ai_auto_fix;
+            crate::ai::inline::set_auto_fix(app, on);
+        }
+        MenuAction::NaturalLanguageToggle => {
+            let on = !app.config.ai_nl_hash;
+            crate::ai::inline::set_nl_hash(app, on);
         }
         MenuAction::AdvisorMode => {
             app.advisor.toggle();
@@ -558,7 +593,7 @@ fn handle_mod_shift(app: &mut App, key: &str, event_loop: &ActiveEventLoop) -> b
             true
         }
         "s" | "S" => { app.ssh_dialog.toggle(); true }
-        "a" | "A" => { app.ai_panel.toggle(); true }
+        "a" | "A" => { crate::ai::chat::toggle(app); true }
         "b" | "B" => { crate::network::browser::toggle(app); true }
         "g" | "G" => {
             app.git_panel.toggle();
