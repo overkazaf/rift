@@ -1,0 +1,30 @@
+Cargo.toml
+  46dcc8959d90ad53 33
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.8-ntes.9",
+  "base_commit_sha": "bfb9e0926154f9138b217b97efc7f1750ae5b019",
+  "prompts": {
+    "46dcc8959d90ad53": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6fa63a6e-29eb-4ea1-9d68-d297cc1526ef",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "nongjiawu",
+      "messages": [],
+      "total_additions": 1,
+      "total_deletions": 1,
+      "accepted_lines": 1,
+      "overriden_lines": 0,
+      "per_file_stats": {
+        "Cargo.toml": {
+          "additions": 1,
+          "deletions": 1,
+          "accepted_lines": 1
+        }
+      }
+    }
+  }
+}
