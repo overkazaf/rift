@@ -30,7 +30,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync"
 dirs = "7"
 bytes = "1"
 wasmtime = { version = "49", optional = true }
-wry = { version = "0.57", optional = true }
+wry = { version = "0.57", optional = true, features = ["devtools"] }
 wgpu = { version = "30", optional = true }
 pollster = { version = "1", optional = true }
 muda = "0.21"
