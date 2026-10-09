@@ -231,6 +231,16 @@ impl AgentRegistry {
         }
     }
 
+    /// Headless screenshots: pin where an agent runs without asking git.
+    pub(crate) fn pin_place(&mut self, uid: usize, git_root: &str, repo: &str, branch: &str) {
+        if let Some(i) = self.index_of(uid) {
+            let s = &mut self.sessions[i];
+            s.git_root = Some(git_root.to_string());
+            s.repo = Some(repo.to_string());
+            s.branch = Some(branch.to_string());
+        }
+    }
+
     fn index_of(&self, uid: usize) -> Option<usize> {
         self.sessions.iter().position(|s| s.pane_uid == uid)
     }
@@ -450,11 +460,15 @@ impl AgentRegistry {
             t.last_scan = Some(now);
         }
         let prompt = state::match_approval(lines, &self.approval_extra);
+        let has_prompt = prompt.is_some();
         self.sessions[i].machine.on_screen(now, prompt);
+        // A spinner on screen = working, whatever the byte stream looked like.
+        let busy = !has_prompt && state::screen_busy(lines);
+        let mut fx = self.sessions[i].machine.on_screen_busy(now, busy);
         if let Some(p) = preview_line(lines) {
             self.sessions[i].preview = p;
         }
-        let fx = self.sessions[i].machine.tick(now);
+        fx.extend(self.sessions[i].machine.tick(now));
         self.apply(i, fx);
     }
 
@@ -532,15 +546,71 @@ impl AgentRegistry {
     }
 }
 
-/// Last meaningful line of the screen for the sidebar preview.
+/// Strip box-drawing characters and collapse whitespace.
+fn clean_line(l: &str) -> String {
+    l.chars()
+        .map(|c| if matches!(c, '\u{2500}'..='\u{259f}') { ' ' } else { c })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Status lines and footers agents draw around their conversation: never a
+/// useful preview (vim-mode indicator, shortcut hints, mode toggles, token
+/// counters, model / cost status lines).
+pub fn is_chrome_line(clean: &str) -> bool {
+    let l = clean.to_lowercase();
+    let words = l.split_whitespace().count();
+    // "-- INSERT --", "-- NORMAL --", "-- VISUAL LINE --"
+    if l.starts_with("--") && l.ends_with("--") {
+        return true;
+    }
+    const HINTS: &[&str] = &[
+        "? for shortcuts", "for shortcuts", "auto mode", "auto-accept", "accept edits", "bypass permissions",
+        "plan mode", "shift+tab", "to cycle", "to interrupt", "ctrl+v to paste", "image in clipboard",
+        "ctrl+o", "ctrl+r", "ctrl+c", "ctrl+d", "esc to", "tab to", "press enter", "press esc", "/help",
+        "for newline", "? for", "context left", "no sandbox", "(shift", "⏵⏵",
+    ];
+    if HINTS.iter().any(|h| l.contains(h)) {
+        return true;
+    }
+    // Token counters: "57929 tokens", "↓ 1.2k tokens", "12.3k tokens · 3s".
+    if l.contains("tokens") && words <= 8 && l.chars().any(|c| c.is_ascii_digit()) {
+        return true;
+    }
+    // Model / cost / context status lines: "Opus 4.1 | ctx 12% | $0.42".
+    let model = ["opus", "sonnet", "haiku", "gpt-", "gemini"].iter().any(|m| l.contains(m));
+    if (model || l.contains("ctx") || l.contains("context:")) && (l.contains('%') || l.contains('$') || l.contains('|')) && words <= 12 {
+        return true;
+    }
+    if l.starts_with('$') && words <= 3 {
+        return true;
+    }
+    false
+}
+
+fn meaningful(l: &str) -> bool {
+    l.chars().filter(|c| c.is_alphanumeric()).count() >= 3
+}
+
+/// Last meaningful line of the screen for the sidebar preview: skips the
+/// agent's own status lines and footers (see [`is_chrome_line`]). A spinner
+/// line is only used when nothing better is on screen (and then without its
+/// timer / token parenthesis).
 pub fn preview_line(lines: &[String]) -> Option<String> {
-    lines
+    let cleaned: Vec<String> = lines.iter().rev().map(|l| clean_line(l)).collect();
+    let pick = |l: &String| l.chars().take(160).collect::<String>();
+    if let Some(l) = cleaned
         .iter()
-        .rev()
-        .map(|l| l.chars().map(|c| if matches!(c, '\u{2500}'..='\u{259f}') { ' ' } else { c }).collect::<String>())
-        .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
-        .find(|l| l.chars().filter(|c| c.is_alphanumeric()).count() >= 3)
-        .map(|l| l.chars().take(160).collect())
+        .find(|l| meaningful(l) && !is_chrome_line(l) && !state::is_spinner_line(&l.to_lowercase()))
+    {
+        return Some(pick(l));
+    }
+    cleaned.iter().find(|l| state::is_spinner_line(&l.to_lowercase())).map(|l| {
+        let base = l.split(" (").next().unwrap_or(l);
+        pick(&base.to_string())
+    })
 }
 
 #[cfg(test)]
@@ -918,6 +988,59 @@ mod tests {
         r.observe_screen(1, &screen, 1, t0 + ms(10));
         r.observe_screen(1, &screen, 2, t0 + ms(700));
         assert_eq!(r.session(1).unwrap().state, AgentState::WaitingForUser);
+    }
+
+    #[test]
+    fn preview_table() {
+        let cases: &[(&[&str], Option<&str>)] = &[
+            // vim-mode footer under the prompt box
+            (&["● I'll look at the parser first.", "╭────────╮", "│ >      │", "╰────────╯", "  -- INSERT --"], Some("● I'll look at the parser first.")),
+            (&["Reading src/lib.rs", "  ? for shortcuts"], Some("Reading src/lib.rs")),
+            (&["Edited 3 files", "  ⏵⏵ auto mode on (shift+tab to cycle)"], Some("Edited 3 files")),
+            (&["Edited 3 files", "  auto mode on"], Some("Edited 3 files")),
+            (&["Done refactoring", "Image in clipboard · ctrl+v to paste", "57929 tokens"], Some("Done refactoring")),
+            (&["Done refactoring", "  ↓ 1.2k tokens"], Some("Done refactoring")),
+            (&["Done refactoring", "  Opus 4.1 | ctx 12% | $0.42"], Some("Done refactoring")),
+            (&["Done refactoring", "  Sonnet 4.5 · 23% context"], Some("Done refactoring")),
+            // spinner lines: real text wins, spinner is the fallback
+            (&["● Searching the codebase", "✻ Meandering… (1s · ↓ 12 tokens · esc to interrupt)", "  -- INSERT --"], Some("● Searching the codebase")),
+            (&["✻ Meandering… (1s · esc to interrupt)", "  -- INSERT --"], Some("✻ Meandering…")),
+            (&["-- INSERT --"], None),
+            (&["────────", "   ", ""], None),
+            (&[], None),
+        ];
+        for (screen, want) in cases {
+            let l: Vec<String> = screen.iter().map(|s| s.to_string()).collect();
+            assert_eq!(preview_line(&l).as_deref(), *want, "{screen:?}");
+        }
+    }
+
+    #[test]
+    fn spinner_on_screen_keeps_or_makes_the_agent_working() {
+        let t0 = Instant::now();
+        let mut r = AgentRegistry::new();
+        let mut o = obs(1);
+        o.block_running = true;
+        o.running_cmd = Some("claude".into());
+        r.observe_pane(&o, &mut no_probe, t0);
+        let busy: Vec<String> = ["> who are you", "", "✻ Meandering… (1s · ↓ 3 tokens · esc to interrupt)", "  -- INSERT --"]
+            .iter().map(|s| s.to_string()).collect();
+        // Startup settled to Idle with no submit seen (e.g. hooks missing)...
+        r.tick(t0 + ms(9000));
+        assert_eq!(r.session(1).unwrap().state, AgentState::Idle);
+        // ...but the spinner says otherwise.
+        r.observe_screen(1, &busy, 1, t0 + ms(9100));
+        assert_eq!(r.session(1).unwrap().state, AgentState::Working);
+        assert_eq!(r.session(1).unwrap().preview, "> who are you");
+        // A silent stretch (no new bytes, no scan) does not flip it to Idle while the spinner was last seen.
+        r.tick(t0 + ms(9100) + ms(10_000));
+        assert_eq!(r.session(1).unwrap().state, AgentState::Working);
+        // Spinner gone + quiet + ready prompt: Idle.
+        let ready: Vec<String> = ["● Hello!", "╭────╮", "│ >  │", "╰────╯", "  -- INSERT --"].iter().map(|s| s.to_string()).collect();
+        r.observe_screen(1, &ready, 2, t0 + ms(30_000));
+        r.tick(t0 + ms(30_000) + ms(3000));
+        assert_eq!(r.session(1).unwrap().state, AgentState::Idle);
+        assert_eq!(r.session(1).unwrap().preview, "● Hello!");
     }
 
     #[test]

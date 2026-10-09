@@ -124,7 +124,7 @@ open target/Rift.app
 
 | Feature flag | What it adds |
 |---|---|
-| `gpu` | wgpu renderer and GPU effects |
+| `gpu` | wgpu renderer: glyph-atlas text on the GPU, ligatures, GPU effects |
 | `webview` | Built-in browser panel (system WebView; needs WebKitGTK on Linux) |
 | `plugins` | Experimental WASM plugin host (wasmtime) |
 
@@ -186,6 +186,18 @@ osc52 = "write-only"   # default: programs may set the clipboard (<=100 KB, with
 ```
 
 Other `[general]` keys: `theme` (default `"rift-neon"`), `font_family`, `font_path`, `font_size`, `opacity`, `cols`, `rows`, `effect`, `effect_intensity`, `startup_animation`. You can also open **Preferences** (`Cmd+,`).
+
+#### Rendering
+
+```toml
+[general]
+renderer = "auto"        # "auto" | "gpu" | "cpu": builds with --features gpu draw the terminal on the GPU
+                         # (glyph atlas + instanced quads); "cpu" or a missing GPU falls back to the software renderer
+font_ligatures = true    # programming ligatures (-> => != ...). Default: on with the GPU renderer, off on CPU.
+                         # Needs a font that ships them, e.g. JetBrains Mono / Fira Code via font_path or font_family.
+```
+
+`RIFT_RENDERER=cpu|gpu|auto` overrides `renderer`, and `RIFT_PROFILE=1` prints per-phase frame timings (including the GPU upload phases) every 120 frames.
 
 ### Privacy
 
@@ -252,7 +264,16 @@ Rift is built to supervise AI coding agents: Claude Code, Codex CLI, Gemini CLI,
 
 - **Detection.** From the command you ran (OSC 633;E / command blocks, including `npx @anthropic-ai/claude-code`, `env FOO=1 aider`, `cd x && codex`), then the PTY's foreground process (so aliases and wrapper scripts work), then the window title.
 - **States.** Starting, Working, Waiting for you, Idle, Done, Error. Rift infers them from output activity, approval prompts on a quiet screen ("Do you want to proceed?", `1. Yes`, `[y/n]`, Codex "Allow command?", ...), OSC 9 / 777 notifications, command exit, and, most reliably, agent hooks (below).
-- **Mission Control dock** (`Cmd+Shift+;`, or *Agents > Mission Control*). One card per agent across all tabs: icon, repo and branch, state pill (working pulses with the accent colour, **needs you** pulses amber, done ✓, error ✗), elapsed time and the last line of output. Click a card or press `Enter` to jump to its tab and pane; `j`/`k` or the arrow keys move, `1`-`9` jump directly, `n` cycles agents that need you, `Esc` hands the keyboard back.
+- **Mission Control dock** (`Cmd+Shift+;`, or *Agents > Mission Control*). A control console on the left edge with one card per agent across all tabs: icon, repo and branch (plus the worktree directory), state pill (working pulses with the accent colour, **needs you** pulses amber, done ✓, error ✗), elapsed time, the last line of output and the metrics below. Click a card to select it, double-click (or `Enter`) to jump to its tab and pane. Drag the dock's right edge to resize it (the width is saved as `[agents] dock_cols`); `Tab` or the icon in the header switches between compact and expanded cards. With no agents it shows a **New Agent…** button and how to set up hooks ([Claude Code hooks](#claude-code-hooks)).
+- **Act from the dock.** No pane switching needed:
+  - **Approve / deny.** When an agent waits on an approval prompt, its card expands to show what is requested (the shell command, or the file to edit or write) and the buttons the agent offers, `[1 Approve] [2 Always] [3 Deny]`, labelled with the agent's own option numbers. Prompts are parsed from the pane's screen for Claude Code, Codex, Gemini CLI, Aider, opencode and Cursor CLI (table-driven parsers with fixtures in `src/agents/prompt.rs`); if a prompt cannot be parsed the card shows the raw last lines and you answer in the pane. Shell commands are checked with the Preview-Then-Accept rules first: risky ones get a red **RISKY** badge and the first impact, and **critical** ones need a second press (press the same number again or `Enter`). The answer goes through the terminal's own key encoder (digits, `y`/`n`, or arrows + `Enter` as the CLI expects), and Rift re-reads the screen right before sending so a prompt that just changed is never answered blindly.
+  - **Interrupt.** `Esc` sends ESC to the selected agent (Claude Code's interrupt); a second `Esc` hands the keyboard back. *Send Ctrl+C* is in the card's context menu (right-click a card or press `m`).
+  - **Reply.** `r` opens an inline composer on the selected card. `Enter` sends the text plus Enter to that pane; `Shift+Enter` adds a line break using your `shift_enter` setting. IME input and `Cmd+V` go to the composer.
+  - **Broadcast.** `Space` (or `Cmd+click`) marks cards; `b` types once to every marked agent (or to all live agents when none is marked) and asks for confirmation when there is more than one target. Agents waiting on an approval menu are skipped, since typed text would act as menu keys.
+  - **Review.** `v` or the **Review** button opens the change-review overlay for that pane; clicking a turn in the card's timeline opens it at that turn.
+  - **Restart / close.** `R` stops the agent (if running) and re-runs its original launch command in the same pane (the command text Rift saw, or the default for the agent); `x` closes the pane. Both ask first when work could be lost.
+  - Keys at a glance: arrows or `j`/`k` select, `Enter` jump, `1`–`3` answer (otherwise `1`–`9` jump to the Nth agent), `Esc` interrupt, `r` reply, `b` broadcast, `Space` mark, `a` mark all, `c` clear marks, `v` review, `R` restart, `x` close, `m` menu, `Tab` density, `n` next waiting.
+- **At a glance.** Each card shows the model, tokens, cost, context-window use and the usage reset time read from the agent's own UI (Claude Code status lines and spinner, Codex footer and `Token usage`, Gemini footer, Aider's token report, opencode's sidebar; parsers and fixtures in `src/agents/metrics.rs`), the files changed in the latest turn and over all turns (from change review), and a compact **turn timeline** (duration, files, outcome). The footer totals cost and tokens across agents and counts those waiting. If two agents run in the same git worktree *and* branch, both cards get an amber **same worktree as …** chip with a hint to use *New Agent > worktree*.
 - **Needs you.** `Cmd+Shift+.` jumps to the next agent waiting for you (cycling). Tabs show a badge with the agent count and an amber dot when one is waiting, and a waiting pane gets an amber border.
 - **Notifications.** When an agent needs approval or finishes a turn while its pane is not in front of you (or Rift is in the background) you get a macOS notification such as "Claude Code in rift/main needs your approval", plus a dock badge with the number of agents waiting. Notifications are de-duplicated and rate limited. Clicking a notification does not focus the pane (not supported yet).
 - **New Agent.** Command palette > `agent` (or *Agents > New Agent…*) lists the agent CLIs found on your `PATH`. Run one in the current directory, or in a **new git worktree** (`git worktree add ../<repo>-<agent>-<n> -b agent/<agent>-<n>`, created in the background with a progress toast). The tab is titled `<agent> · <branch>`. *Agent Layout: 2×2* (also `agent` palette entries for 2×1 and 3×2) starts a grid of agents, one worktree each.
@@ -290,6 +311,7 @@ notify = true             # desktop notification + dock badge
 sound = false             # play the system sound with notifications
 default_agent = "claude"  # used by "Agent Layout" (default: first installed)
 approval_patterns = ["ship it?"]   # extra case-insensitive prompt substrings
+dock_cols = 40            # Mission Control width in columns (default 34; saved when you drag the edge)
 ```
 
 ## Keyboard shortcuts

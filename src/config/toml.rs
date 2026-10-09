@@ -160,6 +160,9 @@ fn managed_edits(config: &Config, base: Option<&Config>) -> Vec<Edit> {
         push("llm", "api_url", fresh || config.llm.api_url != b.llm.api_url, quote(&config.llm.api_url));
     }
     push("security", "osc52", config.osc52 != b.osc52, quote(config.osc52.as_str()));
+    if config.agents.dock_cols != 0 || b.agents.dock_cols != 0 {
+        push("agents", "dock_cols", config.agents.dock_cols != b.agents.dock_cols, config.agents.dock_cols.to_string());
+    }
     edits
 }
 
@@ -478,6 +481,9 @@ fn parse_toml_config(content: &str) -> Config {
     }
     if let Some(v) = get_str(&map, "agents", "default_agent") {
         config.agents.default_agent = v;
+    }
+    if let Some(v) = get_int(&map, "agents", "dock_cols") {
+        config.agents.dock_cols = if v <= 0 { 0 } else { (v as usize).clamp(crate::agents::ui::MIN_COLS, crate::agents::ui::MAX_COLS) };
     }
     match map.get("agents").and_then(|s| s.get("approval_patterns")) {
         Some(TomlValue::Array(items)) => {

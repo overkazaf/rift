@@ -386,10 +386,17 @@ impl WindowManager {
         self.active_tab().layouts(area)
     }
 
+    // Used by the audit suite; the app sizes panes via resize_to(content_area).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn resize_all(&mut self, cell_width: usize, cell_height: usize, width: u32, height: u32, tab_bar_height: usize) {
         let content_h = (height as usize).saturating_sub(tab_bar_height);
         let area = PaneRect { x: 0, y: tab_bar_height, width: width as usize, height: content_h };
+        self.resize_to(cell_width, cell_height, area);
+    }
 
+    /// Size every pane's PTY/grid for the content `area` (the same rect the
+    /// renderer lays panes out in, docks included).
+    pub fn resize_to(&mut self, cell_width: usize, cell_height: usize, area: PaneRect) {
         self.last_area = area;
 
         for tab in &mut self.tabs {

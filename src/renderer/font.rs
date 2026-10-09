@@ -287,6 +287,9 @@ pub struct FontManager {
     styled: [Option<Option<GFont>>; 4],
     /// Underline / strikethrough / overline geometry in cell pixels.
     pub deco: DecoMetrics,
+    /// Which ASCII code points each face (slot) has a glyph for, built on
+    /// first use by [`shaping_face`](Self::shaping_face).
+    ascii_has: [Option<u128>; 4],
 }
 
 fn load_font(path: &Path, size: f32) -> Option<GFont> {
@@ -333,6 +336,7 @@ impl FontManager {
             primary_path: PathBuf::from(font_path),
             styled: [None, None, None, None],
             deco,
+            ascii_has: [None; 4],
         }
     }
 
@@ -565,14 +569,13 @@ impl FontManager {
         self.font_size
     }
 
-    /// Whether the primary face maps `c` to a real glyph.
-    #[inline]
-    pub fn primary_has_glyph(&self, c: char) -> bool {
-        self.primary.glyph(c) != 0
-    }
-
     /// Whether the face in `slot` maps `c` to a real glyph.
     pub fn slot_has_glyph(&self, slot: usize, c: char) -> bool {
+        if (c as u32) < 128 {
+            if let Some(mask) = self.ascii_has.get(slot).copied().flatten() {
+                return mask >> (c as u32) & 1 != 0;
+            }
+        }
         if slot == 0 {
             return self.primary.glyph(c) != 0;
         }
@@ -584,6 +587,16 @@ impl FontManager {
     /// the font bytes are unavailable.
     pub fn shaping_face(&mut self, style: u8) -> Option<ShapeFace> {
         let (slot, synth_bold, synth_italic) = self.face_for(style);
+        let f = if slot == 0 { Some(&self.primary) } else { self.styled[slot].as_ref().and_then(|f| f.as_ref()) }?;
+        if self.ascii_has[slot].is_none() {
+            let mut mask = 0u128;
+            for c in 0u8..128 {
+                if f.glyph(c as char) != 0 {
+                    mask |= 1u128 << c;
+                }
+            }
+            self.ascii_has[slot] = Some(mask);
+        }
         let f = if slot == 0 { Some(&self.primary) } else { self.styled[slot].as_ref().and_then(|f| f.as_ref()) }?;
         Some(ShapeFace { data: f.data?, index: f.index, slot, synth_bold, synth_italic })
     }

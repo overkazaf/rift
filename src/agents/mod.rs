@@ -35,16 +35,36 @@
 //! * Everything time dependent takes an explicit `Instant`, so state transitions
 //!   are tested with synthetic timelines.
 //!
+//! # Control console (the dock acts on agents, not just lists them)
+//!
+//! * `prompt.rs`: approval prompts parsed off a pane's screen (what is asked, the
+//!   options with their roles), the option -> keystroke plan and the byte
+//!   encoders (`crate::input`) for answers, ESC, Ctrl+C and replies.
+//! * `metrics.rs`: model / tokens / cost / context / reset parsed from each
+//!   agent's own UI, and same-worktree collision detection.
+//! * `control.rs`: the dock's pure keyboard state machine (browse, answer with
+//!   a second press for critical commands, reply, broadcast targeting,
+//!   confirmations, context menu) and the per-agent `PaneInfo`.
+//! * `console.rs`: glue to `App`: keeps `PaneInfo` fresh (screen scans,
+//!   background command-risk checks, review timeline), carries out answers /
+//!   interrupts / replies / restart / close, and handles the dock's mouse.
+//!
 //! The rest of the module is UI and glue: `runtime.rs` (polling `App`),
-//! `ui.rs` (sidebar, tab badges, pane tint), `notify.rs` (desktop notifications,
-//! dock badge), `launch.rs` ("New Agent", worktrees, grid layouts).
+//! `ui.rs` + `dock.rs` (dock state, layout and drawing, tab badges, pane tint),
+//! `notify.rs` (desktop notifications, dock badge), `launch.rs` ("New Agent",
+//! worktrees, grid layouts).
 
 pub mod cli;
+pub mod console;
+pub mod control;
 pub mod detect;
+pub mod dock;
 pub mod git;
 pub mod inbox;
 pub mod launch;
+pub mod metrics;
 pub mod notify;
+pub mod prompt;
 pub mod registry;
 pub mod runtime;
 pub mod state;
@@ -302,11 +322,14 @@ pub struct AgentsConfig {
     pub approval_patterns: Vec<String>,
     /// Agent used by "Agent Layout" (slug); first installed one when empty.
     pub default_agent: String,
+    /// Width of the Mission Control dock in character cells (0 = default 34);
+    /// saved when you drag the dock's edge.
+    pub dock_cols: usize,
 }
 
 impl Default for AgentsConfig {
     fn default() -> Self {
-        Self { enabled: true, notify: true, sound: false, approval_patterns: Vec::new(), default_agent: String::new() }
+        Self { enabled: true, notify: true, sound: false, approval_patterns: Vec::new(), default_agent: String::new(), dock_cols: 0 }
     }
 }
 

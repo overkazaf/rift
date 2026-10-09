@@ -161,6 +161,7 @@ impl RendererMode {
         }
     }
 
+    #[cfg_attr(not(feature = "gpu"), allow(dead_code))]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Auto => "auto",

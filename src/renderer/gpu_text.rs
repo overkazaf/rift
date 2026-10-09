@@ -37,6 +37,8 @@ pub const KEY: u32 = 0xFF00_0000;
 
 pub const KIND_SOLID: u32 = 0;
 pub const KIND_MASK: u32 = 1;
+/// Straight-alpha RGBA atlas glyph (reserved for color glyphs).
+#[allow(dead_code)]
 pub const KIND_COLOR: u32 = 2;
 
 /// One instanced quad (28 bytes). Matches the vertex layout in `gpu.rs`.
@@ -82,16 +84,7 @@ impl Inst {
     }
 }
 
-/// One highlighted run of cells in a view row (selection, search match).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct HlRect {
-    pub row: usize,
-    /// Columns `c0..c1`.
-    pub c0: usize,
-    pub c1: usize,
-    /// Straight-alpha color blended over the finished cells.
-    pub rgba: [u8; 4],
-}
+pub use super::cells::HlRect;
 
 /// Instances of one terminal row plus upload state.
 #[derive(Default)]
@@ -121,6 +114,9 @@ pub struct GpuText {
     pub rows_built: u64,
     /// Slots whose instance list was truncated to `cap`.
     pub overflowed: u64,
+    /// Instances per column reserved in each row slot (grows on overflow).
+    cap_per_col: usize,
+    grow_cap: bool,
     /// A glyph could not be placed because every atlas page was in use this
     /// frame; rows are rebuilt next frame.
     pub starved: bool,
@@ -148,6 +144,8 @@ impl GpuText {
             panes: HashMap::new(),
             rows_built: 0,
             overflowed: 0,
+            cap_per_col: 3,
+            grow_cap: false,
             starved: false,
             reset_atlas: false,
         }
@@ -165,9 +163,10 @@ impl GpuText {
             total += rows;
             max_cols = max_cols.max(r.width / cw.max(1) + 1);
         }
-        self.cap = max_cols * 3 + 16;
+        self.cap = max_cols * self.cap_per_col + 16;
         self.slots.clear();
-        self.slots.resize_with(total, || RowSlot { dirty: true, ..Default::default() });
+        let cap = self.cap as u32;
+        self.slots.resize_with(total, || RowSlot { dirty: true, gpu_len: cap, ..Default::default() });
         self.layout_gen += 1;
     }
 
@@ -186,6 +185,7 @@ impl GpuText {
         if inst.len() > self.cap {
             inst.truncate(self.cap);
             self.overflowed += 1;
+            self.grow_cap = true;
         }
         let s = &mut self.slots[slot];
         s.inst = inst;
@@ -208,14 +208,13 @@ impl GpuText {
 
     /// Mark every slot dirty (device lost, buffer recreated).
     pub fn mark_all_dirty(&mut self) {
+        // After a relayout the buffer still holds instances of the old layout
+        // at these offsets: treat the whole slot as stale so it is zero-padded.
+        let cap = self.cap as u32;
         for s in &mut self.slots {
             s.dirty = true;
-            s.gpu_len = 0;
+            s.gpu_len = cap;
         }
-    }
-
-    pub fn dirty_rows(&self) -> usize {
-        self.slots.iter().filter(|s| s.dirty).count()
     }
 
     /// Bitmap for an atlas key (rasterized on a cache miss only).
@@ -276,6 +275,12 @@ impl GpuText {
     pub fn take_stale(&mut self) -> bool {
         let evicted = self.atlas.take_evicted();
         self.color_atlas.take_evicted();
+        if std::mem::take(&mut self.grow_cap) {
+            // A row needed more instances than its slot holds (dense colors +
+            // decorations): reserve more per column and rebuild.
+            self.cap_per_col = (self.cap_per_col + 2).min(16);
+            return true;
+        }
         if self.starved {
             self.starved = false;
             self.reset_atlas = true;
@@ -293,52 +298,6 @@ impl GpuText {
         }
     }
 }
-
-/// Per-cell facts resolved once per row build.
-#[derive(Clone, Copy)]
-struct Cd {
-    x0: usize,
-    fg: Rgb,
-    /// Fill color when `fill` is set.
-    bg: Rgb,
-    fill: bool,
-    fill_w: usize,
-    /// Width of the cursor shape on this cell (1 or 2 cells).
-    cursor_w: usize,
-    text: Rgb,
-    ul: Rgb,
-    style: u8,
-    deco: Deco,
-    cursor: bool,
-    glyph: bool,
-    wide: bool,
-    skip: bool,
-    url: bool,
-}
-
-impl Cd {
-    fn skipped(x0: usize) -> Self {
-        Self {
-            x0,
-            fg: (0, 0, 0),
-            bg: (0, 0, 0),
-            fill: false,
-            fill_w: 0,
-            cursor_w: 0,
-            text: (0, 0, 0),
-            ul: (0, 0, 0),
-            style: 0,
-            deco: Deco::default(),
-            cursor: false,
-            glyph: false,
-            wide: false,
-            skip: true,
-            url: false,
-        }
-    }
-}
-
-type RunKey = (u8, Rgb, Rgb, bool, u64, Rgb, bool);
 
 impl Renderer {
     /// Switch the GPU text path on or off. Off keeps the CPU renderer as is.
@@ -361,22 +320,16 @@ impl Renderer {
         std::mem::take(&mut self.redraw_requested)
     }
 
-    /// The GPU text renderer exists (it may be suspended for a frame).
-    pub fn gpu_text_enabled(&self) -> bool {
-        self.gpu.is_some()
-    }
-
     /// Hand terminal text to the CPU (`true`) or back to the GPU for the
-    /// next frames. Switches repaint everything.
+    /// next frames (switching repaints everything). Not used by the app, which
+    /// handles overlays through translucent UI-layer pixels; kept as an escape
+    /// hatch and for tests of the opaque path.
+    #[allow(dead_code)]
     pub fn set_gpu_suspended(&mut self, suspended: bool) {
         if self.gpu_suspended != suspended {
             self.gpu_suspended = suspended;
             self.invalidate();
         }
-    }
-
-    pub fn gpu_suspended(&self) -> bool {
-        self.gpu_suspended
     }
 
     #[inline]
@@ -542,77 +495,16 @@ impl Renderer {
             return;
         }
         let dbg = self.def_bg();
-        let theme_bg = self.theme.bg;
         let theme_cursor = self.theme.cursor;
         let cursor_style = terminal.cursor_style;
         let accent = self.theme.cursor;
         out.push(Inst::solid_rgb(rect.x, y0, rect.width, ch, dbg));
 
         // ── Resolve every cell once ──
-        let mut cds: Vec<Cd> = Vec::with_capacity(cells.len());
-        for (col, cell) in cells.iter().enumerate() {
-            let x0 = rect.x + col * cw;
-            let mut cd = Cd::skipped(x0);
-            if x0 + cw > rect.x + rect.width || x0 + cw > buf_width {
-                cds.push(cd);
-                continue;
-            }
-            if images_visible {
-                if let Some(ic) = terminal.image_store.get_cell(row, col) {
-                    if let Some(img) = terminal.image_store.get_image(ic.image_id) {
-                        blit_image_cell(buffer, buf_width, buf_height, img, ic, x0, y0, cw, ch);
-                    }
-                    cds.push(cd);
-                    continue;
-                }
-            }
-            let (mut fg, mut bg) = (self.resolve_fg(cell), self.resolve(cell.bg, false));
-            if cell.reverse() {
-                std::mem::swap(&mut fg, &mut bg);
-            }
-            if cell.dim() {
-                fg = (fg.0 / 2, fg.1 / 2, fg.2 / 2);
-            }
-            if cell.c == '\0' {
-                cds.push(cd);
-                continue;
-            }
-            let is_cursor = show_cursor && row == self.view_cursor_row && col == terminal.cursor_col;
-            let block = is_cursor && cursor_style == CursorStyle::Block;
-            let glyph = cell.c != ' ' && !cell.hidden();
-            let wide = glyph && font::is_wide(cell.c);
-            let deco = if cell.hidden() { Deco::default() } else { cell_deco(cell) };
-            let cursor_w = if is_cursor {
-                use unicode_width::UnicodeWidthChar;
-                cell.c.width().unwrap_or(1).max(1) * cw
-            } else {
-                cw
-            };
-            let is_url = url_ranges.iter().any(|&(s, e)| col >= s && col < e);
-            let text = if block { theme_bg } else if is_url && glyph { accent } else { fg };
-            let ul_rgb = match cell.underline_color() {
-                Some(c) if deco.ul != UnderlineStyle::None && !block => self.resolve(c, true),
-                _ => text,
-            };
-            cd = Cd {
-                x0,
-                fg,
-                bg: if block { theme_cursor } else { bg },
-                fill: cell.bg != Color::Default || cell.reverse() || block,
-                fill_w: if is_cursor { cursor_w } else if wide { cw * 2 } else { cw },
-                cursor_w,
-                text,
-                ul: ul_rgb,
-                style: font::style_bits(cell.bold(), cell.italic()),
-                deco,
-                cursor: is_cursor,
-                glyph,
-                wide,
-                skip: false,
-                url: is_url,
-            };
-            cds.push(cd);
-        }
+        let cds = self.resolve_row_cells(
+            terminal, row, cells, rect, buf_width, show_cursor, images_visible, url_ranges,
+            Some((&mut *buffer, buf_height)),
+        );
 
         // ── Pass 1: cell backgrounds (merged runs) and cursor shapes ──
         let mut cursor_quads: Vec<Inst> = Vec::new();
@@ -771,82 +663,6 @@ impl Renderer {
                         ));
                     }
                 }
-            }
-        }
-    }
-
-    /// Group eligible cells into runs and shape them. Fills `covered` for
-    /// cells drawn by a shaped glyph and `shaped` with `(first col, face, run)`.
-    fn find_ligatures(
-        &mut self,
-        cells: &[Cell],
-        cds: &[Cd],
-        row: usize,
-        covered: &mut [bool],
-        shaped: &mut Vec<(usize, ShapeFace, Arc<ShapedRun>)>,
-    ) {
-        let mut faces: [Option<Option<ShapeFace>>; 4] = [None; 4];
-        let mut brk = vec![false; cds.len() + 1];
-        if self.cur_pane == self.hl_pane {
-            if let Some(rects) = self.hl_rows.get(&row) {
-                for r in rects {
-                    if r.c0 < brk.len() {
-                        brk[r.c0] = true;
-                    }
-                    if r.c1 < brk.len() {
-                        brk[r.c1] = true;
-                    }
-                }
-            }
-        }
-        let cw = self.font.cell_width;
-        let size = self.font.font_size();
-        let eligible = |font: &mut FontManager, faces: &mut [Option<Option<ShapeFace>>; 4], col: usize| -> Option<ShapeFace> {
-            let (cd, cell) = (&cds[col], &cells[col]);
-            if cd.skip || !cd.glyph || cd.wide || cd.cursor || cell.extra_id() != 0 {
-                return None;
-            }
-            let c = cell.c;
-            if (c as u32) < 0x20 || c == '\u{7f}' || c == ' ' {
-                return None;
-            }
-            let f = (*faces[cd.style as usize].get_or_insert_with(|| font.shaping_face(cd.style)))?;
-            font.slot_has_glyph(f.slot, c).then_some(f)
-        };
-        let key_of = |col: usize| -> RunKey {
-            let cd = &cds[col];
-            (cd.style, cd.text, cd.bg, cd.fill, cd.deco.bits(), cd.ul, cd.url)
-        };
-        let mut col = 0;
-        let mut text: Vec<char> = Vec::new();
-        while col < cds.len() {
-            let Some(face) = eligible(&mut self.font, &mut faces, col) else {
-                col += 1;
-                continue;
-            };
-            let start = col;
-            let key = key_of(col);
-            text.clear();
-            text.push(cells[col].c);
-            while col + 1 < cds.len()
-                && !brk[col + 1]
-                && key_of(col + 1) == key
-                && eligible(&mut self.font, &mut faces, col + 1).is_some()
-            {
-                col += 1;
-                text.push(cells[col].c);
-            }
-            col += 1;
-            if text.len() < 2 {
-                continue;
-            }
-            if let Some(run) = self.shaper.shape(&face, size, cw, &text) {
-                for (i, c) in run.covered.iter().enumerate() {
-                    if *c {
-                        covered[start + i] = true;
-                    }
-                }
-                shaped.push((start, face, run));
             }
         }
     }

@@ -6,13 +6,12 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use winit::event::{KeyEvent, MouseScrollDelta};
-use winit::keyboard::{Key, NamedKey};
 
 use super::launch::{self, GridStep, Target};
 use super::notify::{self, NotifyPolicy, Reason};
 use super::registry::{AgentRegistry, PaneObs, Probe, SCAN_INTERVAL};
-use super::ui::{self, AgentsUi, DockKey, UiAction};
-use super::{detect, git, inbox, AgentEvent, AgentKind};
+use super::ui::{self, AgentsUi};
+use super::{console, detect, dock, git, inbox, AgentEvent, AgentKind};
 use crate::app::App;
 use crate::renderer::Renderer;
 use crate::terminal::{Notification, Terminal};
@@ -33,6 +32,8 @@ struct PendingCmd {
     uid: usize,
     cmd: String,
     since: Instant,
+    /// Restart: type only at a real shell prompt (never into a still-running agent).
+    strict: bool,
 }
 
 /// Runtime bookkeeping that is not part of the pure registry.
@@ -44,6 +45,8 @@ pub struct Runtime {
     jobs: Vec<launch::Job>,
     pending: Vec<PendingCmd>,
     installed: Option<(Instant, Vec<AgentKind>)>,
+    /// Control-console bookkeeping (command risk checks, launch commands).
+    pub console: console::Console,
 }
 
 impl Runtime {
@@ -71,7 +74,7 @@ pub fn dock_w(app: &App, win_w: usize) -> usize {
     if !app.agents_ui.visible || !app.config.agents.enabled || app.browser_visible() {
         0
     } else {
-        ui::dock_width(win_w, app.renderer.cell_width())
+        ui::dock_width_pref(win_w, app.renderer.cell_width(), app.config.agents.dock_cols)
     }
 }
 
@@ -82,25 +85,18 @@ fn win_size(app: &App) -> (usize, usize) {
     })
 }
 
-fn dock_rect(app: &App) -> Option<Rect> {
+pub(super) fn dock_rect(app: &App) -> Option<Rect> {
     let (w, h) = win_size(app);
-    let dw = dock_w(app, w);
-    if dw == 0 {
+    if dock_w(app, w) == 0 {
         return None;
     }
-    let tbh = app.tab_bar_height();
     let ch = app.renderer.cell_height();
     let hud = if app.hud_visible { ch * 3 + 20 } else { 0 };
-    Some(Rect::new(0, tbh, dw, h.saturating_sub(tbh + hud)))
+    ui::dock_rect_pref(w, h, app.tab_bar_height(), hud, app.renderer.cell_width(), app.config.agents.dock_cols)
 }
 
 pub fn contains(app: &App, x: usize, y: usize) -> bool {
     dock_rect(app).is_some_and(|r| r.contains(x, y))
-}
-
-fn layout_of(app: &App, dock: Rect) -> ui::Layout {
-    let tk = crate::ui::kit::Tokens::new(&app.renderer.theme, app.renderer.cell_width(), app.renderer.cell_height());
-    ui::layout(dock, &tk)
 }
 
 // ───────────────────────────── observation ─────────────────────────────
@@ -134,7 +130,7 @@ fn probe_pane(pane: &Pane) -> Probe {
     }
 }
 
-fn screen_lines(t: &Terminal) -> Vec<String> {
+pub(crate) fn screen_lines(t: &Terminal) -> Vec<String> {
     let from = t.grid.len().saturating_sub(40);
     t.grid[from..].iter().map(|row| crate::terminal::grid::cells_text(row)).collect()
 }
@@ -188,6 +184,10 @@ pub fn poll(app: &mut App, wake_at: &mut Instant) {
             alive.push(pane.id);
             let obs = pane_obs(ti, pane);
             app.agents.observe_pane(&obs, &mut || probe_pane(pane), now);
+            // Remember how the agent was started: "restart" re-runs it.
+            if let Some(c) = obs.running_cmd.as_deref().filter(|c| detect::detect_from_command(c).is_some()) {
+                app.agents_rt.console.note_launch(pane.id, c);
+            }
             if app.agents.wants_scan(pane.id, pane.act.bytes, now) {
                 let lines = screen_lines(&pane.terminal);
                 app.agents.observe_screen(pane.id, &lines, pane.act.bytes, now);
@@ -216,6 +216,10 @@ pub fn poll(app: &mut App, wake_at: &mut Instant) {
     }
     notify_events(app, now);
     update_badge(app);
+    console::refresh(app, now);
+    if app.agents_rt.console.checking() {
+        *wake_at = (*wake_at).min(now + Duration::from_millis(60));
+    }
 
     if let Some(d) = app.agents.next_deadline() {
         *wake_at = (*wake_at).min(d + Duration::from_millis(5));
@@ -286,6 +290,7 @@ pub fn draw(
     content_area: PaneRect,
     dock: Option<Rect>,
     now: Instant,
+    preedit: &str,
 ) {
     if !reg.enabled() || reg.sessions().is_empty() && dock.is_none() {
         return;
@@ -294,7 +299,7 @@ pub fn draw(
     let tbh = content_area.y;
     ui::draw_tab_badges(buf, w, h, &mut renderer.font, &renderer.theme, tbh, reg, wm.tab_count(), t);
     if let Some(d) = dock {
-        ui::draw_dock(buf, w, h, &mut renderer.font, &renderer.theme, d, reg, ui_state, now, t);
+        dock::draw_dock(buf, w, h, &mut renderer.font, &renderer.theme, d, reg, ui_state, now, t, preedit);
     }
     let tab = wm.active_tab();
     let rects: Vec<Rect> = tab
@@ -348,100 +353,48 @@ pub fn next_attention(app: &mut App) {
     }
 }
 
-fn dock_key(event: &KeyEvent, app: &App) -> DockKey {
-    if app.modifiers.super_key() || app.modifiers.control_key() || app.modifiers.alt_key() {
-        return DockKey::Chord;
-    }
-    match &event.logical_key {
-        Key::Named(NamedKey::ArrowUp) => DockKey::Up,
-        Key::Named(NamedKey::ArrowDown) => DockKey::Down,
-        Key::Named(NamedKey::Home) => DockKey::Home,
-        Key::Named(NamedKey::End) => DockKey::End,
-        Key::Named(NamedKey::Enter) => DockKey::Enter,
-        Key::Named(NamedKey::Escape) => DockKey::Escape,
-        Key::Character(s) => s.chars().next().map_or(DockKey::Chord, |c| DockKey::Char(c.to_ascii_lowercase())),
-        _ => DockKey::Chord,
-    }
-}
-
 /// Keyboard while the dock has focus. Returns true when the key was consumed.
 pub fn handle_key(app: &mut App, event: &KeyEvent) -> bool {
-    if !app.agents_ui.visible || !app.agents_ui.focused {
-        return false;
-    }
-    let key = dock_key(event, app);
-    if key == DockKey::Chord {
-        return false; // global chords still work
-    }
-    let uids: Vec<usize> = app.agents.sessions().iter().map(|s| s.pane_uid).collect();
-    let action = app.agents_ui.on_key(key, &uids);
-    match action {
-        UiAction::None => {
-            if let (Some(dock), Some(i)) = (dock_rect(app), app.agents_ui.selected_index(&uids)) {
-                let l = layout_of(app, dock);
-                app.agents_ui.scroll = l.scroll_to(i, app.agents_ui.scroll);
-            }
-        }
-        UiAction::Jump(uid) => jump(app, uid),
-        UiAction::NextAttention => next_attention(app),
-        UiAction::Blur => app.agents_ui.focused = false,
-        UiAction::PassThrough => {
-            app.agents_ui.focused = false;
-            app.request_redraw();
-            return false;
-        }
-    }
-    app.request_redraw();
-    true
+    console::handle_key(app, event)
 }
 
 pub fn on_cursor_moved(app: &mut App) -> bool {
-    let Some(dock) = dock_rect(app) else { return false };
-    let (x, y) = (app.cursor_x, app.cursor_y);
-    let inside = dock.contains(x, y);
-    let hover = if inside && !app.mouse_pressed {
-        let l = layout_of(app, dock);
-        l.hit(app.agents.sessions().len(), app.agents_ui.scroll, x, y)
-    } else {
-        None
-    };
-    if hover != app.agents_ui.hover {
-        app.agents_ui.hover = hover;
-        app.request_redraw();
-    }
-    inside && !app.mouse_pressed
+    console::on_cursor_moved(app)
 }
 
 pub fn on_mouse_press(app: &mut App) -> bool {
-    let (x, y) = (app.cursor_x, app.cursor_y);
-    let Some(dock) = dock_rect(app).filter(|d| d.contains(x, y)) else {
-        if app.agents_ui.focused {
-            app.agents_ui.focused = false;
-            app.request_redraw();
-        }
-        return false;
-    };
-    app.agents_ui.focused = true;
-    let l = layout_of(app, dock);
-    let sessions = app.agents.sessions();
-    if let Some(i) = l.hit(sessions.len(), app.agents_ui.scroll, x, y) {
-        let uid = sessions[i].pane_uid;
-        app.agents_ui.selected = Some(uid);
-        jump(app, uid);
-    }
-    app.request_redraw();
-    true
+    console::on_mouse_press(app)
+}
+
+pub fn on_right_press(app: &mut App) -> bool {
+    console::on_right_press(app)
+}
+
+pub fn on_mouse_release(app: &mut App) -> bool {
+    console::on_mouse_release(app)
+}
+
+/// IME commit into the dock's composer. True when consumed.
+pub fn insert_text(app: &mut App, text: &str) -> bool {
+    console::insert_text(app, text)
+}
+
+/// Caret rectangle of the dock composer for the OS candidate window.
+pub fn ime_rect(app: &App) -> Option<(usize, usize, usize, usize)> {
+    console::ime_rect(app)
 }
 
 pub fn on_wheel(app: &mut App, delta: MouseScrollDelta) -> bool {
-    let Some(dock) = dock_rect(app).filter(|d| d.contains(app.cursor_x, app.cursor_y)) else { return false };
+    if !dock_rect(app).is_some_and(|d| d.contains(app.cursor_x, app.cursor_y)) {
+        return false;
+    }
     let y = match delta {
         MouseScrollDelta::LineDelta(_, y) => y as f64,
         MouseScrollDelta::PixelDelta(p) => p.y / app.renderer.cell_height().max(1) as f64 / 3.0,
     };
     let steps = if y > 0.0 { -1isize } else if y < 0.0 { 1 } else { 0 };
-    let l = layout_of(app, dock);
-    let max = l.max_scroll(app.agents.sessions().len());
+    // The drawing clamps to what the card heights allow.
+    let max = app.agents.sessions().len().saturating_sub(1);
     app.agents_ui.scroll = (app.agents_ui.scroll as isize + steps).clamp(0, max as isize) as usize;
     app.request_redraw();
     true
@@ -477,7 +430,15 @@ fn active_cwd(app: &App) -> PathBuf {
 }
 
 fn queue_command(app: &mut App, uid: usize, kind: AgentKind) {
-    app.agents_rt.pending.push(PendingCmd { uid, cmd: launch::launch_command(kind), since: Instant::now() });
+    let cmd = launch::launch_command(kind);
+    app.agents_rt.console.note_launch(uid, &cmd);
+    app.agents_rt.pending.push(PendingCmd { uid, cmd, since: Instant::now(), strict: false });
+}
+
+/// Type `cmd` in pane `uid` once its shell is back at the prompt (restart).
+pub(super) fn queue_restart(app: &mut App, uid: usize, cmd: String) {
+    app.agents_rt.pending.retain(|p| p.uid != uid);
+    app.agents_rt.pending.push(PendingCmd { uid, cmd, since: Instant::now(), strict: true });
 }
 
 /// Type queued launch commands once the new shell shows its first prompt.
@@ -486,16 +447,30 @@ fn flush_pending(app: &mut App, now: Instant) {
         return;
     }
     let mut keep = Vec::new();
+    let mut gave_up = false;
     for p in std::mem::take(&mut app.agents_rt.pending) {
         let age = now.duration_since(p.since);
         let Some(pane) = app.wm.pane_by_id_mut(p.uid) else { continue };
-        if pane.terminal.at_shell_prompt() || age >= PROMPT_WAIT {
+        let at_prompt = pane.terminal.at_shell_prompt() || matches!(pane.pty.shell_and_foreground(), Some((shell, fg)) if shell == fg);
+        if p.strict {
+            if at_prompt && age >= Duration::from_millis(300) {
+                pane.write(format!("{}\r", p.cmd).as_bytes());
+            } else if age < PROMPT_GIVE_UP {
+                keep.push(p);
+            } else {
+                gave_up = true;
+            }
+        } else if pane.terminal.at_shell_prompt() || age >= PROMPT_WAIT {
             pane.write(format!("{}\r", p.cmd).as_bytes());
         } else if age < PROMPT_GIVE_UP {
             keep.push(p);
         }
     }
     app.agents_rt.pending = keep;
+    if gave_up {
+        app.blocks_ui.show_toast("Restart cancelled: the agent did not exit");
+        app.request_redraw();
+    }
 }
 
 fn dir_label(dir: &Path) -> String {

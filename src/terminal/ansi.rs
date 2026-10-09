@@ -227,6 +227,7 @@ impl Perform for AnsiHandler<'_> {
             },
             _ => {}
         }
+        self.terminal.note_sync_cursor();
     }
 
     fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {

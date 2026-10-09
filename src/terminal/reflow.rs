@@ -30,6 +30,16 @@ fn cell_is_blank(c: &Cell) -> bool {
         && !c.overline()
 }
 
+fn simple_resize_row(r: &mut Vec<Cell>, cols: usize) {
+    r.truncate(cols);
+    r.resize(cols, Cell::default());
+    if let Some(l) = r.last_mut() {
+        if l.c == '\0' && !l.is_spacer() {
+            *l = Cell::default();
+        }
+    }
+}
+
 fn simple_resize(grid: &mut Vec<Vec<Cell>>, cols: usize, rows: usize) {
     grid.truncate(rows);
     while grid.len() < rows {
@@ -105,6 +115,9 @@ impl Terminal {
             return;
         }
         let old_cols = self.cols;
+        if cols != old_cols {
+            self.clear_prompt_for_resize();
+        }
 
         if self.using_alt_screen {
             let main = std::mem::take(&mut self.alt_grid).into_rows();
@@ -139,6 +152,44 @@ impl Terminal {
             self.tab_stops[i] = i % 8 == 0;
         }
         self.scroll_offset = self.scroll_offset.min(self.scrollback.len());
+    }
+
+    /// kitty / Ghostty "clear prompt on resize": at a shell prompt (OSC 133
+    /// after `A`, before `C`) the shell repaints its prompt on SIGWINCH. If we
+    /// reflowed the old prompt lines it would repaint below them and leave a
+    /// cascade of copies, so erase from the prompt start line to the end of the
+    /// screen first and park the cursor on that line, column 0.
+    fn clear_prompt_for_resize(&mut self) {
+        if self.using_alt_screen {
+            return;
+        }
+        let Some(pl) = self.blocks.prompt_start_line() else { return };
+        let sb = self.scrollback.len();
+        // Only a prompt that is on the live screen and not below the cursor.
+        if pl < sb || pl > self.abs_cursor_line() {
+            return;
+        }
+        let row = pl - sb;
+        if row >= self.rows {
+            return;
+        }
+        let blank = Cell::default();
+        for r in row..self.rows {
+            self.grid.fill_row(r, blank);
+        }
+        if row > 0 {
+            // The prompt starts a new logical line.
+            if let Some(l) = self.grid.rows[row - 1].last_mut() {
+                l.set_wrap(false);
+            }
+        }
+        self.cursor_row = row;
+        self.cursor_col = 0;
+        self.wrap_next = false;
+        // Anything the app drew from here on is gone as well.
+        if self.frame_top.is_some_and(|f| f >= pl) {
+            self.frame_top = None;
+        }
     }
 
     fn push_scrollback(&mut self, mut row: Vec<Cell>) {
@@ -210,11 +261,36 @@ impl Terminal {
         let cursor_abs = nsb + cursor.0.min(keep_end);
         let cursor_col = cursor.1;
 
+        // Inline TUIs (ink / Claude Code) repaint their frame with "cursor up
+        // N, erase below": those rows are cropped / padded, never rewrapped,
+        // so N still points at the frame's first line after the resize.
+        let mut tail = match self.frame_top {
+            Some(f) if f <= cursor_abs && f < all.len() => f,
+            _ => all.len(),
+        };
+        while tail > 0 && tail < all.len() && all[tail - 1].last().map_or(false, |c| c.wrap()) {
+            tail -= 1;
+        }
+
         let mut out: Vec<Vec<Cell>> = Vec::with_capacity(all.len());
         let mut remap: Vec<usize> = Vec::with_capacity(all.len());
         let mut cur_out = (0usize, 0usize);
         let mut i = 0;
         while i < all.len() {
+            if i >= tail {
+                let mut row = std::mem::take(&mut all[i]);
+                simple_resize_row(&mut row, new_cols);
+                if let Some(l) = row.last_mut() {
+                    l.set_wrap(false);
+                }
+                if i == cursor_abs {
+                    cur_out = (out.len(), cursor_col.min(new_cols - 1));
+                }
+                remap.push(out.len());
+                out.push(row);
+                i += 1;
+                continue;
+            }
             let start = i;
             let mut end = i;
             while end + 1 < all.len() && all[end].last().map_or(false, |c| c.wrap()) {
@@ -294,6 +370,7 @@ impl Terminal {
         for m in &mut self.marks {
             m.line = map_line(m.line);
         }
+        self.frame_top = self.frame_top.map(|f| map_line(f));
 
         (grid, (cr - grid_start, cc.min(new_cols - 1)))
     }

@@ -71,6 +71,10 @@ pub(crate) struct Rig {
 
 impl Rig {
     pub fn new(cols: usize, rows: usize, font: &str, tab_bar: bool) -> Option<Self> {
+        Self::with_size(cols, rows, font, tab_bar, 15.0)
+    }
+
+    pub fn with_size(cols: usize, rows: usize, font: &str, tab_bar: bool, size: f32) -> Option<Self> {
         let dev = match OffscreenGpu::new() {
             Ok(d) => d,
             Err(e) => {
@@ -79,8 +83,8 @@ impl Rig {
             }
         };
         let theme = Config::default().theme;
-        let cpu = Renderer::new(font, 15.0, theme.clone());
-        let mut gpu = Renderer::new(font, 15.0, theme);
+        let cpu = Renderer::new(font, size, theme.clone());
+        let mut gpu = Renderer::new(font, size, theme);
         gpu.enable_gpu_text(true);
         gpu.set_ligatures(false);
         let (cw, ch) = (cpu.cell_width(), cpu.cell_height());
@@ -114,6 +118,27 @@ impl Rig {
         (self.dev.read_pixels().expect("readback"), stats)
     }
 
+    /// Like `cpu_frame` / `gpu_frame`, with `overlay` applied to the CPU buffer
+    /// before it is presented (what the app's overlay drawing does).
+    pub fn frames_with_overlay(
+        &mut self,
+        overlay: impl Fn(&mut [u32], usize, usize, &mut Renderer),
+    ) -> (Vec<u32>, Vec<u32>) {
+        let (w, h) = (self.w, self.h);
+        let mut c = vec![0u32; w * h];
+        self.cpu.start_time = Instant::now();
+        self.cpu.render_tabbed(&self.wm, self.area, &mut c, w as u32, h as u32, &self.blocks);
+        overlay(&mut c, w, h, &mut self.cpu);
+        let mut ui = vec![0u32; w * h];
+        self.gpu.start_time = Instant::now();
+        self.gpu.render_tabbed(&self.wm, self.area, &mut ui, w as u32, h as u32, &self.blocks);
+        overlay(&mut ui, w, h, &mut self.gpu);
+        self.dev
+            .frame(self.gpu.gpu.as_deref_mut(), &ui, true, w as u32, h as u32, None, 0.0)
+            .expect("gpu frame");
+        (c, self.dev.read_pixels().expect("readback"))
+    }
+
     /// Compare one frame of both renderers; saves PNGs and panics on mismatch.
     pub fn assert_match(&mut self, name: &str, tol: u32, max_bad_frac: f64) -> Diff {
         let c = self.cpu_frame();
@@ -138,6 +163,47 @@ impl Rig {
 
 const TOL: u32 = 3;
 const FRAC: f64 = 0.0005;
+
+#[test]
+fn translucent_overlays_keep_text_visible() {
+    use crate::ui::kit::{draw::blend_px, Ctx, Tokens};
+    let Some(mut r) = Rig::new(60, 12, &font_path(), false) else { return };
+    r.feed(b"text under a translucent tint\r\n\x1b[31mred\x1b[0m \x1b[44m blue bg \x1b[0m and more words here\r\n");
+    r.feed(b"third line \x1b[1mbold\x1b[0m\r\n");
+    // 1. A block-style tint over the text area (blocks_ui draws these).
+    let (c, g) = r.frames_with_overlay(|buf, w, _h, rd| {
+        let accent = rd.theme.cursor;
+        for y in 0..60 {
+            for x in 20..300 {
+                buf[y * w + x] = blend_px(buf[y * w + x], accent, 70);
+            }
+        }
+    });
+    let d = diff(&c, &g, r.w, 4);
+    eprintln!("[gpu-parity] tint: max {} bad {} of {}", d.max, d.bad, d.total);
+    if d.bad as f64 / d.total as f64 > FRAC {
+        save_png("tint_cpu", r.w, r.h, &c);
+        save_png("tint_gpu", r.w, r.h, &g);
+    }
+    assert!(d.bad as f64 / d.total as f64 <= FRAC, "tint differs: {} px, first {:?}", d.bad, d.first_bad);
+
+    // 2. A full-window dim backdrop (modal dialogs): text must stay visible, dimmed.
+    let (c, g) = r.frames_with_overlay(|buf, w, h, rd| {
+        let tk = Tokens::new(&rd.theme, rd.font.cell_width, rd.font.cell_height);
+        let mut cx = Ctx::new(buf, w, h, &mut rd.font, &tk);
+        cx.backdrop(0.6);
+    });
+    let d = diff(&c, &g, r.w, 4);
+    eprintln!("[gpu-parity] backdrop: max {} bad {} of {}", d.max, d.bad, d.total);
+    if d.bad as f64 / d.total as f64 > FRAC {
+        save_png("backdrop_cpu", r.w, r.h, &c);
+        save_png("backdrop_gpu", r.w, r.h, &g);
+    }
+    assert!(d.bad as f64 / d.total as f64 <= FRAC, "backdrop differs: {} px, first {:?}", d.bad, d.first_bad);
+    // The text really is there (not replaced by flat dimmed background).
+    let flat = g[g.len() / 2];
+    assert!(g.iter().filter(|p| **p != flat).count() > 200, "dimmed text must still be visible");
+}
 
 #[test]
 fn ascii_and_colors() {
@@ -291,6 +357,80 @@ fn incremental_updates_match_full_repaint() {
 }
 
 #[test]
+fn dock_toggle_relayout_leaves_no_stale_frame() {
+    use crate::window::tab::SplitDir;
+    let Some(mut r) = Rig::new(100, 12, &font_path(), true) else { return };
+    r.feed(b"left pane text with a footer: ctrl+v to paste\r\nmore left text\r\n");
+    let min = crate::window::tab::MinSize { w: 40, h: 40 };
+    assert!(r.wm.split_active(SplitDir::Horizontal, r.area, min));
+    r.feed(b"right pane active\r\n\x1b[32mgreen on right\x1b[0m\r\n");
+    r.assert_match("dock_before", TOL, FRAC);
+    // Dock opens on the left: content area shifts right and shrinks.
+    let shift = 18 * r.cpu.cell_width();
+    r.area = PaneRect { x: r.area.x + shift, y: r.area.y, width: r.area.width - shift, height: r.area.height };
+    r.assert_match("dock_open", TOL, FRAC);
+    // And closes again.
+    r.area = PaneRect { x: r.area.x - shift, y: r.area.y, width: r.area.width + shift, height: r.area.height };
+    r.assert_match("dock_closed", TOL, FRAC);
+    // Content area height change (HUD) also relays out.
+    r.area.height -= 3 * r.cpu.cell_height();
+    r.assert_match("hud_open", TOL, FRAC);
+}
+
+#[test]
+fn rewriting_a_rows_right_segment_replaces_its_instances() {
+    let Some(mut r) = Rig::new(60, 6, &font_path(), false) else { return };
+    r.feed(b"ctrl+v to paste                      57929 tokens\r\nsecond\r\n");
+    r.assert_match("rewrite_0", TOL, FRAC);
+    for i in 0..4 {
+        // Same row, right segment rewritten with different (shorter/longer) text.
+        r.feed(format!("\x1b[1;24H\x1b[K{}\x1b[1;1H", "x".repeat(2 + i * 7)).as_bytes());
+        r.assert_match(&format!("rewrite_{}", i + 1), TOL, FRAC);
+    }
+    r.feed(b"\x1b[1;1H\x1b[2K");
+    r.assert_match("rewrite_clear", TOL, FRAC);
+}
+
+#[test]
+fn hover_style_tint_keeps_text_visible() {
+    use crate::ui::kit::draw::blend_px;
+    let Some(mut r) = Rig::new(50, 8, &font_path(), false) else { return };
+    r.feed(b"$ cargo build\r\n   Compiling rift v0.3.0\r\n\x1b[31merror\x1b[0m: something failed here\r\n");
+    for alpha in [6u32, 16, 30] {
+        let (c, g) = r.frames_with_overlay(|buf, w, _h, rd| {
+            let fg = rd.theme.fg;
+            for y in 0..60 {
+                for x in 0..w {
+                    buf[y * w + x] = blend_px(buf[y * w + x], fg, alpha);
+                }
+            }
+        });
+        let d = diff(&c, &g, r.w, 3);
+        assert!(d.bad as f64 / d.total as f64 <= FRAC, "alpha {alpha}: {} px differ, first {:?}", d.bad, d.first_bad);
+    }
+}
+
+#[test]
+fn dense_rows_grow_the_slot_capacity() {
+    // Every cell: its own background run + glyph + underline + strike (4 quads
+    // per column), more than a slot reserves initially.
+    let Some(mut r) = Rig::new(40, 4, &font_path(), false) else { return };
+    let mut line = String::new();
+    for i in 0..39u32 {
+        line.push_str(&format!("\x1b[48;5;{}m\x1b[4;9;38;5;231m{}", 17 + i % 200, (b'a' + (i % 26) as u8) as char));
+    }
+    r.feed(line.as_bytes());
+    r.feed(b"\x1b[0m\x1b[3;1H");
+    let _ = r.gpu_frame(); // overflows its slot, asks for a rebuild
+    assert!(r.gpu.take_redraw_request(), "overflow must request another frame");
+    let c = r.cpu_frame();
+    let (g, _) = r.gpu_frame();
+    let d = diff(&c, &g, r.w, TOL);
+    assert!(d.bad as f64 / d.total as f64 <= FRAC, "dense row differs after growing: {} px", d.bad);
+    assert!(r.gpu.gpu.as_ref().unwrap().cap >= 4 * 40, "slot capacity grew");
+}
+
+#[test]
 fn legacy_opaque_frame_and_mode_switch() {
     // A suspended GPU renderer (CPU text, opaque UI layer) matches the CPU path
     // exactly, and returning to GPU text afterwards repaints correctly.
@@ -381,6 +521,45 @@ fn ligatures_change_the_rendering_of_arrows() {
     r2.gpu.set_ligatures(true);
     let (b, _) = r2.gpu_frame();
     assert_eq!(diff(&a, &b, r2.w, 0).bad, 0, "no ligature sequences: identical output");
+}
+
+#[test]
+fn ligatures_cpu_and_gpu_agree() {
+    let Some(font) = ligature_font() else { return };
+    let Some(mut r) = Rig::new(48, 8, &font, false) else { return };
+    r.cpu.set_ligatures(true);
+    r.gpu.set_ligatures(true);
+    r.feed(b"fn f() -> Result<()> { a != b && c >= d; x <- y; z |> w }\r\n");
+    r.feed(b"\x1b[1mbold -> => != ==\x1b[0m \x1b[3mitalic -> =>\x1b[0m \x1b[31mred --> <!-- ===\x1b[0m\r\n");
+    r.feed(b"\x1b[4munderlined -> ligature\x1b[0m \x1b[44m bg -> run \x1b[0m\r\n");
+    r.feed(b"\x1b[2;6H");
+    r.assert_match("ligatures_cpu_vs_gpu", TOL, FRAC);
+}
+
+/// Code sample rendered with ligatures off and on (stacked), saved as a PNG.
+#[test]
+fn ligature_showcase_screenshot() {
+    let Some(font) = ligature_font() else { return };
+    let Some(mut r) = Rig::with_size(64, 11, &font, false, 26.0) else { return };
+    let code = "\x1b[38;5;110mfn\x1b[0m \x1b[38;5;223mmain\x1b[0m() \x1b[38;5;174m->\x1b[0m Result<(), Error> {\r\n\
+  \x1b[38;5;110mlet\x1b[0m ok = a != b && c >= d || e <= f;\r\n\
+  \x1b[38;5;110mmatch\x1b[0m x { Some(v) => v, None => {} }\r\n\
+  items.iter().filter(|x| x == y).map(|z| z |> w)\r\n\
+  // TODO: a === b !== c <=> d ::: ... <!-- --> www\r\n\
+  \x1b[1mbold -> => != ==\x1b[0m  \x1b[3mitalic -> => >=\x1b[0m\r\n\
+  x <- y; a -= 1; b *= 2; c /= 3; d |= 4; e &&= 5; f ?? g\r\n\
+  http://example.com/#/path?q=1 && 0xFF /* c */ __init__\r\n";
+    r.feed(code.as_bytes());
+    r.feed(b"\x1b[11;1H");
+    r.gpu.set_ligatures(false);
+    let (off, _) = r.gpu_frame();
+    r.gpu.set_ligatures(true);
+    let (on, _) = r.gpu_frame();
+    let mut both = off.clone();
+    both.extend_from_slice(&on);
+    let p = save_png("ligature_showcase_off_over_on", r.w, r.h * 2, &both);
+    eprintln!("[ligatures] showcase: {}", p.display());
+    assert!(diff(&off, &on, r.w, 0).bad > 200);
 }
 
 #[test]
@@ -548,7 +727,8 @@ fn bench_size(cols: usize, rows: usize, font: &str) -> Option<()> {
 
     let type_step = |r: &mut Rig, i: usize| r.feed(format!("\x1b[3;1Hx{}", i % 10).as_bytes());
     let scroll_step = |r: &mut Rig, i: usize| {
-        let t = unique_lines(cols, 3, i + 1);
+        // Typing parks the cursor mid-screen: go back to the last row so the lines scroll.
+        let t = format!("\x1b[999;1H{}", unique_lines(cols, 3, i + 1));
         r.feed(t.as_bytes());
     };
     let rows_of = |b: &mut Bench| b.r.gpu.gpu.as_ref().map_or(0, |g| g.rows_built);
@@ -585,10 +765,71 @@ fn bench_size(cols: usize, rows: usize, font: &str) -> Option<()> {
 fn gpu_bench() {
     let font = ligature_font().unwrap_or_else(font_path);
     println!("font: {font}");
-    for (c, r) in [(200, 60), (400, 100), (320, 90)] {
+    // 200x60 (typical window), 3840x2160-class (4K: 426x108 cells of 9x20 px), and a 400x100 stress case.
+    for (c, r) in [(200, 60), (426, 108), (400, 100)] {
         if bench_size(c, r, &font).is_none() {
             println!("no GPU adapter: skipping");
             return;
         }
     }
+}
+
+#[test]
+#[ignore]
+fn gpu_cpu_side_profile() {
+    let font = ligature_font().unwrap_or_else(font_path);
+    let Some(mut r) = Rig::new(400, 100, &font, false) else { return };
+    r.wm.active_pane_mut().terminal.set_max_scrollback(100);
+    r.feed(fill_lines(400, 100).as_bytes());
+    let (w, h) = (r.w, r.h);
+    let mut ui = vec![0u32; w * h];
+    let blocks = crate::tools::blocks::BlockManager::new();
+    for lig in [false, true] {
+        r.gpu.set_ligatures(lig);
+        for i in 0..3 {
+            r.feed(format!("\x1b[999;1H{}", unique_lines(400, 3, i + 50)).as_bytes());
+            r.gpu.render_tabbed(&r.wm, r.area, &mut ui, w as u32, h as u32, &blocks);
+        }
+        let t = Instant::now();
+        let n = 20;
+        for i in 0..n {
+            r.feed(format!("\x1b[999;1H{}", unique_lines(400, 3, i + 100)).as_bytes());
+            let t2 = Instant::now();
+            r.gpu.render_tabbed(&r.wm, r.area, &mut ui, w as u32, h as u32, &blocks);
+            std::hint::black_box(t2);
+        }
+        println!("[cpu-side] ligatures={lig}: scroll frame render_tabbed (incl. feed) {:.2} ms", ms(t.elapsed()) / n as f64);
+    }
+}
+
+#[test]
+#[ignore]
+fn par_vs_single_passes() {
+    let (w, h) = (3834usize, 2160usize);
+    let a: Vec<u32> = (0..w * h).map(|i| (i as u32).wrapping_mul(2654435761)).collect();
+    let mut b = vec![0u32; w * h];
+    let mut best = |name: &str, f: &mut dyn FnMut()| {
+        let mut m = f64::MAX;
+        for _ in 0..15 {
+            let t = Instant::now();
+            f();
+            m = m.min(ms(t.elapsed()));
+        }
+        println!("[passes] {name}: best {m:.2} ms");
+    };
+    best("copy single", &mut || b.copy_from_slice(&a));
+    best("copy parallel", &mut || super::copy_frame(&mut b, &a));
+    let c = b.clone();
+    best("diff single (row_diff x h)", &mut || {
+        let mut n = 0;
+        for y in 0..h {
+            if super::gpu::row_diff_for_test(&a[y * w..(y + 1) * w], &c[y * w..(y + 1) * w]).is_some() {
+                n += 1;
+            }
+        }
+        std::hint::black_box(n);
+    });
+    best("diff parallel", &mut || {
+        std::hint::black_box(super::gpu::diff_rows_for_test(&a, &c, w, h).len());
+    });
 }

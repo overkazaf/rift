@@ -1,5 +1,6 @@
 pub mod font;
 pub mod shape;
+mod cells;
 #[cfg(any(feature = "gpu", test))]
 pub mod atlas;
 #[cfg(feature = "gpu")]
@@ -177,6 +178,7 @@ fn blit_tile(buffer: &mut [u32], buf_width: usize, x0: usize, y0: usize, cw: usi
 // ── Opt-in frame profiler (RIFT_PROFILE=1) ──
 
 #[derive(Clone, Copy)]
+#[cfg_attr(not(feature = "gpu"), allow(dead_code))]
 pub enum Phase { Pty = 0, Render = 1, Overlays = 2, Present = 3, GpuInst = 4, GpuUi = 5 }
 
 const PHASE_NAMES: [&str; 6] = ["pty", "render_tabbed", "overlays", "present", "gpu_inst", "gpu_ui"];
@@ -216,6 +218,28 @@ impl Profiler {
         eprintln!("{line}");
         *self = Self::default();
     }
+}
+
+/// `dst.copy_from_slice(src)`, split over a few threads for large frames: the
+/// copy is memory-bandwidth bound and a single core cannot saturate the bus.
+fn copy_frame(dst: &mut [u32], src: &[u32]) {
+    const PAR_MIN: usize = 1 << 21;
+    let n = std::thread::available_parallelism().map_or(1, |n| n.get()).clamp(1, 4);
+    if dst.len() < PAR_MIN || n < 2 {
+        dst.copy_from_slice(src);
+        return;
+    }
+    let chunk = dst.len().div_ceil(n);
+    std::thread::scope(|sc| {
+        let mut parts = dst.chunks_mut(chunk).zip(src.chunks(chunk));
+        let first = parts.next();
+        for (d, s) in parts {
+            sc.spawn(move || d.copy_from_slice(s));
+        }
+        if let Some((d, s)) = first {
+            d.copy_from_slice(s);
+        }
+    });
 }
 
 /// Marker for "no damage cache" (external buffers, tests): every row is dirty.
@@ -276,13 +300,14 @@ pub struct Renderer {
     /// Another frame is needed right away (GPU atlas had to be recycled).
     #[cfg(feature = "gpu")]
     redraw_requested: bool,
-    /// Highlighted ranges (selection, search) for the GPU path.
-    #[cfg(feature = "gpu")]
+    /// Highlighted ranges (selection, search) for the GPU path; they also
+    /// break ligature runs.
     hl_pane: usize,
-    #[cfg(feature = "gpu")]
-    hl_rows: HashMap<usize, Vec<gpu_text::HlRect>>,
-    #[cfg(feature = "gpu")]
+    hl_rows: HashMap<usize, Vec<cells::HlRect>>,
+    #[cfg_attr(not(feature = "gpu"), allow(dead_code))]
     hl_hash: HashMap<usize, u64>,
+    /// Glyph bitmaps of shaped (ligature) glyphs for the CPU path.
+    gid_cache: HashMap<(usize, u16, u8), font::GidBitmap>,
 }
 
 /// How far unfocused panes are blended toward the background (0.0..1.0).
@@ -337,12 +362,10 @@ impl Renderer {
             gpu_suspended: false,
             #[cfg(feature = "gpu")]
             redraw_requested: false,
-            #[cfg(feature = "gpu")]
             hl_pane: usize::MAX,
-            #[cfg(feature = "gpu")]
             hl_rows: HashMap::new(),
-            #[cfg(feature = "gpu")]
             hl_hash: HashMap::new(),
+            gid_cache: HashMap::new(),
         }
     }
 
@@ -350,6 +373,7 @@ impl Renderer {
         log::info!("Reinit font: {font_size}px (scaled for display)");
         self.font = FontManager::new(font_path, font_size);
         self.shaper.clear();
+        self.gid_cache.clear();
         #[cfg(feature = "gpu")]
         if let Some(g) = &mut self.gpu {
             g.atlas.clear();
@@ -366,12 +390,25 @@ impl Renderer {
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn ligatures(&self) -> bool { self.ligatures }
 
     /// Drop all cached pixels/hashes; the next frame is a full redraw.
     pub fn invalidate(&mut self) {
         self.force_full = true;
         self.tiles.clear();
+    }
+
+    /// Layout-level invalidation (dock toggled, window / pane geometry
+    /// changed): the back buffer, every row hash and the tab-bar cache are
+    /// dropped so nothing drawn for the old layout can survive. Glyph tiles
+    /// stay (they do not depend on geometry).
+    pub fn invalidate_all(&mut self) {
+        self.force_full = true;
+        self.back.clear();
+        self.pane_rows.clear();
+        self.frame_sig = u64::MAX;
+        self.tab_sig = u64::MAX;
     }
 
     /// Record a profiling sample (no-op unless RIFT_PROFILE=1).
@@ -511,7 +548,7 @@ impl Renderer {
 
         // The softbuffer buffer is not preserved between frames: copy our
         // persistent frame into it (cheap memcpy), overlays go on top of that.
-        buffer.copy_from_slice(&back);
+        copy_frame(buffer, &back);
         self.back = back;
 
         #[cfg(feature = "gpu")]
@@ -979,6 +1016,18 @@ impl Renderer {
             }
         }
 
+        // Ligatures / contextual alternates: runs of plain cells are shaped;
+        // cells that belong to a shaped glyph skip their own glyph here and
+        // the shaped glyphs are blended on top after the row.
+        let mut lig_cds: Vec<cells::Cd> = Vec::new();
+        let mut covered: Vec<bool> = Vec::new();
+        let mut shaped: Vec<(usize, font::ShapeFace, std::sync::Arc<shape::ShapedRun>)> = Vec::new();
+        if self.ligatures {
+            lig_cds = self.resolve_row_cells(terminal, row, cells, rect, buf_width, show_cursor, images_visible, url_ranges, None);
+            covered = vec![false; lig_cds.len()];
+            self.find_ligatures(cells, &lig_cds, row, &mut covered, &mut shaped);
+        }
+
         for (col, cell) in cells.iter().enumerate() {
             let x0 = rect.x + col * cw;
             if x0 + cw > rect.x + rect.width { continue; }
@@ -1021,7 +1070,7 @@ impl Renderer {
                 && row == self.view_cursor_row
                 && col == terminal.cursor_col;
 
-            let has_glyph = cell.c != ' ' && !cell.hidden();
+            let has_glyph = cell.c != ' ' && !cell.hidden() && !covered.get(col).copied().unwrap_or(false);
             let wide = has_glyph && font::is_wide(cell.c);
 
             if (has_glyph || deco.any()) && !wide && !is_cursor {
@@ -1093,6 +1142,50 @@ impl Renderer {
                             let idx = uy * buf_width + x0 + cx;
                             if idx < buffer.len() { buffer[idx] = ul_px; }
                         }
+                    }
+                }
+            }
+        }
+
+        if !shaped.is_empty() {
+            self.draw_shaped_cpu(buffer, buf_width, buf_height, rect, y0, &lig_cds, &shaped);
+        }
+    }
+
+    /// CPU path: blend shaped (ligature) glyphs over the finished row.
+    fn draw_shaped_cpu(
+        &mut self,
+        buffer: &mut [u32],
+        buf_width: usize,
+        buf_height: usize,
+        rect: PaneRect,
+        y0: usize,
+        cds: &[cells::Cd],
+        shaped: &[(usize, font::ShapeFace, std::sync::Arc<shape::ShapedRun>)],
+    ) {
+        let right = (rect.x + rect.width).min(buf_width) as i32;
+        for (start, face, run) in shaped {
+            let synth = face.synth_bold as u8 | (face.synth_italic as u8) << 1;
+            for sg in &run.glyphs {
+                let Some(cd) = cds.get(start + sg.cell as usize) else { continue };
+                let key = (face.slot, sg.gid, synth);
+                let font = &mut self.font;
+                let bm = self.gid_cache.entry(key).or_insert_with(|| {
+                    font.rasterize_gid(face.slot, sg.gid, face.synth_bold, face.synth_italic)
+                });
+                let ox = cd.x0 as i32 + sg.x_off as i32 + bm.x;
+                let oy = y0 as i32 + sg.y_off as i32 + bm.y;
+                let fg_px = pack(cd.text.0, cd.text.1, cd.text.2);
+                for gy in 0..bm.h {
+                    let py = oy + gy as i32;
+                    if py < y0 as i32 || py >= buf_height as i32 { continue; }
+                    for gx in 0..bm.w {
+                        let cov = bm.data[gy * bm.w + gx] as u32;
+                        if cov == 0 { continue; }
+                        let px = ox + gx as i32;
+                        if px < rect.x as i32 || px >= right { continue; }
+                        let idx = py as usize * buf_width + px as usize;
+                        buffer[idx] = if cov >= 250 { fg_px } else { blend(cd.text, buffer[idx], cov) };
                     }
                 }
             }
@@ -1638,6 +1731,10 @@ fn blit_image_cell(
 fn blend(fg: Rgb, base: u32, alpha: u32) -> u32 {
     if alpha >= 250 {
         return pack(fg.0, fg.1, fg.2);
+    }
+    if base >> 24 != 0 {
+        // GPU text: `base` is a (partially) transparent UI-layer pixel.
+        return crate::ui::blend_ui(base, fg, alpha);
     }
     let inv = 255 - alpha;
     let br = (base >> 16) & 0xff;
@@ -2280,5 +2377,105 @@ mod tests {
         let (cw, ch) = (r.cell_width(), r.cell_height());
         let w = 4 * cw;
         for y in 0..ch { for x in 2 * cw..w { assert_eq!(hov[y * w + x], idle[y * w + x]); } }
+    }
+
+    // ── overwritten glyphs (footer interleaving) ──
+
+    /// Feed `steps` one by one; after each, the damage-tracked render must be
+    /// pixel-identical to a from-scratch render of the same terminal.
+    fn assert_tracked_equals_fresh(r: &mut Renderer, cols: usize, rows: usize, steps: &[&str], what: &str) {
+        let (cw, ch) = (r.cell_width(), r.cell_height());
+        let (w, h) = (cols * cw, rows * ch);
+        let rc = PaneRect { x: 0, y: 0, width: w, height: h };
+        let bg = pack(r.theme.bg.0, r.theme.bg.1, r.theme.bg.2);
+        let mut back = vec![bg; w * h];
+        let mut fr = small_renderer().expect("font");
+        fr.set_ligatures(r.ligatures());
+        let mut t = Terminal::new(cols, rows);
+        r.pane_rows.clear();
+        for (i, step) in steps.iter().enumerate() {
+            feed_bytes(&mut t, step.as_bytes());
+            r.cur_pane = 0;
+            r.full_frame = i == 0;
+            r.render_pane_inner(&t, &mut back, w, h, rc, false, false);
+            let fresh = {
+                let mut buf = vec![bg; w * h];
+                fr.cur_pane = NO_CACHE;
+                fr.full_frame = true;
+                fr.render_pane_inner(&t, &mut buf, w, h, rc, false, false);
+                buf
+            };
+            let bad = back.iter().zip(&fresh).position(|(a, b)| a != b);
+            assert!(
+                bad.is_none(),
+                "{what}: step {i} ({step:?}) diverged from a fresh render at x={} y={} (row {}, col {})",
+                bad.unwrap() % w, bad.unwrap() / w, bad.unwrap() / w / ch, bad.unwrap() % w / cw
+            );
+        }
+    }
+
+    #[test]
+    fn rewritten_footer_does_not_interleave_old_glyphs() {
+        for lig in [false, true] {
+            let Some(mut r) = small_renderer() else { return };
+            r.set_ligatures(lig);
+            let left = "Image in clipboard \u{b7} ctrl+v to paste";
+            let steps = [
+                // footer: left hint, right-aligned counter via CHA
+                "\x1b[1;1H\x1b[2mImage in clipboard \u{b7} ctrl+v to paste\x1b[0m\x1b[1;50H57929 tokens",
+                // app rewrites the whole line in place (no EL first)
+                "\x1b[1;1H-- INSERT --\x1b[1;50H58011 tokens",
+                // right segment moved left onto the old left text
+                "\x1b[1;1H\x1b[2KImage in clipboard \u{b7} ctrl+v to paste\x1b[1;30H57929 tokens",
+                // EL 0 after a partial overwrite
+                "\x1b[1;5Hxyz\x1b[K",
+                // wide glyphs overwritten by narrow ones and vice versa
+                "\x1b[2;1H\u{4e2d}\u{6587}\u{4e2d}\u{6587}ab\x1b[2;1Hxy",
+                "\x1b[2;2H\u{4e2d}",
+                // styled overwrite: bold / italic / reverse on top of plain
+                "\x1b[3;1Hplain plain plain\x1b[3;1H\x1b[1mBOLD\x1b[0m \x1b[3mital\x1b[0m \x1b[7mrev\x1b[0m",
+                "\x1b[3;1H\x1b[4munder\x1b[0m \x1b[9mstrike\x1b[0m",
+                // ECH + REP + ICH/DCH shifting cells
+                "\x1b[1;1Habcdefghij\x1b[1;3H\x1b[3X\x1b[1;1H\x1b[2@zz\x1b[1;1H\x1b[2P",
+                "\x1b[1;10Hx\x1b[3b",
+            ];
+            let _ = left;
+            assert_tracked_equals_fresh(&mut r, 70, 4, &steps, &format!("ligatures={lig}"));
+        }
+    }
+
+    /// A pane never draws outside its rect, even when its terminal is still
+    /// wider/taller than the rect (resize in flight, dock just opened).
+    #[test]
+    fn pane_drawing_is_clipped_to_its_rect() {
+        for lig in [false, true] {
+            let Some(mut r) = small_renderer() else { return };
+            r.set_ligatures(lig);
+            let (cw, ch) = (r.cell_width(), r.cell_height());
+            let (w, h) = (60 * cw, 14 * ch);
+            let rect = PaneRect { x: 17 * cw + 3, y: ch + 5, width: 20 * cw + 2, height: 6 * ch + 1 };
+            let mut t = Terminal::new(50, 12); // wider and taller than the rect
+            for i in 0..12 {
+                feed_bytes(&mut t, format!("\x1b[7mRow {i:02}\x1b[0m => != -> <= ==== \u{4e2d}\u{6587} \x1b[4munderlined\x1b[0m tail-tail-tail-tail-tail\r\n").as_bytes());
+            }
+            feed_bytes(&mut t, b"\x1b[1;1H");
+            const SENTINEL: u32 = 0x00ab_cdef;
+            let mut buf = vec![SENTINEL; w * h];
+            r.cur_pane = NO_CACHE;
+            r.full_frame = true;
+            r.render_pane_inner(&t, &mut buf, w, h, rect, true, false);
+            let mut inside = 0;
+            for y in 0..h {
+                for x in 0..w {
+                    let in_rect = x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height;
+                    if in_rect {
+                        inside += (buf[y * w + x] != SENTINEL) as usize;
+                    } else {
+                        assert_eq!(buf[y * w + x], SENTINEL, "drew outside the pane rect at x={x} y={y} (lig={lig})");
+                    }
+                }
+            }
+            assert!(inside > 0);
+        }
     }
 }

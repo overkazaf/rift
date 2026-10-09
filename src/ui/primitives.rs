@@ -66,19 +66,42 @@ pub fn set_px(buffer: &mut [u32], width: usize, y: usize, x: usize, px: u32) {
     }
 }
 
-static BACKDROP_USED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// UI-layer pixels are `0xTTRRGGBB`. With the GPU text renderer the top byte
+/// `TT` is the pixel's *transparency*: `0x00` = opaque (what all drawing code
+/// writes), `0xFF` = fully transparent (the GPU-rendered terminal shows
+/// through), in between = a straight-alpha color of alpha `255 - TT`.
+/// Blending helpers that read the destination must go through [`blend_ui`]
+/// so overlays drawn over terminal text stay translucent instead of
+/// replacing it. The CPU renderer never produces non-zero top bytes.
+pub const UI_TRANSPARENT: u32 = 0xFF00_0000;
 
-/// Record that a full-window dim backdrop was drawn this frame. The GPU text
-/// renderer cannot dim terminal text it did not draw into the CPU buffer, so
-/// it hands such frames to the CPU renderer (see `Renderer::set_gpu_suspended`).
-pub fn mark_backdrop() {
-    BACKDROP_USED.store(true, std::sync::atomic::Ordering::Relaxed);
-}
-
-/// Whether a backdrop was drawn since the last call.
-#[allow(dead_code)]
-pub fn take_backdrop() -> bool {
-    BACKDROP_USED.swap(false, std::sync::atomic::Ordering::Relaxed)
+/// Composite color `c` at `a` (0..=255) over UI-layer pixel `dst`.
+#[inline]
+pub fn blend_ui(dst: u32, c: Rgb, a: u32) -> u32 {
+    let t = dst >> 24;
+    if t == 0 {
+        // Opaque destination: classic blend, result opaque.
+        let inv = 255 - a;
+        let r = (c.0 as u32 * a + ((dst >> 16) & 0xff) * inv + 127) / 255;
+        let g = (c.1 as u32 * a + ((dst >> 8) & 0xff) * inv + 127) / 255;
+        let b = (c.2 as u32 * a + (dst & 0xff) * inv + 127) / 255;
+        return (r << 16) | (g << 8) | b;
+    }
+    // Translucent destination (alpha ad): "over" with straight alpha.
+    let ad = 255 - t;
+    let inv = 255 - a;
+    let wd = ad * inv; // destination weight, scaled by 255
+    let wc = a * 255; // new color weight, scaled by 255
+    let total = wc + wd;
+    if total == 0 {
+        return UI_TRANSPARENT | (dst & 0x00ff_ffff);
+    }
+    let mix = |cc: u32, dd: u32| (cc * wc + dd * wd + total / 2) / total;
+    let r = mix(c.0 as u32, (dst >> 16) & 0xff);
+    let g = mix(c.1 as u32, (dst >> 8) & 0xff);
+    let b = mix(c.2 as u32, dst & 0xff);
+    let out_a = (total + 127) / 255;
+    ((255 - out_a.min(255)) << 24) | (r << 16) | (g << 8) | b
 }
 
 #[inline]
@@ -108,7 +131,6 @@ pub fn dim(c: Rgb, f: f32) -> Rgb {
 
 #[allow(dead_code)]
 pub fn dim_backdrop(buffer: &mut [u32], factor: u32) {
-    mark_backdrop();
     for px in buffer.iter_mut() {
         let r = ((*px >> 16) & 0xff) / factor;
         let g = ((*px >> 8) & 0xff) / factor;
@@ -171,4 +193,39 @@ pub fn trunc(s: &str, max: usize) -> &str {
         end = byte_pos;
     }
     if end == 0 && !s.is_empty() { &s[..1.min(s.len())] } else { &s[..end] }
+}
+
+#[cfg(test)]
+mod ui_blend_tests {
+    use super::*;
+
+    #[test]
+    fn opaque_destination_blends_as_before() {
+        let d = pack(100, 100, 100);
+        assert_eq!(blend_ui(d, (200, 0, 0), 0), d);
+        assert_eq!(blend_ui(d, (200, 0, 0), 255), pack(200, 0, 0));
+        let m = blend_ui(d, (200, 0, 0), 128);
+        assert_eq!(m >> 24, 0);
+        assert!((150..=152).contains(&((m >> 16) & 0xff)));
+    }
+
+    #[test]
+    fn transparent_destination_becomes_translucent_color() {
+        let m = blend_ui(UI_TRANSPARENT | pack(10, 10, 10), (200, 50, 20), 100);
+        assert_eq!(255 - (m >> 24), 100, "alpha is the blend alpha");
+        assert_eq!(m & 0xffffff, pack(200, 50, 20), "color is the overlay color");
+        // Fully opaque overlay makes the pixel opaque.
+        assert_eq!(blend_ui(UI_TRANSPARENT, (1, 2, 3), 255), pack(1, 2, 3));
+        // Nothing drawn: stays transparent.
+        assert_eq!(blend_ui(UI_TRANSPARENT | 5, (1, 2, 3), 0) >> 24, 0xff);
+    }
+
+    #[test]
+    fn stacking_translucent_layers_accumulates_alpha() {
+        let once = blend_ui(UI_TRANSPARENT, (0, 0, 0), 100);
+        let twice = blend_ui(once, (0, 0, 0), 100);
+        let alpha = |p: u32| 255 - (p >> 24);
+        // 1 - (1-100/255)^2 ~= 0.63 -> ~161
+        assert!((158..=164).contains(&alpha(twice)), "{}", alpha(twice));
+    }
 }

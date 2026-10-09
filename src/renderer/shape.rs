@@ -64,6 +64,8 @@ pub struct Shaper {
     /// Whether runs of ASCII letters / digits can never change shape in a face
     /// (probed once per face), which skips the shaper for most words.
     alnum_inert: HashMap<usize, bool>,
+    /// Whether a face has any ligature / contextual substitution features.
+    supports: HashMap<usize, bool>,
     cache: HashMap<u64, Vec<Entry>>,
     entries: usize,
     /// Shaper invocations (cache misses), for tests and profiling.
@@ -97,6 +99,27 @@ impl Shaper {
             .entry(f.slot)
             .or_insert_with(|| rustybuzz::Face::from_slice(f.data, f.index))
             .as_ref()
+    }
+
+    /// Whether `face` can produce ligatures or contextual alternates at all
+    /// (GSUB `liga` / `clig` / `calt` / `rlig`). Fonts without them (Menlo,
+    /// DejaVu Sans Mono) skip run building and shaping entirely.
+    pub fn supports(&mut self, f: &ShapeFace) -> bool {
+        if let Some(&v) = self.supports.get(&f.slot) {
+            return v;
+        }
+        let v = match self.face(f) {
+            Some(bf) => bf.tables().gsub.map_or(false, |gsub| {
+                gsub.features.into_iter().any(|feat| {
+                    [b"liga", b"clig", b"calt", b"rlig"]
+                        .iter()
+                        .any(|t| feat.tag == ttf_parser::Tag::from_bytes(t))
+                })
+            }),
+            None => false,
+        };
+        self.supports.insert(f.slot, v);
+        v
     }
 
     /// Shape `run` (>= 2 single-width characters) with `face` at `size` px
@@ -296,6 +319,25 @@ mod tests {
         assert_eq!(*r, *r2);
         // Non-ligature punctuation is left alone.
         assert!(sh.shape(&face, size, cw, &chars("(a)")).is_none());
+    }
+
+    #[test]
+    fn feature_detection() {
+        let Some(path) = ligature_font() else { return };
+        let mut fm = FontManager::new(&path, 15.0);
+        let face = fm.shaping_face(0).unwrap();
+        assert!(Shaper::new().supports(&face), "{path} ships ligature features");
+        let menlo = "/System/Library/Fonts/Menlo.ttc";
+        if std::path::Path::new(menlo).exists() {
+            let mut fm = FontManager::new(menlo, 15.0);
+            let face = fm.shaping_face(0).unwrap();
+            let mut sh = Shaper::new();
+            let has = sh.supports(&face);
+            eprintln!("Menlo ligature features: {has}");
+            if !has {
+                assert!(sh.shape(&face, 15.0, fm.cell_width, &['-', '>']).is_none());
+            }
+        }
     }
 
     #[test]

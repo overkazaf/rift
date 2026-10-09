@@ -138,6 +138,54 @@ pub fn match_approval(screen_lines: &[String], extra: &[String]) -> Option<Strin
     None
 }
 
+/// Does the bottom of the screen show an agent that is busy right now?
+///
+/// Signals (all only exist while a turn runs): "esc to interrupt" /
+/// "ctrl+c to interrupt" footers, and spinner lines such as Claude Code's
+/// `✻ Meandering… (1s · ↓ 120 tokens · esc to interrupt)`: a spinner glyph or
+/// bullet, a gerund with an ellipsis and an elapsed-time parenthesis.
+pub fn screen_busy(screen_lines: &[String]) -> bool {
+    screen_lines
+        .iter()
+        .map(|l| normalize_line(l))
+        .filter(|l| !l.is_empty())
+        .rev()
+        .take(SCREEN_TAIL_ROWS)
+        .any(|l| is_busy_line(&l))
+}
+
+/// One normalized (lowercase, box-stripped) line that signals a running turn.
+pub fn is_busy_line(l: &str) -> bool {
+    if l.contains("to interrupt") {
+        return true;
+    }
+    is_spinner_line(l)
+}
+
+/// `✻ Meandering… (1s` / `* Thinking... (12s · 1.2k tokens` / braille spinners.
+pub fn is_spinner_line(l: &str) -> bool {
+    let mut it = l.chars();
+    let Some(first) = it.next() else { return false };
+    let glyph = matches!(first, '\u{2720}'..='\u{2744}' | '\u{2800}'..='\u{28ff}' | '\u{00b7}' | '*' | '\u{25cf}' | '\u{23fa}');
+    if !glyph {
+        return false;
+    }
+    if !(l.contains('\u{2026}') || l.contains("...")) {
+        return false;
+    }
+    // "(<digits>s" or "(<digits>m" elapsed marker.
+    let b = l.as_bytes();
+    (0..b.len()).any(|i| {
+        b[i] == b'(' && {
+            let mut j = i + 1;
+            while j < b.len() && b[j].is_ascii_digit() {
+                j += 1;
+            }
+            j > i + 1 && j < b.len() && (b[j] == b's' || b[j] == b'm')
+        }
+    })
+}
+
 // ───────────────────────────── notifications ─────────────────────────────
 
 /// What an OSC 9 / OSC 777 notification from an agent means.
@@ -266,6 +314,8 @@ pub struct Machine {
     prompt: Option<(Instant, String)>,
     /// Moment the prompt disappeared while Waiting (screen-raised only).
     prompt_gone_at: Option<Instant>,
+    /// The last screen scan showed a busy marker (spinner / "esc to interrupt").
+    screen_busy: bool,
 }
 
 impl Machine {
@@ -290,6 +340,7 @@ impl Machine {
             last_input: None,
             prompt: None,
             prompt_gone_at: None,
+            screen_busy: false,
         }
     }
 
@@ -396,6 +447,23 @@ impl Machine {
         }
     }
 
+    /// Result of the busy-marker scan of the same screen snapshot. A visible
+    /// spinner means a turn is running even when the byte stream looked
+    /// quiet or the machine thought the agent was idle.
+    pub fn on_screen_busy(&mut self, now: Instant, busy: bool) -> Vec<Effect> {
+        let mut out = Vec::new();
+        self.screen_busy = busy;
+        if !busy || !self.is_live() {
+            return out;
+        }
+        self.last_activity = now;
+        self.activity_seen = true;
+        if matches!(self.state, AgentState::Starting | AgentState::Idle) {
+            self.start_turn(now, &mut out);
+        }
+        out
+    }
+
     pub fn on_notification(&mut self, now: Instant, class: NoteClass) -> Vec<Effect> {
         let mut out = Vec::new();
         if !self.is_live() {
@@ -481,7 +549,7 @@ impl Machine {
         match self.state {
             AgentState::Working => {
                 let limit = if self.hooked { self.timing.hooked_idle } else { self.timing.quiet_idle };
-                if quiet >= limit {
+                if quiet >= limit && !self.screen_busy {
                     self.finish_turn(now, AgentState::Idle, &mut out);
                 }
             }
@@ -641,6 +709,48 @@ mod tests {
         for k in AgentKind::ALL {
             assert!(APPROVAL_PATTERNS.iter().any(|p| p.agents.contains(&k)), "{k:?} has no pattern");
         }
+    }
+
+    #[test]
+    fn busy_detection_table() {
+        let cases: &[(&[&str], bool)] = &[
+            (&["✻ Meandering… (1s · ↓ 12 tokens · esc to interrupt)"], true),
+            (&["✻ Meandering… (1s)"], true),
+            (&["* Thinking... (12s)"], true),
+            (&["✶ Pondering… (1m 3s · ↑ 2.1k tokens)"], true),
+            (&["⠋ Working... (2s)"], true),
+            (&["  esc to interrupt"], true),
+            (&["  ctrl+c to interrupt"], true),
+            (&["│ ✻ Cogitating… (4s) │"], true),
+            // finished / idle screens
+            (&["✻ Cogitated for 1m 3s"], false),
+            (&["● Hello! How can I help?", "╭────╮", "│ >  │", "╰────╯", "  ? for shortcuts"], false),
+            (&["  -- INSERT --"], false),
+            (&["The word Meandering… (1s) in prose"], false),
+            (&[], false),
+        ];
+        for (screen, want) in cases {
+            let l: Vec<String> = screen.iter().map(|s| s.to_string()).collect();
+            assert_eq!(screen_busy(&l), *want, "{screen:?}");
+        }
+    }
+
+    #[test]
+    fn busy_marker_starts_and_holds_a_turn() {
+        let t0 = Instant::now();
+        let mut m = Machine::new(t0);
+        m.on_activity(t0 + ms(100), 2000);
+        m.tick(t0 + ms(2000));
+        assert_eq!(m.state, AgentState::Idle);
+        assert_eq!(m.on_screen_busy(t0 + ms(3000), true), vec![Effect::TurnStarted]);
+        assert_eq!(m.state, AgentState::Working);
+        // Silence while the spinner is the last thing seen: still working.
+        assert!(m.tick(t0 + ms(60_000)).is_empty());
+        assert_eq!(m.state, AgentState::Working);
+        // Spinner gone, then quiet: the turn ends.
+        m.on_screen_busy(t0 + ms(61_000), false);
+        assert!(matches!(m.tick(t0 + ms(61_000) + ms(1) + Timing::default().quiet_idle).as_slice(), [Effect::TurnFinished(_)]));
+        assert_eq!(m.state, AgentState::Idle);
     }
 
     #[test]

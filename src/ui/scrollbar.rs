@@ -216,6 +216,9 @@ pub struct BarDraw {
 
 #[inline]
 fn blend_px(base: u32, c: Rgb, a: u32) -> u32 {
+    if base >> 24 != 0 {
+        return crate::ui::blend_ui(base, c, a);
+    }
     let inv = 255 - a;
     let r = (((base >> 16) & 0xff) * inv + c.0 as u32 * a) / 255;
     let g = (((base >> 8) & 0xff) * inv + c.1 as u32 * a) / 255;

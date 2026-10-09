@@ -44,11 +44,35 @@ impl Terminal {
         if on {
             if !self.sync_output {
                 self.sync_since = Some(Instant::now());
+                self.sync_min_line = Some(self.abs_cursor_line());
             }
         } else {
             self.sync_since = None;
+            if self.sync_output && !self.using_alt_screen {
+                // The update is over: the lines it touched are the app's
+                // live frame (see `frame_top`).
+                if let Some(m) = self.sync_min_line.take() {
+                    self.frame_top = Some(m);
+                }
+            }
+            self.sync_min_line = None;
         }
         self.sync_output = on;
+    }
+
+    /// Track how far up an in-progress synchronized update has reached.
+    #[inline]
+    pub(super) fn note_sync_cursor(&mut self) {
+        if self.sync_output {
+            let l = self.abs_cursor_line();
+            self.sync_min_line = Some(self.sync_min_line.map_or(l, |m| m.min(l)));
+        }
+    }
+
+    /// `n` lines were dropped from the top of the scrollback.
+    pub(super) fn shift_frame_top(&mut self, n: usize) {
+        self.frame_top = self.frame_top.and_then(|l| l.checked_sub(n));
+        self.sync_min_line = self.sync_min_line.map(|l| l.saturating_sub(n));
     }
 
     /// True while the app asked to buffer rendering (mode 2026 set) and the

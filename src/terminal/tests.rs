@@ -614,3 +614,202 @@ fn readers_handle_trimmed_scrollback_rows() {
     // Hyperlink / cwd lookups on a short row do not index out of range.
     assert!(t.hyperlink_at_abs(0, 28).is_none());
 }
+
+// ── Resize vs. shell prompt (OSC 133) and inline TUIs ──
+
+/// Whole buffer (scrollback + screen) as trimmed lines.
+fn buffer_lines(t: &Terminal) -> Vec<String> {
+    let mut v: Vec<String> = t.scrollback.iter().map(|r| cells_text(r).trim_end().to_string()).collect();
+    v.extend((0..t.rows).map(|r| row(t, r)));
+    v
+}
+
+/// What zsh + powerlevel10k (two-line prompt, right prompt) emits after SIGWINCH.
+fn p10k_prompt(cols: usize) -> Vec<u8> {
+    let right = "12:34:56";
+    let mut s = String::new();
+    s.push_str("\x1b]133;A\x07\x1b[1m~/proj  main \u{276f}\x1b[0m");
+    s.push_str(&format!("\x1b[{}G{right}\r\n", cols.saturating_sub(right.len()) + 1));
+    s.push_str("\u{276f} \x1b]133;B\x07");
+    s.into_bytes()
+}
+
+fn count(lines: &[String], needle: &str) -> usize {
+    lines.iter().filter(|l| l.contains(needle)).count()
+}
+
+#[test]
+fn resize_at_prompt_erases_prompt_so_redraw_leaves_one_copy() {
+    let mut t = Terminal::new(60, 10);
+    feed(&mut t, b"\x1b]133;A\x07$ \x1b]133;B\x07ls\r\n\x1b]133;C\x07a b c\r\n\x1b]133;D;0\x07");
+    feed(&mut t, &p10k_prompt(60));
+    assert!(t.at_shell_prompt());
+    assert_eq!(count(&buffer_lines(&t), "~/proj"), 1);
+
+    // Drag the window edge: many width changes, the shell repaints after each.
+    for cols in [52, 44, 38, 30, 41, 55, 70, 33] {
+        t.resize(cols, 10);
+        // Right after the resize the old prompt is gone and the cursor sits
+        // where the prompt started.
+        let lines = buffer_lines(&t);
+        assert_eq!(count(&lines, "~/proj"), 0, "stale prompt survived resize to {cols}: {lines:?}");
+        assert_eq!(t.cursor_col, 0);
+        assert_eq!(row(&t, t.cursor_row), "");
+        feed(&mut t, &p10k_prompt(cols));
+        let lines = buffer_lines(&t);
+        assert_eq!(count(&lines, "~/proj"), 1, "duplicate prompt at {cols} cols: {lines:?}");
+        assert_eq!(count(&lines, "12:34:56"), 1, "{lines:?}");
+        assert_eq!(count(&lines, "a b c"), 1, "command output must survive: {lines:?}");
+        assert!(t.at_shell_prompt());
+    }
+}
+
+#[test]
+fn resize_with_typed_input_and_wrapped_prompt_line() {
+    let mut t = Terminal::new(30, 8);
+    feed(&mut t, b"out1\r\nout2\r\n");
+    feed(&mut t, b"\x1b]133;A\x07\x1b[32muser@host\x1b[0m ~/a/very/long/path/that/wraps \xe2\x9d\xaf \x1b]133;B\x07git status --short --branch");
+    t.resize(20, 8);
+    let lines = buffer_lines(&t);
+    assert_eq!(count(&lines, "out1"), 1);
+    assert_eq!(count(&lines, "user@host"), 0, "{lines:?}");
+    assert_eq!(count(&lines, "git status"), 0, "{lines:?}");
+    let r = t.cursor_row;
+    assert_eq!(r, 2, "cursor returns to the prompt start line");
+}
+
+#[test]
+fn resize_while_command_runs_or_without_osc133_still_reflows() {
+    // No shell integration: plain reflow (nothing may be erased).
+    let mut t = term(20, 6, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\r\n$ ");
+    t.resize(10, 6);
+    assert!(buffer_lines(&t).join("").contains("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+    // A command is running (after C): output stays.
+    let mut t = Terminal::new(20, 6);
+    feed(&mut t, b"\x1b]133;A\x07$ \x1b]133;B\x07sleep\r\n\x1b]133;C\x07progress 1234567890123456789012\r\n");
+    t.resize(10, 6);
+    assert_eq!(count(&buffer_lines(&t), "$"), 1);
+    assert!(buffer_lines(&t).join("").contains("progress1234567890123456789012") || buffer_lines(&t).join("").contains("progress"));
+    // Alt screen: never touched.
+    let mut t = Terminal::new(20, 6);
+    feed(&mut t, b"\x1b]133;A\x07$ \x1b]133;B\x07\x1b[?1049hvim");
+    t.resize(30, 6);
+    assert!(!t.at_shell_prompt());
+}
+
+// ink-style inline TUI: box frame redrawn with "cursor up N + erase below".
+
+fn ink_frame(cols: usize, tick: usize) -> Vec<String> {
+    let inner = cols.saturating_sub(2);
+    let pad = |s: String| {
+        let mut s: String = s.chars().take(inner).collect();
+        while s.chars().count() < inner {
+            s.push(' ');
+        }
+        s
+    };
+    let mut v = vec![format!("\u{256d}{}\u{256e}", "\u{2500}".repeat(inner))];
+    v.push(format!("\u{2502}{}\u{2502}", pad(" > who are you".into())));
+    v.push(format!("\u{2502}{}\u{2502}", pad(format!(" \u{273b} Meandering\u{2026} ({tick}s \u{00b7} esc to interrupt)"))));
+    v.push(format!("\u{2502}{}\u{2502}", pad(" context: 12345 tokens".into())));
+    v.push(format!("\u{2502}{}\u{2502}", pad(" -- INSERT --".into())));
+    v.push(format!("\u{2570}{}\u{256f}", "\u{2500}".repeat(inner)));
+    v
+}
+
+/// One ink repaint: sync begin, move to the old frame top, erase, draw, sync end.
+fn ink_repaint(prev_lines: usize, frame: &[String], style: u8) -> Vec<u8> {
+    let mut s = String::from("\x1b[?2026h");
+    if prev_lines > 0 {
+        if style == 0 {
+            s.push_str(&format!("\x1b[{prev_lines}A\x1b[G\x1b[J"));
+        } else {
+            // ansi-escapes eraseLines(n): [2K, up, [2K, up ... , [G
+            let n = prev_lines + 1;
+            for i in 0..n {
+                s.push_str("\x1b[2K");
+                if i + 1 < n {
+                    s.push_str("\x1b[1A");
+                }
+            }
+            s.push_str("\x1b[G");
+        }
+    }
+    s.push_str(&frame.join("\r\n"));
+    s.push_str("\r\n\x1b[?2026l");
+    s.into_bytes()
+}
+
+fn history() -> &'static str {
+    "$ claude\r\nWelcome to Claude Code\r\n/help for help\r\n"
+}
+
+fn screen_text(t: &Terminal) -> Vec<String> {
+    buffer_lines(t)
+}
+
+#[test]
+fn ink_redraw_after_resize_matches_a_fresh_render() {
+    for style in [0u8, 1] {
+        for (from, to) in [(60usize, 40usize), (60, 24), (40, 60), (50, 50 - 7), (30, 90)] {
+            let mut t = Terminal::new(from, 14);
+            feed(&mut t, history().as_bytes());
+            feed(&mut t, &ink_repaint(0, &ink_frame(from, 1), style));
+            feed(&mut t, &ink_repaint(6, &ink_frame(from, 2), style));
+            // Window resized, SIGWINCH: the app repaints for the new width.
+            t.resize(to, 14);
+            feed(&mut t, &ink_repaint(6, &ink_frame(to, 3), style));
+
+            let mut fresh = Terminal::new(to, 14);
+            feed(&mut fresh, history().as_bytes());
+            feed(&mut fresh, &ink_repaint(0, &ink_frame(to, 3), style));
+
+            assert_eq!(screen_text(&t), screen_text(&fresh), "style {style}: {from} -> {to}");
+            assert_eq!((t.cursor_row, t.cursor_col), (fresh.cursor_row, fresh.cursor_col), "cursor, style {style}: {from} -> {to}");
+        }
+    }
+}
+
+#[test]
+fn ink_redraw_survives_a_resize_storm() {
+    let mut t = Terminal::new(70, 14);
+    feed(&mut t, history().as_bytes());
+    feed(&mut t, &ink_repaint(0, &ink_frame(70, 1), 0));
+    let mut w = 70;
+    for (i, to) in [64usize, 58, 51, 47, 40, 36, 44, 58, 77, 90, 66].into_iter().enumerate() {
+        t.resize(to, 14);
+        feed(&mut t, &ink_repaint(6, &ink_frame(to, i + 2), 0));
+        w = to;
+    }
+    let mut fresh = Terminal::new(w, 14);
+    feed(&mut fresh, history().as_bytes());
+    feed(&mut fresh, &ink_repaint(0, &ink_frame(w, 12), 0));
+    assert_eq!(screen_text(&t), screen_text(&fresh));
+}
+
+#[test]
+fn ink_frame_at_bottom_with_scroll_and_row_changes() {
+    // The frame is pushed against the bottom, the screen scrolls, then both
+    // the width and the height change.
+    let mut t = Terminal::new(50, 8);
+    for i in 0..10 {
+        feed(&mut t, format!("line {i}\r\n").as_bytes());
+    }
+    feed(&mut t, &ink_repaint(0, &ink_frame(50, 1), 0));
+    feed(&mut t, &ink_repaint(6, &ink_frame(50, 2), 0));
+    t.resize(33, 10);
+    feed(&mut t, &ink_repaint(6, &ink_frame(33, 3), 0));
+    let lines = screen_text(&t);
+    assert_eq!(count(&lines, "Meandering"), 1, "{lines:?}");
+    assert_eq!(count(&lines, "\u{256d}"), 1, "{lines:?}");
+    assert_eq!(count(&lines, "\u{2570}"), 1, "{lines:?}");
+    assert_eq!(count(&lines, "line 9"), 1);
+}
+
+#[test]
+fn plain_output_without_sync_updates_still_reflows() {
+    // Only apps that use synchronized updates get the cropped-frame treatment.
+    let mut t = term(20, 6, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\r\nend");
+    t.resize(10, 6);
+    assert_eq!(buffer_lines(&t).iter().filter(|l| l.starts_with("aaaaaaaaaa")).count(), 4);
+}

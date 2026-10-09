@@ -29,7 +29,9 @@ pub enum GlyphKey {
     Deco { bits: u64, w: u16 },
     /// Dotted hyperlink underline, `w` pixels wide.
     LinkDots { w: u16 },
-    /// Color glyph (RGBA atlas).
+    /// Color glyph (RGBA atlas). Reserved: no font backend produces color
+    /// bitmaps yet, but the atlas, shader and pipeline support them.
+    #[allow(dead_code)]
     Color { c: char, wide: bool },
 }
 
@@ -208,10 +210,12 @@ impl Atlas {
         std::mem::take(&mut self.evicted)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn page_count(&self) -> usize {
         self.pages.len()
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn glyph_count(&self) -> usize {
         self.map.len()
     }
@@ -219,10 +223,6 @@ impl Atlas {
     /// Writes to apply to the GPU texture before drawing.
     pub fn take_uploads(&mut self) -> Vec<Upload> {
         std::mem::take(&mut self.pending)
-    }
-
-    pub fn has_pending_uploads(&self) -> bool {
-        !self.pending.is_empty()
     }
 
     /// Look up `key`, marking its page as used this frame.

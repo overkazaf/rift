@@ -113,6 +113,8 @@ fn commit_text(app: &mut App, text: &str) {
     } else if other_panel_visible(app) {
         // Non-text tool panels (file manager, git, docker ...) swallow keys.
         return;
+    } else if crate::agents::runtime::insert_text(app, text) {
+        // The Mission Control dock's reply composer took it.
     } else {
         let bytes = text.as_bytes();
         if let Some(rec) = &mut app.recorder {

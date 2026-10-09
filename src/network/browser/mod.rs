@@ -87,13 +87,19 @@ impl App {
 
     /// Geometry of the docked/maximized browser regardless of visibility.
     pub fn browser_geometry(&self) -> BrowserLayout {
-        let (w, h, scale) = self
+        let (w, h) = self
             .window
             .as_ref()
-            .map_or((800, 600, 1.0), |win| {
+            .map_or((800, 600), |win| {
                 let s = win.inner_size();
-                (s.width as usize, s.height as usize, win.scale_factor())
+                (s.width as usize, s.height as usize)
             });
+        self.browser_geometry_for(w, h)
+    }
+
+    /// [`App::browser_geometry`] for a window of `w` x `h` physical pixels.
+    pub fn browser_geometry_for(&self, w: usize, h: usize) -> BrowserLayout {
+        let scale = self.window.as_ref().map_or(1.0, |win| win.scale_factor());
         // The chat dock owns the far right edge; the browser lays out in
         // what is left (terminal | browser | chat).
         BrowserLayout::compute(
@@ -124,16 +130,13 @@ impl App {
         })
     }
 
-    /// Width available to terminal panes for a window `win_w` pixels wide.
+    /// Width available to terminal panes for a window `win_w` pixels wide
+    /// (the width of [`App::content_area_for`]).
+    #[allow(dead_code)] // kept for callers that only know the window width
     pub fn terminal_width(&self, win_w: usize) -> usize {
-        let avail = win_w - self.chat.dock_w(win_w).min(win_w);
-        // The Mission Control dock sits on the left edge (hidden while the browser shows).
-        let avail = avail.saturating_sub(crate::agents::runtime::dock_w(self, win_w));
-        match self.browser_layout() {
-            Some(l) => l.terminal_w.min(avail),
-            None => avail,
-        }
+        self.content_area_for(win_w, 1).width
     }
+
 }
 
 /// Push the layout's page bounds to the native webview.

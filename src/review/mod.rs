@@ -100,6 +100,19 @@ pub struct Turn {
     pub summary: Option<Summary>,
     pub error: Option<String>,
     pub at: Instant,
+    /// When the turn finished (agent turns only); `None` while running.
+    pub ended_at: Option<Instant>,
+}
+
+/// What the agent dock shows for one finished or running agent turn.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TurnDigest {
+    pub id: u64,
+    pub label: String,
+    pub running: bool,
+    pub duration: Option<Duration>,
+    pub summary: Option<Summary>,
+    pub failed: bool,
 }
 
 #[derive(Default, Debug)]
@@ -355,13 +368,14 @@ impl Review {
         let log = self.logs.entry(pane).or_default();
         log.agent_turns += 1;
         let label = format!("Turn {}", log.agent_turns);
-        log.push(Turn { id, kind: TurnKind::Agent, label, start: None, end_tree: None, finished: false, summary: None, error: None, at: Instant::now() });
+        log.push(Turn { id, kind: TurnKind::Agent, label, start: None, end_tree: None, finished: false, summary: None, error: None, at: Instant::now(), ended_at: None });
         self.submit(|req| Job::Snapshot { req, dir }, Pending::TurnStart { pane, turn: id });
     }
 
     pub fn turn_finished(&mut self, pane: usize, dir: PathBuf) {
         let Some(log) = self.logs.get_mut(&pane) else { return };
         let Some(t) = log.turns.iter_mut().rev().find(|t| t.kind == TurnKind::Agent && !t.finished) else { return };
+        t.ended_at = Some(Instant::now());
         if t.error.is_some() {
             t.finished = true;
             return;
@@ -392,6 +406,7 @@ impl Review {
             summary: None,
             error: None,
             at: now,
+            ended_at: None,
         });
         id
     }
@@ -413,6 +428,43 @@ impl Review {
         let n = self.logs.get(&pane).map_or(0, |l| l.turns.len());
         self.ui = ReviewUi { visible: true, pane, sel_pos: n, gen: self.ui.gen, limit: ROW_LIMIT, ..Default::default() };
         self.load_view();
+    }
+
+    /// Open the overlay on one turn of `pane` (a timeline click in the agent
+    /// dock). Falls back to the newest turn when `turn_id` is gone.
+    pub fn open_turn(&mut self, pane: usize, turn_id: u64) {
+        self.open(pane);
+        let pos = self.logs.get(&pane).and_then(|l| l.turns.iter().position(|t| t.id == turn_id));
+        if let Some(i) = pos {
+            self.select_pos(i + 1);
+        }
+    }
+
+    /// Compact per-turn digest for the agent dock's timeline (oldest first,
+    /// agent turns only).
+    pub fn turn_digests(&self, pane: usize) -> Vec<TurnDigest> {
+        let Some(log) = self.logs.get(&pane) else { return Vec::new() };
+        log.turns
+            .iter()
+            .filter(|t| t.kind == TurnKind::Agent)
+            .map(|t| TurnDigest {
+                id: t.id,
+                label: t.label.clone(),
+                running: !t.finished,
+                duration: t.ended_at.map(|e| e.saturating_duration_since(t.at)),
+                summary: t.summary,
+                failed: t.error.is_some(),
+            })
+            .collect()
+    }
+
+    /// (files changed in the newest finished turn, files summed over all turns).
+    /// A file edited in several turns counts once per turn.
+    pub fn files_changed(&self, pane: usize) -> (Option<usize>, usize) {
+        let digests = self.turn_digests(pane);
+        let this = digests.iter().rev().find_map(|d| d.summary.map(|s| s.files));
+        let total = digests.iter().filter_map(|d| d.summary).map(|s| s.files).sum();
+        (this, total)
     }
 
     pub fn close(&mut self) {
@@ -894,6 +946,53 @@ mod tests {
 
     fn idle(rv: &mut Review) {
         wait(rv, "worker idle", |r| !r.busy());
+    }
+
+    fn fake_turn(id: u64, finished: bool, files: Option<usize>, secs: u64) -> Turn {
+        let at = Instant::now();
+        Turn {
+            id,
+            kind: TurnKind::Agent,
+            label: format!("Turn {id}"),
+            start: None,
+            end_tree: None,
+            finished,
+            summary: files.map(|f| Summary { files: f, added: 2 * f, removed: f }),
+            error: None,
+            at,
+            ended_at: finished.then(|| at + Duration::from_secs(secs)),
+        }
+    }
+
+    #[test]
+    fn dock_digests_and_file_counts() {
+        let mut rv = Review::default();
+        assert!(rv.turn_digests(1).is_empty());
+        assert_eq!(rv.files_changed(1), (None, 0));
+        let log = rv.logs.entry(1).or_default();
+        log.turns.push(fake_turn(1, true, Some(3), 90));
+        log.turns.push(fake_turn(2, true, Some(2), 10));
+        log.turns.push(fake_turn(3, false, None, 0));
+        let d = rv.turn_digests(1);
+        assert_eq!(d.len(), 3);
+        assert_eq!(d[0].duration, Some(Duration::from_secs(90)));
+        assert!(d[2].running && d[2].duration.is_none());
+        // "This turn" is the newest turn that has a summary; total sums all.
+        assert_eq!(rv.files_changed(1), (Some(2), 5));
+    }
+
+    #[test]
+    fn open_turn_selects_that_turn() {
+        let mut rv = Review::default();
+        let log = rv.logs.entry(4).or_default();
+        for i in 1..=3 {
+            log.turns.push(fake_turn(i, true, Some(1), 5));
+        }
+        rv.open_turn(4, 2);
+        assert!(rv.ui.visible);
+        assert_eq!((rv.ui.pane, rv.ui.sel_pos), (4, 2), "position i + 1 = turn index i");
+        rv.open_turn(4, 99);
+        assert_eq!(rv.ui.sel_pos, 3, "unknown turn falls back to the newest");
     }
 
     #[test]

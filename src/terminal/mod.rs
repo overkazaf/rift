@@ -161,6 +161,14 @@ pub struct Terminal {
     pub reverse_screen: bool,
     sync_output: bool,
     sync_since: Option<std::time::Instant>,
+    /// Lowest absolute line the cursor reached inside the current
+    /// synchronized-output (DEC 2026) update.
+    sync_min_line: Option<usize>,
+    /// Top (absolute line) of the region an inline TUI (ink / Claude Code)
+    /// repaints with "cursor up N, erase below": the lowest line touched by its
+    /// last synchronized update. Resizes crop this region instead of
+    /// reflowing it, so the app's relative cursor math stays valid.
+    frame_top: Option<usize>,
     mouse_1000: bool,
     mouse_1002: bool,
     mouse_1003: bool,
@@ -256,6 +264,8 @@ impl Terminal {
             reverse_screen: false,
             sync_output: false,
             sync_since: None,
+            sync_min_line: None,
+            frame_top: None,
             mouse_1000: false,
             mouse_1002: false,
             mouse_1003: false,
@@ -642,6 +652,7 @@ impl Terminal {
         } else if self.cursor_row > 0 {
             self.cursor_row -= 1;
         }
+        self.note_sync_cursor();
     }
 
     // ── Erase ──
@@ -665,6 +676,7 @@ impl Terminal {
             }
             3 => self.clear_scrollback(),
             2 => {
+                self.frame_top = None;
                 for row in 0..self.grid.rows.len() {
                     self.grid.fill_row(row, blank);
                 }
@@ -781,6 +793,7 @@ impl Terminal {
             if !keep_history {
                 if !self.using_alt_screen {
                     self.blocks.shift_lines(1);
+                    self.shift_frame_top(1);
                 }
                 self.grid.fill_row(bottom, blank);
                 continue;
@@ -792,6 +805,7 @@ impl Terminal {
             let keep = grid::trimmed_len(&self.grid.rows[bottom][..hi]);
             if self.scrollback.len() >= self.max_scrollback {
                 self.blocks.shift_lines(1);
+                self.shift_frame_top(1);
                 if let Some(old) = self.scrollback.pop_front() {
                     self.recycle_row(old);
                 }
@@ -990,6 +1004,7 @@ impl Terminal {
         self.scrollback.clear();
         self.scroll_offset = 0;
         self.blocks.shift_lines(dropped);
+        self.shift_frame_top(dropped);
     }
 
     pub fn scrollback_len(&self) -> usize {

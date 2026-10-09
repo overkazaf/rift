@@ -27,7 +27,7 @@ use crate::tools::hud::{Hud, HudData};
 use crate::window::tab::{PaneNode, SplitDir, Tab};
 use crate::window::{Pane, PaneRect, WindowManager};
 
-pub const NAMES: [&str; 12] = [
+pub const NAMES: [&str; 16] = [
     "hero",
     "blocks",
     "ai-chat",
@@ -40,6 +40,10 @@ pub const NAMES: [&str; 12] = [
     "preview-accept",
     "effects-crt",
     "hud",
+    "agents-dock",
+    "mission-control",
+    "mission-control-reply",
+    "mission-control-menu",
 ];
 
 pub struct SceneSpec {
@@ -66,6 +70,10 @@ pub fn spec(name: &str) -> Option<SceneSpec> {
         "preview-accept" => (NORMAL, preview_accept),
         "effects-crt" => (NORMAL, effects_crt),
         "hud" => (NORMAL, hud),
+        "agents-dock" => (DENSE, agents_dock),
+        "mission-control" => (18.0 / 24.0, mission_control),
+        "mission-control-reply" => (18.0 / 24.0, |s| super::mission::build_reply(s)),
+        "mission-control-menu" => (18.0 / 24.0, |s| super::mission::build_menu(s)),
         _ => return None,
     };
     Some(SceneSpec { font_mul, build })
@@ -98,6 +106,11 @@ pub struct Stage {
     pub exec_preview: Option<ExecPreview>,
     pub browser: Option<BrowserScene>,
     pub split_ui: SplitUiState,
+    /// Mission Control: registry + dock state (same types the app owns).
+    pub agents: crate::agents::AgentRegistry,
+    pub agents_ui: crate::agents::ui::AgentsUi,
+    /// Preferred dock width in columns (0 = default).
+    pub dock_cols: usize,
     font_path: String,
     font_px: f32,
 }
@@ -124,6 +137,9 @@ impl Stage {
             exec_preview: None,
             browser: None,
             split_ui: SplitUiState::default(),
+            agents: crate::agents::AgentRegistry::new(),
+            agents_ui: crate::agents::ui::AgentsUi::new(),
+            dock_cols: 0,
             font_path: font_path.to_string(),
             font_px,
         }
@@ -152,11 +168,21 @@ impl Stage {
         Some(BrowserLayout::compute(avail, self.h, self.tab_bar_h(), cw, ch, 2.0, b.ui.ratio, false))
     }
 
+    /// Mission Control dock rectangle (None while hidden / too narrow / browser open).
+    pub fn agents_dock(&self) -> Option<crate::ui::kit::Rect> {
+        if !self.agents_ui.visible || self.browser.is_some() {
+            return None;
+        }
+        crate::agents::ui::dock_rect_pref(self.w, self.h, self.tab_bar_h(), self.hud_h(), self.cell().0, self.dock_cols)
+    }
+
+    /// Same rule as `App::content_area_for`.
     pub fn content_area(&self) -> PaneRect {
         let avail = self.w - self.chat.dock_w(self.w);
-        let width = self.browser_layout().map_or(avail, |l| l.terminal_w.min(avail));
+        let dock = self.agents_dock().map_or(0, |r| r.w);
+        let width = self.browser_layout().map_or(avail, |l| l.terminal_w.min(avail)).saturating_sub(dock);
         let tbh = self.tab_bar_h();
-        PaneRect { x: 0, y: tbh, width, height: self.h.saturating_sub(tbh + self.hud_h()) }
+        PaneRect { x: dock, y: tbh, width, height: self.h.saturating_sub(tbh + self.hud_h()) }
     }
 
     /// Size every pane for the current dock/HUD/browser configuration.
@@ -164,7 +190,38 @@ impl Stage {
     pub fn layout(&mut self) {
         let (cw, ch) = self.cell();
         let area = self.content_area();
-        self.wm.resize_all(cw, ch, area.width as u32, (self.h - self.hud_h()) as u32, self.tab_bar_h());
+        self.wm.resize_to(cw, ch, area);
+        self.renderer.invalidate_all();
+    }
+
+    /// Resize the window (frame size) and re-lay out, like `handle_resize`.
+    #[allow(dead_code)] // used by scenes that simulate a window resize
+    pub fn resize_window(&mut self, w: usize, h: usize) {
+        self.w = w;
+        self.h = h;
+        self.layout();
+    }
+
+    /// Feed the registry like `agents::runtime::poll`: every pane that runs
+    /// `claude`, plus its current screen.
+    pub fn observe_agents(&mut self, now: Instant) {
+        for (ti, tab) in self.wm.tabs.iter().enumerate() {
+            for pane in tab.panes() {
+                let obs = crate::agents::registry::PaneObs {
+                    uid: pane.id,
+                    tab_index: ti,
+                    block_running: true,
+                    running_cmd: Some("claude".into()),
+                    osc_seen: true,
+                    cwd: Some(format!("{HOME}/aurora")),
+                    bytes: pane.act.bytes,
+                    ..Default::default()
+                };
+                self.agents.observe_pane(&obs, &mut || crate::agents::registry::Probe::Unknown, now);
+                let lines = crate::agents::runtime::screen_lines(&pane.terminal);
+                self.agents.observe_screen(pane.id, &lines, pane.act.bytes.max(1), now);
+            }
+        }
     }
 
     pub fn set_tabs(&mut self, titles: &[&str]) {
@@ -228,6 +285,13 @@ impl Stage {
             let bar_h = ch * 3 + 20;
             let mut cx = crate::ui::kit::Ctx::new(&mut buf, w, h, &mut self.renderer.font, &tk);
             crate::tools::hud::draw(&mut cx, hud, h - bar_h, bar_h);
+        }
+
+        if self.agents_ui.visible || !self.agents.sessions().is_empty() {
+            let dock = self.agents_dock();
+            crate::agents::runtime::draw(
+                &self.agents, &mut self.agents_ui, &self.wm, &mut self.renderer, &mut buf, w, h, area, dock, Instant::now(), "",
+            );
         }
 
         if let Some(rect) = self.chat.dock_rect(w, h, tbh, hud_h) {
@@ -787,4 +851,220 @@ fn hud(s: &mut Stage) {
     s.layout();
     s.feed(0, &build_session(2));
     s.retime(0, &[12, 58, 4_200, 1_800]);
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Agents dock: two Claude-Code-like (ink) panes, dock opened after the
+// split was already on screen.
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Pad `s` (visible chars) to `n` columns.
+fn pad_to(s: &str, n: usize) -> String {
+    let mut o: String = s.chars().take(n).collect();
+    let len = o.chars().count();
+    o.push_str(&" ".repeat(n.saturating_sub(len)));
+    o
+}
+
+/// The live (repainted) part of a Claude Code screen: spinner / status line,
+/// prompt box and the footer with a right-aligned segment placed by CHA.
+pub(crate) fn claude_frame(cols: usize, working: bool, tick: usize, right: &str) -> Vec<String> {
+    let inner = cols.saturating_sub(2);
+    let status = if working {
+        paint(&format!("{{byellow}}\u{273b} Meandering\u{2026}{{0}} {{dim}}({tick}s \u{b7} \u{2193} {} tokens \u{b7} esc to interrupt){{0}}", 300 + tick * 7))
+    } else {
+        paint("{dim}\u{273b} Cooked for 3s{0}")
+    };
+    let top = format!("\u{256d}{}\u{256e}", "\u{2500}".repeat(inner));
+    let mid = format!("\u{2502}{}\u{2502}", pad_to(" > ", inner));
+    let bot = format!("\u{2570}{}\u{256f}", "\u{2500}".repeat(inner));
+    let left = "  -- INSERT --";
+    let col = cols.saturating_sub(right.chars().count() + 1);
+    let footer = format!("{}\x1b[{}G{}", paint(&format!("{{dim}}{left}{{0}}")), col.max(left.len() + 2) + 1, paint(&format!("{{dim}}{right}{{0}}")));
+    vec![status, String::new(), top, mid, bot, footer]
+}
+
+/// ink's log-update: sync begin, cursor up over the previous frame, erase
+/// below, draw, sync end.
+pub(crate) fn ink_repaint(prev_lines: usize, frame: &[String]) -> Vec<u8> {
+    let mut s = String::from("\x1b[?2026h");
+    if prev_lines > 0 {
+        s.push_str(&format!("\x1b[{prev_lines}A\x1b[G\x1b[J"));
+    }
+    s.push_str(&frame.join("\r\n"));
+    s.push_str("\r\n\x1b[?2026l");
+    s.into_bytes()
+}
+
+fn claude_history(question: &str, answer: &[&str], tools: bool) -> Script {
+    let mut sc = Script::new();
+    let inner = 38;
+    let rule = "\u{2500}".repeat(inner);
+    sc.out(&format!("{{byellow}}\u{256d}{rule}\u{256e}{{0}}"));
+    sc.out(&format!("{{byellow}}\u{2502}{{0}}{}{{byellow}}\u{2502}{{0}}", pad_to(" \u{273b} Welcome to Claude Code!", inner)));
+    sc.out(&format!("{{byellow}}\u{2502}{{0}}{{dim}}{}{{0}}{{byellow}}\u{2502}{{0}}", pad_to("   cwd: /Users/maya/dev/aurora", inner)));
+    sc.out(&format!("{{byellow}}\u{2570}{rule}\u{256f}{{0}}"));
+    sc.out("");
+    sc.out(&format!("{{bold}}>{{0}} {question}"));
+    sc.out("");
+    for a in answer {
+        sc.out(&format!("{{bwhite}}\u{25cf}{{0}} {a}"));
+        sc.out("");
+    }
+    if tools {
+        sc.out("{bgreen}\u{25cf}{0} {bold}Read{0}(src/middleware/rate_limit.rs)");
+        sc.out("  {dim}\u{23bf}  Read 84 lines{0}");
+        sc.out("");
+    }
+    sc
+}
+
+fn mission_control(s: &mut Stage) {
+    super::mission::build(s);
+}
+
+fn agents_dock(s: &mut Stage) {
+    s.window_title = "aurora \u{2014} rift".into();
+    s.set_tabs(&["aurora"]);
+    s.chat.ratio = 0.38;
+    // Two side-by-side panes (ids 0 and 101).
+    {
+        let t = s.wm.active_tab_mut();
+        let (cols, rows) = {
+            let p = t.active_pane();
+            (p.terminal.cols, p.terminal.rows)
+        };
+        t.split(SplitDir::Horizontal, Pane::scripted(101, cols / 2, rows));
+        t.focus_pane(0);
+    }
+    s.layout();
+
+    // Both agents are running; the dock is still closed.
+    let right_a = "Image in clipboard \u{b7} ctrl+v to paste";
+    let right_b = "57929 tokens";
+    let (cols_a, cols_b) = {
+        let t = s.wm.active_tab();
+        (t.pane(0).map_or(40, |p| p.terminal.cols), t.pane(1).map_or(40, |p| p.terminal.cols))
+    };
+    s.feed(0, &claude_history("refactor the rate limiter to use governor", &["I'll start by reading the current middleware."], true));
+    s.pane(0).feed(&ink_repaint(0, &claude_frame(cols_a, true, 1, right_a)));
+    s.pane(1).feed(&claude_history("who are you", &["I'm Claude, an AI assistant made by Anthropic, running in your terminal. I can read and edit code, run commands, and help you ship."], false).bytes);
+    s.pane(1).feed(&ink_repaint(0, &claude_frame(cols_b, false, 0, right_b)));
+    let _ = s.render(); // frame 1: damage tracker now holds the dock-less layout
+
+    // Open Mission Control (Cmd+Shift+;): content area shrinks, panes reflow,
+    // and both apps repaint for the new width (SIGWINCH).
+    s.agents_ui.visible = true;
+    s.agents_ui.selected = None;
+    s.layout();
+    let (cols_a, cols_b) = {
+        let t = s.wm.active_tab();
+        (t.pane(0).map_or(40, |p| p.terminal.cols), t.pane(1).map_or(40, |p| p.terminal.cols))
+    };
+    s.pane(0).feed(&ink_repaint(6, &claude_frame(cols_a, true, 2, right_a)));
+    s.pane(1).feed(&ink_repaint(6, &claude_frame(cols_b, false, 0, right_b)));
+    let _ = s.render();
+
+    // Drag the divider a bit, as in the report.
+    if let PaneNode::Split { ratio, .. } = &mut s.wm.active_tab_mut().root {
+        *ratio = 0.46;
+    }
+    s.layout();
+    let (cols_a, cols_b) = {
+        let t = s.wm.active_tab();
+        (t.pane(0).map_or(40, |p| p.terminal.cols), t.pane(1).map_or(40, |p| p.terminal.cols))
+    };
+    s.pane(0).feed(&ink_repaint(6, &claude_frame(cols_a, true, 3, right_a)));
+    s.pane(1).feed(&ink_repaint(6, &claude_frame(cols_b, false, 0, right_b)));
+    s.observe_agents(Instant::now());
+    s.wm.active_tab_mut().focus_pane(0);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stage(w: usize, h: usize) -> Option<Stage> {
+        let font = super::super::font_path();
+        if !std::path::Path::new(&font).exists() {
+            return None; // no monospace font on this machine
+        }
+        Some(Stage::new(w, h, &font, 18.0, crate::config::Theme::rift_neon()))
+    }
+
+    fn max_diff(a: u32, b: u32) -> u32 {
+        (0..3).map(|i| (((a >> (8 * i)) & 0xff) as i32 - ((b >> (8 * i)) & 0xff) as i32).unsigned_abs()).max().unwrap()
+    }
+
+    /// Hovering / selecting a command block only tints it and shows the
+    /// toolbar; the text stays, and leaving restores the exact frame
+    /// (nothing is persisted into the damage-tracked back buffer).
+    #[test]
+    fn block_hover_and_selection_are_translucent_and_reversible() {
+        for effect in [None, Some(crate::effects::EffectKind::Matrix), Some(crate::effects::EffectKind::Crt)] {
+            let Some(mut s) = stage(1000, 640) else { return };
+            s.renderer.shader.set_effect(effect);
+            blocks(&mut s);
+            let ch = s.cell().1;
+            s.blocks_ui.hover = None;
+            let base = s.render();
+            for sel in [false, true] {
+                s.blocks_ui.hover = Some(Hover { tab: 0, pane: 0, block: 3, button: None });
+                s.blocks_ui.selected = sel.then_some((0, 0, 3));
+                let hov = s.render();
+                // Only the toolbar (top-right of the block, one text row) may change a lot.
+                let mut strong = Vec::new();
+                let mut changed = 0usize;
+                for (i, (a, b)) in base.iter().zip(&hov).enumerate() {
+                    let d = max_diff(*a, *b);
+                    if d > 0 {
+                        changed += 1;
+                    }
+                    let limit = if sel { 40 } else { 14 };
+                    if d > limit {
+                        strong.push((i % s.w, i / s.w));
+                    }
+                }
+                assert!(changed > 0, "hover must be visible (effect {effect:?})");
+                if let (Some(y0), Some(y1)) = (strong.iter().map(|p| p.1).min(), strong.iter().map(|p| p.1).max()) {
+                    // The gutter bar (left edge) and the toolbar (top row) are opaque; nothing else.
+                    let gutter = |x: usize| x < 8;
+                    let rest: Vec<_> = strong.iter().filter(|p| !gutter(p.0)).collect();
+                    if let (Some(a), Some(b)) = (rest.iter().map(|p| p.1).min(), rest.iter().map(|p| p.1).max()) {
+                        assert!(b - a <= ch + 2, "opaque pixels outside the toolbar row: rows {a}..{b} (sel {sel}, effect {effect:?}, y {y0}..{y1})");
+                        assert!(rest.iter().all(|p| p.0 > s.w / 3), "text hidden left of the toolbar (sel {sel}, effect {effect:?})");
+                    }
+                }
+            }
+            // Hover ends: exactly the original frame again.
+            s.blocks_ui.hover = None;
+            s.blocks_ui.selected = None;
+            let after = s.render();
+            assert!(base == after, "frame not restored after hover ended (effect {effect:?})");
+        }
+    }
+
+    /// The Mission Control dock changes the content area: the damage-tracked
+    /// frame after opening it must equal a fresh render of the same state.
+    #[test]
+    fn opening_the_agents_dock_repaints_everything() {
+        let Some(mut tracked) = stage(1200, 700) else { return };
+        agents_dock(&mut tracked);
+        let a = tracked.render();
+        let Some(mut fresh) = stage(1200, 700) else { return };
+        agents_dock(&mut fresh);
+        fresh.renderer.invalidate_all();
+        let b = fresh.render();
+        // The dock itself animates with wall-clock time; the panes must be identical.
+        let area = tracked.content_area();
+        assert!(area.x > 0 && area.x + area.width <= tracked.w, "{area:?}");
+        let w = tracked.w;
+        let bad = (area.y..area.y + area.height)
+            .flat_map(|y| (area.x..area.x + area.width).map(move |x| (x, y)))
+            .find(|&(x, y)| a[y * w + x] != b[y * w + x]);
+        assert!(bad.is_none(), "pane area differs between tracked and fresh renders at {bad:?}");
+        // The dock strip belongs to the dock alone: no pane pixels left of the content area.
+        let dock = tracked.agents_dock().expect("dock open");
+        assert_eq!(dock.w, area.x);
+    }
 }

@@ -231,6 +231,15 @@ impl BlockManager {
         }
     }
 
+    /// Absolute line where the current prompt started (133;A), while the
+    /// shell sits at a prompt: after `A`, before `C` (no command running).
+    pub fn prompt_start_line(&self) -> Option<usize> {
+        if !self.osc.seen || self.osc.running.is_some() {
+            return None;
+        }
+        self.osc.prompt_line
+    }
+
     /// Position recorded by the last 133;B, if any.
     pub fn command_start_pos(&self) -> Option<(usize, usize)> {
         self.osc.cmd_start

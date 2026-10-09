@@ -33,6 +33,9 @@ struct SpanPaint {
 }
 
 fn blend(base: u32, c: Rgb, alpha: u32) -> u32 {
+    if base >> 24 != 0 {
+        return crate::ui::blend_ui(base, c, alpha);
+    }
     let inv = 255 - alpha;
     let r = ((base >> 16) & 0xff) * inv / 255 + c.0 as u32 * alpha / 255;
     let g = ((base >> 8) & 0xff) * inv / 255 + c.1 as u32 * alpha / 255;

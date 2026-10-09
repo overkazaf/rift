@@ -12,6 +12,7 @@
 //! Nothing in this module opens a window or spawns a process.
 
 mod frame;
+mod mission;
 mod page;
 mod png;
 mod scenes;
@@ -196,7 +197,7 @@ mod tests {
             return; // no monospace font on this machine
         }
         let dir = std::env::temp_dir().join(format!("rift-shot-test-{}", std::process::id()));
-        for scene in ["blocks", "fix-suggestion", "cmdk", "nl-command", "palette", "preview-accept"] {
+        for scene in ["blocks", "fix-suggestion", "cmdk", "nl-command", "palette", "preview-accept", "mission-control"] {
             let o = parse(&args(&["--screenshot", scene, "--out", dir.to_str().unwrap(), "--width", "800", "--height", "500"])).unwrap();
             let path = render_scene(scene, &o).unwrap();
             let bytes = std::fs::read(&path).unwrap();

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use winit::event_loop::{ActiveEventLoop, ControlFlow};
 use winit::window::WindowAttributes;
 
-use crate::window::{Pane, PaneRect};
+use crate::window::Pane;
 
 use super::App;
 use super::shortcuts;
@@ -88,6 +88,12 @@ pub fn startup_active(app: &App) -> bool {
 
 pub fn redraw(app: &mut App) {
     let agents_dock_rect = crate::agents::runtime::current_dock_rect(app);
+    let (geo_w, geo_h) = app.window.as_ref().map_or((0, 0), |w| {
+        let s = w.inner_size();
+        (s.width as usize, s.height as usize)
+    });
+    let content_area = app.content_area_for(geo_w, geo_h);
+    let blayout = app.browser_visible().then(|| app.browser_geometry_for(geo_w, geo_h));
     // DEC 2026 synchronized output: hold the frame while the app is mid-update
     // (the scheduler re-requests a redraw once the 150 ms safety timeout hits).
     if app.wm.active_pane().terminal.sync_pending() {
@@ -145,29 +151,11 @@ pub fn redraw(app: &mut App) {
         return;
     }
 
-    // Reserve space for HUD at bottom when visible
-    let ch = app.renderer.cell_height();
-    let hud_h = if app.hud_visible { ch * 3 + 20 } else { 0 };
-    // Chat dock takes the far right edge; browser + terminal share the rest
-    // (same rule as `App::terminal_width` / `App::browser_geometry`).
-    let chat_w = app.chat.dock_w(width as usize);
-    let avail_w = width as usize - chat_w;
-    let blayout = app.webview.as_ref().filter(|wv| wv.visible).map(|_| {
-        crate::network::browser::chrome::BrowserLayout::compute(
-            avail_w, height as usize, tbh,
-            app.renderer.cell_width(), app.renderer.cell_height(),
-            window.scale_factor(), app.browser.ratio, app.webview_maximized,
-        )
-    });
-    let content_w = blayout.map_or(avail_w, |l| l.terminal_w.min(avail_w));
-    // Mission Control dock on the left edge.
-    let agents_dock = agents_dock_rect.map_or(0, |r| r.w);
-    let content_area = PaneRect {
-        x: agents_dock,
-        y: tbh,
-        width: content_w.saturating_sub(agents_dock),
-        height: (height as usize).saturating_sub(tbh + hud_h),
-    };
+    // Single source of truth for the pane area (also used by PTY resize,
+    // mouse, IME and selection): see `App::content_area_for`.
+    debug_assert_eq!(content_area.x, agents_dock_rect.map_or(0, |r| r.w));
+    debug_assert_eq!((geo_w, geo_h), (width as usize, height as usize));
+    let hud_h = if app.hud_visible { app.renderer.cell_height() * 3 + 20 } else { 0 };
 
     // TimeWarp mode: render snapshot instead of live terminal
     if app.timewarp_browser.active {
@@ -247,9 +235,11 @@ pub fn redraw(app: &mut App) {
     );
     // Agent Mission Control: dock, tab badges, amber borders for waiting agents.
     {
+        let dock_composing = app.agents_ui.composing();
         crate::agents::runtime::draw(
             &app.agents, &mut app.agents_ui, &app.wm, &mut app.renderer, &mut buffer,
             width as usize, height as usize, content_area, agents_dock_rect, std::time::Instant::now(),
+            if dock_composing { app.ime_preedit.as_str() } else { "" },
         );
     }
     let t_overlays = std::time::Instant::now();
@@ -271,7 +261,7 @@ pub fn redraw(app: &mut App) {
     // IME: position the OS candidate window and draw inline preedit text
     // (While renaming a tab the preedit belongs to the rename field instead.)
     // (While the Cmd+K popover is open the preedit belongs to its input.)
-    if app.mui.tabs.editor.is_none() && app.inline_ai.popover.is_none() && !app.chat.focused {
+    if app.mui.tabs.editor.is_none() && app.inline_ai.popover.is_none() && !app.chat.focused && !app.agents_ui.composing() {
         super::ime::update_cursor_area(&app.wm, &app.renderer, window, &mut app.ime_area, content_area);
         super::ime::render_preedit(&app.wm, &mut app.renderer, &app.ime_preedit, &mut buffer, width as usize, content_area);
     }
@@ -280,6 +270,12 @@ pub fn redraw(app: &mut App) {
     crate::ai::inline::draw(&app.wm, &mut app.renderer, &mut app.inline_ai, &mut buffer, width as usize, height as usize, content_area, &app.ime_preedit);
     if let Some(r) = app.inline_ai.ime_hint() {
         super::ime::set_cursor_area(window, &mut app.ime_area, (r.x, r.y, r.w, r.h));
+    }
+    // Mission Control reply composer: the candidate window follows its caret.
+    if app.agents_ui.composing() {
+        if let Some(r) = app.agents_ui.ime_rect {
+            super::ime::set_cursor_area(window, &mut app.ime_area, (r.x, r.y, r.w, r.h));
+        }
     }
 
     // Search match highlights
@@ -600,8 +596,14 @@ pub fn redraw(app: &mut App) {
 
     // Pixel-level opacity fallback (non-macOS only; macOS uses native NSWindow alpha).
     // With the GPU pipeline the composite shader applies it instead.
+    // (Reads the field directly: a &self method call would conflict with the
+    // live &mut borrow of app.surface held by `buffer`.)
+    #[cfg(all(not(target_os = "macos"), feature = "gpu"))]
+    let no_gpu = app.gpu_pipeline.is_none();
+    #[cfg(all(not(target_os = "macos"), not(feature = "gpu")))]
+    let no_gpu = true;
     #[cfg(not(target_os = "macos"))]
-    if app.renderer.opacity < 0.99 && app.gpu_pipeline_absent() {
+    if app.renderer.opacity < 0.99 && no_gpu {
         let alpha = (app.renderer.opacity * 255.0) as u32;
         for px in buffer.iter_mut() {
             let r = ((*px >> 16) & 0xff) * alpha / 255;
@@ -618,17 +620,6 @@ pub fn redraw(app: &mut App) {
     // diff-uploaded from the CPU buffer, effects over the composite.
     #[cfg(feature = "gpu")]
     if app.gpu_pipeline.is_some() {
-        // A full-window dim backdrop (modal dialogs) must dim the terminal
-        // text too, which only the CPU renderer can do: switch modes and
-        // redo this frame.
-        let backdrop = crate::ui::take_backdrop();
-        if app.renderer.gpu_text_enabled() && backdrop != app.renderer.gpu_suspended() {
-            app.renderer.set_gpu_suspended(backdrop);
-            if backdrop {
-                drop(buffer);
-                return redraw(app);
-            }
-        }
         let effect = app.renderer.active_effect();
         let time = app.renderer.start_time.elapsed().as_secs_f32();
         let opacity = if cfg!(target_os = "macos") { 1.0 } else { app.renderer.opacity };
@@ -673,12 +664,14 @@ pub fn handle_resize(app: &mut App, width: u32, height: u32) {
     if width == 0 || height == 0 { return; }
     let cw = app.renderer.cell_width();
     let ch = app.renderer.cell_height();
-    let hud_h = if app.hud_visible { ch * 3 + 20 } else { 0 };
-    let effective_height = (height as usize).saturating_sub(hud_h) as u32;
-    let effective_width = app.terminal_width(width as usize) as u32;
-    if effective_width > 0 {
-        app.wm.resize_all(cw, ch, effective_width, effective_height, app.tab_bar_height());
+    // Same rect the renderer, mouse and IME use.
+    let area = app.content_area_for(width as usize, height as usize);
+    if area.width > 0 {
+        app.wm.resize_to(cw, ch, area);
     }
+    // Whatever moved (dock toggled, browser docked, window resized) changes
+    // pixels outside the damage tracker's view: repaint everything.
+    app.renderer.invalidate_all();
 
     crate::network::browser::apply_bounds(app);
 }
@@ -1144,7 +1137,7 @@ fn init_gpu(app: &mut App, window: &Arc<winit::window::Window>) {
             app.gpu_pipeline = Some(pipeline);
             app.renderer.shader.set_gpu_active(true);
             app.renderer.enable_gpu_text(true);
-            log::info!("wgpu GPU pipeline initialized (GPU text renderer on)");
+            log::info!("wgpu GPU pipeline initialized (renderer = {}, GPU text renderer on)", mode.as_str());
         }
         Err(e) if mode == RendererMode::Gpu => {
             log::error!("renderer = \"gpu\" but wgpu init failed: {e} - falling back to the CPU renderer");
@@ -1162,7 +1155,7 @@ fn gpu_highlights(
     selection: &crate::window::Selection,
     search: &crate::tools::search::SearchOverlay,
     renderer: &crate::renderer::Renderer,
-    content_area: PaneRect,
+    content_area: crate::window::PaneRect,
 ) -> (usize, Vec<crate::renderer::gpu_text::HlRect>) {
     use crate::renderer::gpu_text::HlRect;
     let tab = wm.active_tab();

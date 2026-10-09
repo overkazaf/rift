@@ -2,7 +2,7 @@ mod ime;
 pub mod keymap;
 mod lifecycle;
 pub mod mouse;
-mod overlays;
+pub(crate) mod overlays;
 pub mod panes;
 pub mod shortcuts;
 mod tabs;
@@ -327,15 +327,30 @@ impl App {
         }
     }
 
-    /// Rect occupied by the active tab's panes (mirrors lifecycle::redraw).
+    /// Rect occupied by the active tab's panes: THE single source of truth
+    /// for terminal geometry. Rendering, PTY resizing, mouse hit-testing,
+    /// IME, selection and screenshots all go through this (via
+    /// [`App::content_area_for`]).
     pub fn content_area(&self) -> crate::window::PaneRect {
         let (w, h) = self.window.as_ref()
             .map_or((800, 600), |w| { let s = w.inner_size(); (s.width as usize, s.height as usize) });
+        self.content_area_for(w, h)
+    }
+
+    /// Content area for a window of `w` x `h` physical pixels: what is left
+    /// after the tab bar, the HUD strip, the agents dock (left), the chat dock
+    /// (right) and the docked browser. `x` is the left edge of the first pane.
+    pub fn content_area_for(&self, w: usize, h: usize) -> crate::window::PaneRect {
         let tbh = self.tab_bar_height();
         let ch = self.renderer.cell_height();
         let hud_h = if self.hud_visible { ch * 3 + 20 } else { 0 };
-        let width = self.terminal_width(w);
         let dock = crate::agents::runtime::dock_w(self, w);
+        let avail = w - self.chat.dock_w(w).min(w);
+        let width = match self.browser_visible().then(|| self.browser_geometry_for(w, h)) {
+            Some(l) => l.terminal_w.min(avail),
+            None => avail,
+        }
+        .saturating_sub(dock);
         crate::window::PaneRect { x: dock, y: tbh, width, height: h.saturating_sub(tbh + hud_h) }
     }
 
@@ -611,6 +626,9 @@ impl ApplicationHandler for App {
                     }
                     (ElementState::Released, MouseButton::Left) => {
                         let was_pressed = std::mem::replace(&mut self.mouse_pressed, false);
+                        if crate::agents::runtime::on_mouse_release(self) {
+                            return;
+                        }
                         if crate::ai::chat::on_mouse_release(self) {
                             return;
                         }
@@ -633,6 +651,10 @@ impl ApplicationHandler for App {
                         }
                     }
                     (ElementState::Pressed, MouseButton::Right) => {
+                        // Mission Control dock: card context menu.
+                        if crate::agents::runtime::on_right_press(self) {
+                            return;
+                        }
                         mouse::dismiss_menu(self);
                         if self.cursor_y < self.tab_bar_height() {
                             // Nothing on the tab bar yet.

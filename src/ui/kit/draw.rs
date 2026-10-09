@@ -21,6 +21,9 @@ pub fn blend_px(dst: u32, c: Rgb, a: u32) -> u32 {
     if a >= 255 {
         return ((c.0 as u32) << 16) | ((c.1 as u32) << 8) | c.2 as u32;
     }
+    if dst >> 24 != 0 {
+        return crate::ui::blend_ui(dst, c, a);
+    }
     let inv = 255 - a;
     let r = (c.0 as u32 * a + ((dst >> 16) & 0xff) * inv + 127) / 255;
     let g = (c.1 as u32 * a + ((dst >> 8) & 0xff) * inv + 127) / 255;
@@ -226,13 +229,19 @@ impl<'a> Ctx<'a> {
 
     /// Darken the whole buffer; `amount` is the darkening fraction (0..=1).
     pub fn backdrop(&mut self, amount: f32) {
-        crate::ui::mark_backdrop();
         let keep = ((1.0 - amount.clamp(0.0, 1.0)) * 256.0) as u32;
+        // Black at this alpha over transparent (GPU terminal) pixels.
+        let alpha = 255 - ((keep * 255 + 128) >> 8).min(255);
         for px in self.buf.iter_mut() {
-            let r = ((*px >> 16) & 0xff) * keep >> 8;
-            let g = ((*px >> 8) & 0xff) * keep >> 8;
-            let b = (*px & 0xff) * keep >> 8;
-            *px = (r << 16) | (g << 8) | b;
+            let t = *px >> 24;
+            if t == 0 {
+                let r = ((*px >> 16) & 0xff) * keep >> 8;
+                let g = ((*px >> 8) & 0xff) * keep >> 8;
+                let b = (*px & 0xff) * keep >> 8;
+                *px = (r << 16) | (g << 8) | b;
+            } else {
+                *px = crate::ui::blend_ui(*px, (0, 0, 0), alpha);
+            }
         }
     }
 

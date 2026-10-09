@@ -133,6 +133,11 @@ struct GpuCore {
     color_tex: Option<wgpu::Texture>,
     inst_buf: Option<wgpu::Buffer>,
     inst_cap: usize,
+    /// Staging buffer for dirty rows: one `write_buffer`, then one GPU-side
+    /// copy per row (many small `write_buffer` calls cost far more).
+    stage_buf: Option<wgpu::Buffer>,
+    stage_cap: usize,
+    copies: Vec<(u64, u64, u64)>, // src offset, dst offset, bytes
     layout_seen: u64,
     tail_prev: Vec<Inst>,
 
@@ -304,6 +309,9 @@ impl GpuCore {
             color_tex: None,
             inst_buf: None,
             inst_cap: 0,
+            stage_buf: None,
+            stage_cap: 0,
+            copies: Vec::new(),
             layout_seen: 0,
             tail_prev: Vec::new(),
             blit_pipeline,
@@ -337,13 +345,16 @@ impl GpuCore {
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
             view_formats: &[TERM_RENDER_FORMAT],
         });
-        let term_sample = term.create_view(&Default::default());
+        // The composite shader blends in gamma space (like the CPU renderer),
+        // so both layers are sampled raw through their `Rgba8Unorm` views.
+        let raw_view = wgpu::TextureViewDescriptor { format: Some(TERM_RENDER_FORMAT), ..Default::default() };
+        let term_sample = term.create_view(&raw_view);
         self.term_render_view = Some(term.create_view(&wgpu::TextureViewDescriptor {
             format: Some(TERM_RENDER_FORMAT),
             ..Default::default()
         }));
         let ui = create_texture(&self.device, w, h);
-        let ui_view = ui.create_view(&Default::default());
+        let ui_view = ui.create_view(&raw_view);
         self.comp_bg = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("comp_bg"),
             layout: &self.comp_bgl,
@@ -468,24 +479,41 @@ impl GpuCore {
         let Some(buf) = self.inst_buf.as_ref() else { return (0, false) };
         let cap = text.cap;
         let stride = (cap * INST_SIZE) as u64;
+        self.staging.clear();
+        self.copies.clear();
         for (i, s) in text.slots.iter_mut().enumerate() {
             if !s.dirty {
                 continue;
             }
             s.dirty = false;
             let n = s.inst.len().min(cap);
+            // Rows that shrank get their stale tail zeroed (degenerate quads).
             let wr = n.max(s.gpu_len as usize).min(cap);
             s.gpu_len = n as u32;
             if wr == 0 {
                 continue;
             }
-            self.staging.clear();
+            let src = self.staging.len() as u64;
             self.staging.extend_from_slice(bytemuck::cast_slice(&s.inst[..n]));
-            self.staging.resize(wr * INST_SIZE, 0);
-            self.queue.write_buffer(buf, i as u64 * stride, &self.staging);
+            self.staging.resize(self.staging.len() + (wr - n) * INST_SIZE, 0);
+            self.copies.push((src, i as u64 * stride, (wr * INST_SIZE) as u64));
             stats.rows_uploaded += 1;
-            stats.inst_bytes += self.staging.len();
             changed = true;
+        }
+        if !self.staging.is_empty() {
+            if self.stage_buf.is_none() || self.staging.len() > self.stage_cap {
+                self.stage_cap = (self.staging.len() * 5 / 4).next_multiple_of(4);
+                self.stage_buf = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("instance_staging"),
+                    size: self.stage_cap as u64,
+                    usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }));
+            }
+            if let Some(st) = self.stage_buf.as_ref() {
+                self.queue.write_buffer(st, 0, &self.staging);
+            }
+            stats.inst_bytes += self.staging.len();
         }
         // Per-frame tail quads (dimming, margin strips) sit after the slots.
         let tail_off = text.slots.len() as u64 * stride;
@@ -517,27 +545,17 @@ impl GpuCore {
             rects.push((0, w, 0, h));
         } else {
             let mut cur: Option<(usize, usize, usize, usize)> = None;
-            let mut gap = 0usize;
-            for y in 0..h {
-                let (a, b) = (&ui[y * w..(y + 1) * w], &self.ui_prev[y * w..(y + 1) * w]);
-                match row_diff(a, b) {
-                    Some((x0, x1)) => {
-                        cur = Some(match cur {
-                            Some((cx0, cx1, y0, _)) => (cx0.min(x0), cx1.max(x1), y0, y + 1),
-                            None => (x0, x1, y, y + 1),
-                        });
-                        gap = 0;
-                    }
-                    None => {
-                        if cur.is_some() {
-                            gap += 1;
-                            if gap > 3 {
-                                rects.extend(cur.take());
-                                gap = 0;
-                            }
-                        }
+            for (y, x0, x1) in diff_rows(ui, &self.ui_prev, w, h) {
+                // A run of up to 3 clean rows between dirty ones does not split the rectangle.
+                if let Some((_, _, _, cy1)) = cur {
+                    if y - cy1 > 3 {
+                        rects.extend(cur.take());
                     }
                 }
+                cur = Some(match cur {
+                    Some((cx0, cx1, y0, _)) => (cx0.min(x0), cx1.max(x1), y0, y + 1),
+                    None => (x0, x1, y, y + 1),
+                });
             }
             rects.extend(cur);
             if rects.len() > 12 {
@@ -629,6 +647,12 @@ impl GpuCore {
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("render_enc") });
+        if let (Some(st), Some(dst)) = (self.stage_buf.as_ref(), self.inst_buf.as_ref()) {
+            for &(src_off, dst_off, bytes) in &self.copies {
+                encoder.copy_buffer_to_buffer(st, src_off, dst, dst_off, Some(bytes));
+            }
+        }
+        self.copies.clear();
         if let (Some(_), true, Some(view), Some(bg), Some(buf)) =
             (text.as_ref(), term_dirty, self.term_render_view.as_ref(), self.text_bg.as_ref(), self.inst_buf.as_ref())
         {
@@ -682,13 +706,14 @@ impl GpuCore {
     }
 }
 
-/// `0x00RRGGBB` pixels to RGBA8 bytes (as little-endian `u32`s). With `keyed`,
-/// pixels carrying `0xFF` in the top byte become transparent.
+/// `0xTTRRGGBB` pixels to RGBA8 bytes (as little-endian `u32`s). With `keyed`,
+/// the top byte `TT` is transparency (see `ui::blend_ui`): alpha = 255 - TT.
 #[inline]
 fn convert_row(src: &[u32], dst: &mut [u32], keyed: bool) {
     if keyed {
         for (d, &px) in dst.iter_mut().zip(src) {
-            let a = if px >> 24 == 0xFF { 0 } else { 0xFF00_0000 };
+            // Top byte is transparency: 0x00 opaque ... 0xFF fully transparent.
+            let a = (0xFF - (px >> 24)) << 24;
             *d = (px >> 16 & 0xFF) | (px & 0xFF00) | (px & 0xFF) << 16 | a;
         }
     } else {
@@ -696,6 +721,53 @@ fn convert_row(src: &[u32], dst: &mut [u32], keyed: bool) {
             *d = (px >> 16 & 0xFF) | (px & 0xFF00) | (px & 0xFF) << 16 | 0xFF00_0000;
         }
     }
+}
+
+/// Frames at least this many pixels are scanned / copied on several threads
+/// (both are memory-bandwidth bound; one core cannot saturate the bus).
+pub(super) const PAR_MIN_PIXELS: usize = 1 << 21;
+
+fn worker_count() -> usize {
+    static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *N.get_or_init(|| std::thread::available_parallelism().map_or(1, |n| n.get()).clamp(1, 4))
+}
+
+/// Rows of `a` that differ from `b` (`w * h` pixels each): `(row, first, last + 1)`.
+fn diff_rows(a: &[u32], b: &[u32], w: usize, h: usize) -> Vec<(usize, usize, usize)> {
+    let scan = |y0: usize, y1: usize| -> Vec<(usize, usize, usize)> {
+        (y0..y1)
+            .filter_map(|y| row_diff(&a[y * w..(y + 1) * w], &b[y * w..(y + 1) * w]).map(|(x0, x1)| (y, x0, x1)))
+            .collect()
+    };
+    let n = worker_count();
+    if w * h < PAR_MIN_PIXELS || n < 2 {
+        return scan(0, h);
+    }
+    let per = h.div_ceil(n);
+    std::thread::scope(|sc| {
+        let handles: Vec<_> = (1..n)
+            .filter(|i| i * per < h)
+            .map(|i| {
+                let scan = &scan;
+                sc.spawn(move || scan(i * per, ((i + 1) * per).min(h)))
+            })
+            .collect();
+        let mut out = scan(0, per.min(h));
+        for hd in handles {
+            out.extend(hd.join().unwrap_or_default());
+        }
+        out
+    })
+}
+
+#[cfg(test)]
+pub(super) fn row_diff_for_test(a: &[u32], b: &[u32]) -> Option<(usize, usize)> {
+    row_diff(a, b)
+}
+
+#[cfg(test)]
+pub(super) fn diff_rows_for_test(a: &[u32], b: &[u32], w: usize, h: usize) -> Vec<(usize, usize, usize)> {
+    diff_rows(a, b, w, h)
 }
 
 /// First and last differing index of two equal-length rows, or `None`.
@@ -834,6 +906,8 @@ fn new_instance() -> wgpu::Instance {
 pub struct OffscreenGpu {
     core: GpuCore,
     target: Option<(wgpu::Texture, wgpu::TextureView, wgpu::Buffer, u32, u32)>,
+    /// Adapter used (diagnostics, benchmark output).
+    #[allow(dead_code)]
     pub adapter_name: String,
 }
 
@@ -908,6 +982,7 @@ impl OffscreenGpu {
 
     /// Forget what the UI layer texture holds, so the next frame uploads it
     /// completely (what the pre-diff pipeline did on every frame).
+    #[allow(dead_code)]
     pub fn invalidate_ui(&mut self) {
         self.core.ui_valid = false;
     }
@@ -1002,7 +1077,7 @@ fn create_texture(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Textu
         dimension: wgpu::TextureDimension::D2,
         format: TEX_FORMAT,
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-        view_formats: &[],
+        view_formats: &[TERM_RENDER_FORMAT],
     })
 }
 
@@ -1174,11 +1249,17 @@ struct Params {
 @group(0) @binding(2) var<uniform> P: Params;
 @group(0) @binding(3) var ui_tex: texture_2d<f32>;
 
-// Terminal layer (frame_tex) shows through where the UI layer is transparent.
+fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
+    return select(pow((c + vec3<f32>(0.055)) / vec3<f32>(1.055), vec3<f32>(2.4)), c / 12.92, c <= vec3<f32>(0.04045));
+}
+
+// Both layers are sampled raw (gamma space). The UI layer is composited over
+// the terminal layer with its alpha, blending in gamma space exactly like
+// the CPU renderer, then converted to linear for the sRGB target.
 fn composite(uv: vec2<f32>) -> vec3<f32> {
     let u = textureSampleLevel(ui_tex, frame_sampler, uv, 0.0);
     let t = textureSampleLevel(frame_tex, frame_sampler, uv, 0.0);
-    return mix(t.rgb, u.rgb, u.a);
+    return srgb_to_linear(mix(t.rgb, u.rgb, u.a));
 }
 
 @fragment
@@ -1227,12 +1308,16 @@ fn vs_main(@builtin(vertex_index) idx: u32) -> VertexOutput {
 const PI: f32 = 3.14159265;
 const GLITCH_SLOT: f32 = 0.2;
 
-// The scene the effects distort: terminal layer, with the UI layer on top
-// wherever it is opaque.
+fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
+    return select(pow((c + vec3<f32>(0.055)) / vec3<f32>(1.055), vec3<f32>(2.4)), c / 12.92, c <= vec3<f32>(0.04045));
+}
+
+// The scene the effects distort: the UI layer composited over the terminal
+// layer (blended in gamma space like the CPU renderer), as linear color.
 fn tex(uv: vec2<f32>) -> vec3<f32> {
     let u = textureSampleLevel(ui_tex, frame_sampler, uv, 0.0);
     let t = textureSampleLevel(frame_tex, frame_sampler, uv, 0.0);
-    return mix(t.rgb, u.rgb, u.a);
+    return srgb_to_linear(mix(t.rgb, u.rgb, u.a));
 }
 
 fn lin3(c: vec3<f32>) -> vec3<f32> {

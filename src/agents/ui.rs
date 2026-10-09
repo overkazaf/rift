@@ -1,15 +1,49 @@
-//! Mission Control UI: the left-docked agent list, tab badges and the amber
-//! pane border for agents waiting on you. All drawing goes through the UI kit
-//! (`Tokens` + `Ctx`); geometry and navigation are pure and tested.
+//! Mission Control UI state and layout: the left-docked console, tab badges
+//! and the amber pane border for agents waiting on you.
+//!
+//! * This file: [`AgentsUi`] (selection, scroll, density, hit map), dock
+//!   geometry (width, resizable edge), the pure card layout (`rows`, `plan`),
+//!   presentation helpers and the tab-bar / pane-border overlays.
+//! * `dock.rs`: drawing the dock through the UI kit (`Tokens` + `Ctx`).
+//! * `control.rs`: the keyboard state machine; `prompt.rs` / `metrics.rs`: what
+//!   is read off the agents' screens.
 
 use std::time::{Duration, Instant};
 
-use super::{AgentKind, AgentSession, AgentState, AgentRegistry};
+use super::control::{Control, Env, InfoMap, PaneInfo, Risk};
+use super::{AgentRegistry, AgentSession, AgentState};
 use crate::config::{Rgb, Theme};
 use crate::renderer::font::FontManager;
 use crate::ui::kit::{mix, Ctx, Rect, Tokens, Tone};
 
 // ───────────────────────────── state ─────────────────────────────
+
+/// Something clickable, recorded while drawing (the last frame's map is what
+/// the mouse is tested against, so layout is never computed twice).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Hit {
+    Card(usize),
+    Answer { uid: usize, option: usize },
+    Interrupt(usize),
+    Reply(usize),
+    Review(usize),
+    Restart(usize),
+    Close(usize),
+    More(usize),
+    Mark(usize),
+    Turn { uid: usize, id: u64 },
+    Menu { uid: usize, item: super::control::MenuItem },
+    /// Click outside the open menu.
+    MenuDismiss,
+    Confirm(bool),
+    SendReply,
+    CancelReply,
+    NewAgent,
+    Hooks,
+    Density,
+    /// The draggable right edge.
+    Edge,
+}
 
 #[derive(Default)]
 pub struct AgentsUi {
@@ -21,37 +55,22 @@ pub struct AgentsUi {
     pub selected: Option<usize>,
     /// First visible card.
     pub scroll: usize,
-    /// Card under the pointer (index into the session list).
-    pub hover: Option<usize>,
-}
-
-/// What a key press in the dock asks for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum UiAction {
-    /// Consumed, nothing else to do (selection moved).
-    None,
-    /// Jump to this pane.
-    Jump(usize),
-    /// Cycle to the next agent that needs the user.
-    NextAttention,
-    /// Give the keyboard back to the terminal (dock stays open).
-    Blur,
-    /// Not a dock key: unfocus and let the terminal have it.
-    PassThrough,
-}
-
-/// Keys the dock understands.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DockKey {
-    Up,
-    Down,
-    Home,
-    End,
-    Enter,
-    Escape,
-    Char(char),
-    /// A modifier chord (Cmd/Ctrl): never ours.
-    Chord,
+    /// One-line cards (expanded shows metrics, files, git).
+    pub compact: bool,
+    /// Keyboard state machine (mode, marks, composer).
+    pub ctl: Control,
+    /// Per-agent prompt / metrics / timeline, refreshed by the runtime.
+    pub info: InfoMap,
+    /// Clickable areas of the last frame, bottom to top.
+    pub hits: Vec<(Rect, Hit)>,
+    /// What the pointer is over (button hover highlight).
+    pub hover: Option<Hit>,
+    /// Bring the selected card into view on the next frame.
+    pub follow: bool,
+    /// Dragging the right edge.
+    pub resizing: bool,
+    /// Caret rectangle of the composer in the last frame (IME candidate window).
+    pub ime_rect: Option<Rect>,
 }
 
 impl AgentsUi {
@@ -64,12 +83,16 @@ impl AgentsUi {
         self.visible = !self.visible;
         self.focused = self.visible;
         self.hover = None;
+        if !self.visible {
+            self.resizing = false;
+        }
     }
 
     pub fn hide(&mut self) {
         self.visible = false;
         self.focused = false;
         self.hover = None;
+        self.resizing = false;
     }
 
     /// Selection resolved against the live list (falls back to the first).
@@ -80,59 +103,86 @@ impl AgentsUi {
         Some(self.selected.and_then(|s| uids.iter().position(|u| *u == s)).unwrap_or(0))
     }
 
-    /// Move the selection and handle keys. `uids` is the session list order.
-    pub fn on_key(&mut self, key: DockKey, uids: &[usize]) -> UiAction {
-        let n = uids.len();
-        let cur = self.selected_index(uids);
-        let select = |ui: &mut AgentsUi, i: usize| ui.selected = uids.get(i).copied();
-        match key {
-            DockKey::Chord => UiAction::PassThrough,
-            DockKey::Escape => UiAction::Blur,
-            DockKey::Up | DockKey::Char('k') => {
-                if let Some(i) = cur {
-                    select(self, if i == 0 { n - 1 } else { i - 1 });
-                }
-                UiAction::None
-            }
-            DockKey::Down | DockKey::Char('j') => {
-                if let Some(i) = cur {
-                    select(self, (i + 1) % n);
-                }
-                UiAction::None
-            }
-            DockKey::Home => {
-                select(self, 0);
-                UiAction::None
-            }
-            DockKey::End => {
-                if n > 0 {
-                    select(self, n - 1);
-                }
-                UiAction::None
-            }
-            DockKey::Enter => cur.map_or(UiAction::None, |i| UiAction::Jump(uids[i])),
-            DockKey::Char('n') => UiAction::NextAttention,
-            DockKey::Char(c) if c.is_ascii_digit() && c != '0' => {
-                let i = c as usize - '1' as usize;
-                if i < n {
-                    UiAction::Jump(uids[i])
-                } else {
-                    UiAction::None
-                }
-            }
-            DockKey::Char(_) => UiAction::PassThrough,
-        }
+    /// The selected uid, resolved against `uids`.
+    pub fn selected_uid(&self, uids: &[usize]) -> Option<usize> {
+        self.selected_index(uids).map(|i| uids[i])
+    }
+
+    /// Topmost clickable area under (x, y).
+    pub fn hit_at(&self, x: usize, y: usize) -> Option<Hit> {
+        self.hits.iter().rev().find(|(r, _)| r.contains(x, y)).map(|(_, h)| h.clone())
+    }
+
+    pub fn composing(&self) -> bool {
+        self.visible && self.focused && matches!(self.ctl.mode, super::control::Mode::Compose { .. })
+    }
+}
+
+/// The key handler's view of the world, built from the registry and the
+/// per-agent info (see [`Env`]).
+pub struct DockEnv<'a> {
+    pub uids: Vec<usize>,
+    pub reg: &'a AgentRegistry,
+    pub info: &'a InfoMap,
+    pub now: Instant,
+}
+
+impl<'a> DockEnv<'a> {
+    pub fn new(reg: &'a AgentRegistry, info: &'a InfoMap, now: Instant) -> Self {
+        Self { uids: reg.sessions().iter().map(|s| s.pane_uid).collect(), reg, info, now }
+    }
+}
+
+impl Env for DockEnv<'_> {
+    fn uids(&self) -> &[usize] {
+        &self.uids
+    }
+    fn live(&self, uid: usize) -> bool {
+        self.reg.session(uid).is_some_and(|s| s.state.is_live())
+    }
+    fn can_interrupt(&self, uid: usize) -> bool {
+        self.busy(uid)
+    }
+    fn answerable(&self, uid: usize) -> bool {
+        self.reg.session(uid).is_some_and(|s| s.state == AgentState::WaitingForUser) && self.info.get(&uid).is_some_and(PaneInfo::answerable)
+    }
+    fn option_for_digit(&self, uid: usize, digit: u8) -> Option<usize> {
+        self.info.get(&uid)?.prompt.as_ref()?.option_for_digit(digit)
+    }
+    fn grants(&self, uid: usize, option: usize) -> bool {
+        self.info.get(&uid).and_then(|i| i.prompt.as_ref()).is_some_and(|p| p.grants(option))
+    }
+    fn risk(&self, uid: usize) -> Risk {
+        self.info.get(&uid).map(|i| i.risk.clone()).unwrap_or_default()
+    }
+    fn busy(&self, uid: usize) -> bool {
+        self.reg.session(uid).is_some_and(|s| matches!(s.state, AgentState::Working | AgentState::WaitingForUser | AgentState::Starting))
+    }
+    fn now(&self) -> Instant {
+        self.now
     }
 }
 
 // ───────────────────────────── geometry ─────────────────────────────
 
-/// Dock width for a window `win_w` wide with `cw`-pixel cells; 0 = too narrow.
-pub fn dock_width(win_w: usize, cw: usize) -> usize {
+/// Default dock width in character cells.
+pub const DEFAULT_COLS: usize = 34;
+/// Resizable range.
+pub const MIN_COLS: usize = 28;
+pub const MAX_COLS: usize = 80;
+/// Columns that always stay for the terminal itself.
+const TERMINAL_COLS: usize = 56;
+/// Half-width of the draggable edge zone, in px.
+pub const GRAB: usize = 4;
+
+/// Dock width in px for a window `win_w` wide with `cw`-pixel cells and a
+/// preferred width of `pref_cols` columns (0 = default); 0 = too narrow.
+pub fn dock_width_pref(win_w: usize, cw: usize, pref_cols: usize) -> usize {
     let cw = cw.max(1);
+    let cols = if pref_cols == 0 { DEFAULT_COLS } else { pref_cols.clamp(MIN_COLS, MAX_COLS) };
     // Keep at least ~56 columns for the terminal itself.
-    let room = win_w.saturating_sub(56 * cw);
-    let w = (34 * cw).min(room);
+    let room = win_w.saturating_sub(TERMINAL_COLS * cw);
+    let w = (cols * cw).min(room);
     if w < 24 * cw {
         0
     } else {
@@ -140,58 +190,342 @@ pub fn dock_width(win_w: usize, cw: usize) -> usize {
     }
 }
 
+/// Dock width for a window `win_w` wide with `cw`-pixel cells; 0 = too narrow.
+pub fn dock_width(win_w: usize, cw: usize) -> usize {
+    dock_width_pref(win_w, cw, 0)
+}
+
+/// Dock rectangle for a window (below the tab bar, above the HUD strip);
+/// `None` when the window is too narrow for it.
+pub fn dock_rect(win_w: usize, win_h: usize, tab_bar_h: usize, hud_h: usize, cw: usize) -> Option<Rect> {
+    dock_rect_pref(win_w, win_h, tab_bar_h, hud_h, cw, 0)
+}
+
+/// Like [`dock_rect`] with the user's preferred width (`[agents] dock_cols`).
+pub fn dock_rect_pref(win_w: usize, win_h: usize, tab_bar_h: usize, hud_h: usize, cw: usize, pref_cols: usize) -> Option<Rect> {
+    let dw = dock_width_pref(win_w, cw, pref_cols);
+    (dw > 0).then(|| Rect::new(0, tab_bar_h, dw, win_h.saturating_sub(tab_bar_h + hud_h)))
+}
+
+/// Columns for a drag that ends at pointer x: the edge follows the pointer.
+pub fn cols_for_drag(x: usize, dock_x: usize, cw: usize) -> usize {
+    (x.saturating_sub(dock_x) / cw.max(1)).clamp(MIN_COLS, MAX_COLS)
+}
+
+/// The draggable strip along the dock's right edge.
+pub fn edge_zone(dock: Rect) -> Rect {
+    Rect::new(dock.right().saturating_sub(GRAB), dock.y, 2 * GRAB, dock.h)
+}
+
 pub struct Layout {
     pub header: Rect,
     pub list: Rect,
     pub footer: Rect,
-    pub card_h: usize,
     pub gap: usize,
 }
 
 pub fn layout(dock: Rect, tk: &Tokens) -> Layout {
     let header_h = tk.row_h + tk.sp.md;
-    let footer_h = tk.row_h + tk.sp.sm;
+    let footer_h = 2 * tk.row_h + tk.sp.sm;
     let (header, rest) = dock.split_top(header_h);
     let (list, footer) = rest.split_bottom(footer_h);
-    Layout { header, list, footer, card_h: 3 * tk.ch + 3 * tk.sp.sm, gap: tk.sp.sm }
+    Layout { header, list, footer, gap: tk.sp.sm }
 }
 
-impl Layout {
-    fn stride(&self) -> usize {
-        self.card_h + self.gap
-    }
-
-    /// Whole cards that fit in the list.
-    pub fn visible(&self) -> usize {
-        ((self.list.h + self.gap) / self.stride().max(1)).max(1)
-    }
-
-    /// Largest useful scroll offset (in cards).
-    pub fn max_scroll(&self, n: usize) -> usize {
-        n.saturating_sub(self.visible())
-    }
-
-    /// Card rectangle, or `None` when scrolled out of view.
-    pub fn card(&self, idx: usize, scroll: usize) -> Option<Rect> {
-        let rel = idx.checked_sub(scroll)?;
-        (rel < self.visible()).then(|| Rect::new(self.list.x, self.list.y + rel * self.stride(), self.list.w, self.card_h))
-    }
-
-    /// Card at (x, y) given the scroll offset (in cards).
-    pub fn hit(&self, n: usize, scroll: usize, x: usize, y: usize) -> Option<usize> {
-        if !self.list.contains(x, y) {
-            return None;
+/// Cards that fully fit from `scroll` on: `(index, rect)`. The first card is
+/// always returned (callers downgrade its detail when it is taller than the list).
+pub fn plan(list: Rect, gap: usize, heights: &[usize], scroll: usize) -> Vec<(usize, Rect)> {
+    let mut out = Vec::new();
+    let mut y = list.y;
+    for (i, h) in heights.iter().enumerate().skip(scroll) {
+        if y + h > list.bottom() && !out.is_empty() {
+            break;
         }
-        let rel = y - self.list.y;
-        let (i, off) = (rel / self.stride(), rel % self.stride());
-        let idx = scroll + i;
-        (idx < n && i < self.visible() && off < self.card_h).then_some(idx)
+        out.push((i, Rect::new(list.x, y, list.w, *h)));
+        y += h + gap;
     }
+    out
+}
 
-    /// Scroll offset that keeps card `idx` in view.
-    pub fn scroll_to(&self, idx: usize, scroll: usize) -> usize {
-        crate::ui::kit::scroll_into_view(idx, scroll, self.visible())
+/// Largest useful scroll offset: the first card from which everything below fits.
+pub fn max_scroll(list_h: usize, gap: usize, heights: &[usize]) -> usize {
+    let mut used = 0;
+    let mut first = heights.len();
+    for (i, h) in heights.iter().enumerate().rev() {
+        let need = used + h + if used > 0 { gap } else { 0 };
+        if need > list_h && first < heights.len() {
+            break;
+        }
+        used = need;
+        first = i;
     }
+    if heights.is_empty() { 0 } else { first }
+}
+
+/// Smallest scroll offset >= `scroll` (or the card itself) that shows card `idx` fully.
+pub fn scroll_to(list: Rect, gap: usize, heights: &[usize], idx: usize, scroll: usize) -> usize {
+    if idx < scroll {
+        return idx;
+    }
+    let mut s = scroll;
+    while s < idx && !plan(list, gap, heights, s).iter().any(|(i, r)| *i == idx && r.bottom() <= list.bottom()) {
+        s += 1;
+    }
+    s
+}
+
+// ───────────────────────────── card layout (pure) ─────────────────────────────
+
+/// How much of a card is shown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Detail {
+    /// Name and state only (tiny windows).
+    Min,
+    /// Compact density.
+    Compact,
+    /// Expanded density: place, metrics, collision hint.
+    Full,
+}
+
+/// One band of a card, top to bottom. Counts are text lines.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Row {
+    Header,
+    Place,
+    Status,
+    Metrics(usize),
+    /// Same-worktree chip; `hint` adds the "use a worktree" line.
+    Chips { hint: bool },
+    /// The requested action box with `lines` text lines.
+    Prompt(usize),
+    Buttons,
+    /// The prompt could not be parsed: raw last lines.
+    Raw(usize),
+    Confirm,
+    Composer,
+    Actions,
+    /// Header + `n` turns.
+    Timeline(usize),
+}
+
+/// What decides a card's rows.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CardFlags {
+    pub selected: bool,
+    pub waiting: bool,
+    /// A parsed prompt box has this many text lines (0 = none).
+    pub prompt_lines: usize,
+    /// Lines of the trimmed box used by compact cards.
+    pub prompt_lines_compact: usize,
+    /// Unparsed prompt: raw lines to show.
+    pub raw_lines: usize,
+    pub metrics_lines: usize,
+    pub collision: bool,
+    pub confirm: bool,
+    pub composer: bool,
+    pub turns: usize,
+}
+
+pub fn rows(f: &CardFlags, detail: Detail) -> Vec<Row> {
+    let mut v = vec![Row::Header];
+    match detail {
+        Detail::Min => v.push(Row::Status),
+        Detail::Compact => {
+            v.push(Row::Status);
+            if f.metrics_lines > 0 {
+                v.push(Row::Metrics(1));
+            }
+            if f.collision {
+                v.push(Row::Chips { hint: false });
+            }
+        }
+        Detail::Full => {
+            v.push(Row::Place);
+            v.push(Row::Status);
+            if f.metrics_lines > 0 {
+                v.push(Row::Metrics(f.metrics_lines));
+            }
+            if f.collision {
+                // A waiting card keeps its room for the prompt; the other collision card carries the tip.
+                v.push(Row::Chips { hint: !f.waiting });
+            }
+        }
+    }
+    if detail != Detail::Min {
+        let prompt_lines = if detail == Detail::Full { f.prompt_lines } else { f.prompt_lines_compact };
+        if f.waiting && prompt_lines > 0 {
+            v.push(Row::Prompt(prompt_lines));
+            v.push(Row::Buttons);
+        } else if f.waiting && f.raw_lines > 0 {
+            v.push(Row::Raw(f.raw_lines));
+        }
+        if f.confirm {
+            v.push(Row::Confirm);
+        }
+        if f.composer {
+            v.push(Row::Composer);
+        } else if f.selected {
+            v.push(Row::Actions);
+        }
+        if f.selected && detail == Detail::Full && f.turns > 0 {
+            v.push(Row::Timeline(f.turns.min(MAX_TURNS_SHOWN)));
+        }
+    }
+    v
+}
+
+/// Turns listed in a card's timeline.
+pub const MAX_TURNS_SHOWN: usize = 4;
+
+/// Line pitch of text rows.
+pub fn line_pitch(tk: &Tokens) -> usize {
+    tk.ch + tk.sp.xs
+}
+
+/// Height of the small action buttons (Interrupt / Reply / ...).
+pub fn action_h(tk: &Tokens) -> usize {
+    tk.ch + tk.sp.md
+}
+
+pub fn row_h(r: Row, tk: &Tokens) -> usize {
+    let lp = line_pitch(tk);
+    match r {
+        Row::Header => tk.ch + tk.sp.sm,
+        Row::Place => lp,
+        Row::Status => tk.ch + tk.sp.xs,
+        Row::Metrics(n) => n * lp,
+        Row::Chips { hint } => tk.ch + tk.sp.xs + if hint { lp } else { 0 },
+        Row::Prompt(n) => n * lp + 2 * tk.sp.sm,
+        Row::Buttons => action_h(tk) + tk.sp.xs,
+        Row::Raw(n) => n * lp,
+        Row::Confirm => action_h(tk) + tk.sp.xs,
+        Row::Composer => tk.input_h,
+        Row::Actions => action_h(tk),
+        Row::Timeline(n) => (n + 1) * lp,
+    }
+}
+
+/// Inner padding of a card.
+pub fn card_pad(tk: &Tokens) -> usize {
+    tk.sp.sm
+}
+
+pub fn rows_gap(tk: &Tokens) -> usize {
+    tk.sp.xs
+}
+
+pub fn card_height(rows: &[Row], tk: &Tokens) -> usize {
+    let body: usize = rows.iter().map(|r| row_h(*r, tk)).sum();
+    body + rows.len().saturating_sub(1) * rows_gap(tk) + 2 * card_pad(tk)
+}
+
+/// Pick the richest detail level whose card height fits `max_h`.
+pub fn fit_detail(f: &CardFlags, want: Detail, max_h: usize, tk: &Tokens) -> (Detail, usize) {
+    let order = [Detail::Full, Detail::Compact, Detail::Min];
+    let start = order.iter().position(|d| *d == want).unwrap_or(0);
+    for d in &order[start..] {
+        let h = card_height(&rows(f, *d), tk);
+        if h <= max_h || *d == Detail::Min {
+            return (*d, h);
+        }
+    }
+    unreachable!()
+}
+
+/// A card with the detail level and rows it will be drawn with.
+#[derive(Clone, Copy, Debug)]
+pub struct Fitted {
+    pub detail: Detail,
+    pub flags: CardFlags,
+    pub height: usize,
+}
+
+/// Decide how much of every card to show so that, when possible, all cards fit
+/// the list at once. Optional content goes first: the turn timeline, then the
+/// other cards' extras (they turn compact), then the selected card's own.
+/// With too many agents for any of that, cards keep their wanted detail and
+/// the list scrolls.
+pub fn fit_cards(flags: &[CardFlags], selected: Option<usize>, want: Detail, list_h: usize, gap: usize, tk: &Tokens) -> Vec<Fitted> {
+    let build = |sel_detail: Detail, other: Detail, timeline: bool| -> Vec<Fitted> {
+        flags
+            .iter()
+            .enumerate()
+            .map(|(i, f)| {
+                let detail = if Some(i) == selected { sel_detail } else { other };
+                let mut f = *f;
+                if !timeline {
+                    f.turns = 0;
+                }
+                Fitted { detail, flags: f, height: card_height(&rows(&f, detail), tk) }
+            })
+            .collect()
+    };
+    let total = |v: &[Fitted]| v.iter().map(|f| f.height).sum::<usize>() + gap * v.len().saturating_sub(1);
+    let compact = if want == Detail::Min { Detail::Min } else { Detail::Compact };
+    let attempts = [(want, want, true), (want, want, false), (want, compact, false), (compact, compact, false)];
+    for (sel, other, timeline) in attempts {
+        let v = build(sel, other, timeline);
+        if total(&v) <= list_h {
+            return v;
+        }
+    }
+    // Scrolling regime: wanted detail, and a card taller than the list is downgraded.
+    build(want, want, true)
+        .into_iter()
+        .map(|f| {
+            let (detail, height) = fit_detail(&f.flags, f.detail, list_h, tk);
+            Fitted { detail, flags: f.flags, height }
+        })
+        .collect()
+}
+
+/// Greedy line breaking for metric items (`cols` characters per line, items
+/// separated by `sep` columns). Items longer than a line get a line of their own.
+pub fn flow(widths: &[usize], cols: usize, sep: usize) -> Vec<Vec<usize>> {
+    let mut lines: Vec<Vec<usize>> = Vec::new();
+    let mut used = 0;
+    for (i, w) in widths.iter().enumerate() {
+        match lines.last_mut() {
+            Some(line) if used + sep + w <= cols => {
+                line.push(i);
+                used += sep + w;
+            }
+            _ => {
+                lines.push(vec![i]);
+                used = *w;
+            }
+        }
+    }
+    lines
+}
+
+/// Wrap `text` to `cols` columns on spaces (long words are cut).
+pub fn wrap(text: &str, cols: usize) -> Vec<String> {
+    let cols = cols.max(1);
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for word in text.split_whitespace() {
+        let mut word = word.to_string();
+        while word.chars().count() > cols {
+            if !cur.is_empty() {
+                out.push(std::mem::take(&mut cur));
+            }
+            out.push(word.chars().take(cols).collect());
+            word = word.chars().skip(cols).collect();
+        }
+        if cur.is_empty() {
+            cur = word;
+        } else if cur.chars().count() + 1 + word.chars().count() <= cols {
+            cur.push(' ');
+            cur.push_str(&word);
+        } else {
+            out.push(std::mem::replace(&mut cur, word));
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
 }
 
 // ───────────────────────────── presentation helpers ─────────────────────────────
@@ -205,6 +539,18 @@ pub fn format_elapsed(d: Duration) -> String {
         format!("{}m", s / 60)
     } else {
         format!("{}h{:02}m", s / 3600, (s % 3600) / 60)
+    }
+}
+
+/// Precise duration for turn rows: 42s, 2m 41s, 1h 02m.
+pub fn format_turn(d: Duration) -> String {
+    let s = d.as_secs();
+    if s < 60 {
+        format!("{s}s")
+    } else if s < 3600 {
+        format!("{}m {:02}s", s / 60, s % 60)
+    } else {
+        format!("{}h {:02}m", s / 3600, (s % 3600) / 60)
     }
 }
 
@@ -238,6 +584,17 @@ pub fn state_tone(st: AgentState) -> Tone {
     }
 }
 
+/// Directory name of the work tree an agent runs in, when it is a linked
+/// worktree (differs from the repository's name).
+pub fn worktree_dir(s: &AgentSession) -> Option<String> {
+    let root = s.git_root.as_deref()?;
+    let dir = std::path::Path::new(root).file_name()?.to_string_lossy().into_owned();
+    match &s.repo {
+        Some(repo) if *repo == dir => None,
+        _ => Some(dir),
+    }
+}
+
 /// Agents per tab: (live count, any waiting). Index = tab index.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TabBadge {
@@ -261,204 +618,10 @@ pub fn pulse(t: f32, period: f32) -> f32 {
     0.5 + 0.5 * (t * std::f32::consts::TAU / period.max(0.1)).sin()
 }
 
-// ───────────────────────────── drawing ─────────────────────────────
-
-fn draw_check(cx: &mut Ctx, x: usize, y: usize, s: usize, c: Rgb) {
-    // Two strokes: short down-right, long up-right.
-    let t = (s / 8).max(1);
-    let mid = (x + s * 2 / 5, y + s * 4 / 5);
-    for k in 0..=s * 2 / 5 {
-        let (px, py) = (x + k, y + s / 2 + k * 3 / 4);
-        cx.fill(Rect::new(px, py, t + 1, t + 1), c);
-    }
-    for k in 0..=s * 3 / 5 {
-        let (px, py) = (mid.0 + k, mid.1.saturating_sub(k * 4 / 3));
-        cx.fill(Rect::new(px, py, t + 1, t + 1), c);
-    }
-}
-
-fn draw_cross(cx: &mut Ctx, x: usize, y: usize, s: usize, c: Rgb) {
-    let t = (s / 8).max(1);
-    for k in 0..s {
-        cx.fill(Rect::new(x + k, y + k, t + 1, t + 1), c);
-        cx.fill(Rect::new(x + s - 1 - k, y + k, t + 1, t + 1), c);
-    }
-}
+// ───────────────────────────── tab badges & pane borders ─────────────────────────────
 
 fn dot(cx: &mut Ctx, x: usize, y: usize, d: usize, c: Rgb, alpha: u8) {
     cx.fill_rrect_ex(Rect::new(x, y, d, d), d / 2, c, alpha, crate::ui::kit::draw::ALL);
-}
-
-/// Pill with an animated look: returns its width.
-fn pill(cx: &mut Ctx, x: usize, y: usize, h: usize, s: &AgentSession, t: f32) -> usize {
-    let tk = cx.tk;
-    let tone = state_tone(s.state);
-    let fg = tk.tone(tone);
-    let label = state_label(s.state);
-    let glyph_w = match s.state {
-        AgentState::Done { .. } | AgentState::Error => tk.ch * 7 / 10 + tk.sp.xs,
-        _ => 0,
-    };
-    let w = cx.tw(label) + glyph_w + 2 * tk.sp.sm;
-    let r = Rect::new(x, y, w, h);
-    let fill_alpha = match s.state {
-        AgentState::Working => 40 + (pulse(t, 1.2) * 60.0) as u8,
-        AgentState::WaitingForUser => 60 + (pulse(t, 0.9) * 130.0) as u8,
-        _ => 46,
-    };
-    cx.fill_rrect_ex(r, h / 2, fg, fill_alpha, crate::ui::kit::draw::ALL);
-    let ty = cx.text_y(y, h);
-    let mut tx = x + tk.sp.sm;
-    match s.state {
-        AgentState::Done { .. } => {
-            let sz = tk.ch * 7 / 10;
-            draw_check(cx, tx, y + (h.saturating_sub(sz)) / 2, sz, fg);
-            tx += glyph_w;
-        }
-        AgentState::Error => {
-            let sz = tk.ch * 7 / 10;
-            draw_cross(cx, tx, y + (h.saturating_sub(sz)) / 2, sz, fg);
-            tx += glyph_w;
-        }
-        _ => {}
-    }
-    cx.text(tx, ty, label, fg);
-    w
-}
-
-fn kind_chip(cx: &mut Ctx, x: usize, y: usize, size: usize, kind: AgentKind) {
-    let c = kind.color();
-    cx.fill_rrect(Rect::new(x, y, size, size), cx.tk.radius_sm, c);
-    // Dark or light glyph, whichever reads better on the brand colour.
-    let ink = if crate::ui::kit::luminance(c) > 0.35 { (20, 20, 24) } else { (250, 250, 252) };
-    let gx = x + size.saturating_sub(cx.tk.cw) / 2;
-    let gy = y + size.saturating_sub(cx.tk.ch) / 2;
-    cx.text(gx, gy, &kind.glyph().to_string(), ink);
-}
-
-fn card(cx: &mut Ctx, r: Rect, s: &AgentSession, selected: bool, hover: bool, focused: bool, now: Instant, t: f32) {
-    let tk = cx.tk;
-    let fg = tk.tone(state_tone(s.state));
-    let bg = if selected { tk.selection } else if hover { tk.surface_alt } else { tk.surface };
-    cx.fill_rrect(r, tk.radius_sm, bg);
-    if s.state == AgentState::WaitingForUser {
-        // Breathing amber edge: this is the card that needs a human.
-        let a = 90 + (pulse(t, 0.9) * 150.0) as u32;
-        cx.stroke_rrect(r, tk.radius_sm, tk.scale.max(1), mix(bg, tk.warning, a as f32 / 255.0));
-    } else if selected && focused {
-        cx.stroke_rrect(r, tk.radius_sm, tk.scale.max(1), tk.accent);
-    }
-    // State stripe.
-    let stripe = Rect::new(r.x + tk.scale, r.y + tk.sp.xs, 3 * tk.scale, r.h.saturating_sub(2 * tk.sp.xs));
-    cx.fill_rrect(stripe, tk.scale + 1, fg);
-
-    let pad = tk.sp.md;
-    let left = r.x + pad + 3 * tk.scale;
-    let right = r.right().saturating_sub(tk.sp.sm);
-    let line_h = tk.ch + tk.sp.sm;
-    let y0 = r.y + tk.sp.xs;
-
-    // Line 1: icon, name, elapsed.
-    let chip = tk.ch + tk.sp.xs;
-    kind_chip(cx, left, y0, chip, s.kind);
-    let el = format_elapsed(elapsed_for(s, now));
-    let el_w = cx.tw(&el);
-    cx.text(right.saturating_sub(el_w), y0 + (chip - tk.ch) / 2, &el, tk.text_muted);
-    let name_x = left + chip + tk.sp.sm;
-    cx.text_fit(name_x, y0 + (chip - tk.ch) / 2, right.saturating_sub(name_x + el_w + tk.sp.sm), &s.title, tk.text);
-
-    // Line 2: repo/branch (or directory) and tab number.
-    let y1 = y0 + line_h + tk.sp.xs;
-    let place = s.place();
-    let tab = format!("tab {}", s.tab_index + 1);
-    let tab_w = cx.tw(&tab);
-    cx.text(right.saturating_sub(tab_w), y1, &tab, tk.text_faint);
-    cx.text_fit(left, y1, right.saturating_sub(left + tab_w + tk.sp.sm), &place, tk.text_muted);
-
-    // Line 3: state pill + output preview.
-    let y2 = y1 + line_h;
-    let ph = tk.ch + tk.sp.xs;
-    let pw = pill(cx, left, y2, ph, s, t);
-    let px = left + pw + tk.sp.sm;
-    let preview = match (&s.state, &s.waiting_reason) {
-        (AgentState::WaitingForUser, Some(r)) => r.clone(),
-        _ => s.preview.clone(),
-    };
-    cx.text_fit(px, y2 + (ph - tk.ch) / 2, right.saturating_sub(px), &preview, tk.text_faint);
-}
-
-/// Draw the dock into `buf`. `dock` is its rectangle (from `Layout` inputs).
-pub fn draw_dock(
-    buf: &mut [u32],
-    w: usize,
-    h: usize,
-    font: &mut FontManager,
-    theme: &Theme,
-    dock: Rect,
-    reg: &AgentRegistry,
-    ui: &mut AgentsUi,
-    now: Instant,
-    t: f32,
-) {
-    let (cw, ch) = (font.cell_width, font.cell_height);
-    let tk = Tokens::new(theme, cw, ch);
-    let mut cx = Ctx::new(buf, w, h, font, &tk);
-    let tk = cx.tk;
-    // Panel + right edge.
-    cx.fill(dock, mix(tk.bg, tk.surface, 0.6));
-    cx.vline(dock.right().saturating_sub(1), dock.y, dock.h, tk.border);
-
-    let l = layout(dock, tk);
-    let sessions = reg.sessions();
-    let uids: Vec<usize> = sessions.iter().map(|s| s.pane_uid).collect();
-    let sel = ui.selected_index(&uids);
-    ui.scroll = ui.scroll.min(l.max_scroll(sessions.len()));
-
-    // Header: title + counts.
-    let hx = dock.x + tk.sp.md;
-    let title_y = cx.text_y(l.header.y, l.header.h);
-    cx.text(hx, title_y, "AGENTS", tk.accent);
-    let attention = reg.attention_count();
-    let live = reg.live_count();
-    let mut rx = dock.right().saturating_sub(tk.sp.md + 1);
-    if attention > 0 {
-        let label = format!("{attention} needs you");
-        let bw = cx.badge_w(&label);
-        cx.badge(rx.saturating_sub(bw), l.header.y, &label, Tone::Warning, l.header.h);
-        rx = rx.saturating_sub(bw + tk.sp.sm);
-    }
-    if live > 0 && rx > hx + 12 * tk.cw {
-        let label = format!("{live} live");
-        let bw = cx.badge_w(&label);
-        if rx.saturating_sub(bw) > hx + 8 * tk.cw {
-            cx.badge(rx.saturating_sub(bw), l.header.y, &label, Tone::Neutral, l.header.h);
-        }
-    }
-    cx.hline(dock.x, l.header.bottom().saturating_sub(1), dock.w.saturating_sub(1), tk.border);
-
-    // Cards (clipped to the list by skipping those fully outside).
-    if sessions.is_empty() {
-        cx.empty_state(l.list, "No agents running", "Run claude, codex, gemini ... in any pane");
-    } else {
-        let pad_x = tk.sp.sm;
-        for (i, s) in sessions.iter().enumerate() {
-            let Some(mut r) = l.card(i, ui.scroll) else { continue };
-            r.x += pad_x;
-            r.w = r.w.saturating_sub(2 * pad_x + 1);
-            card(&mut cx, r, s, Some(i) == sel, ui.hover == Some(i), ui.focused, now, t);
-        }
-        cx.scrollbar(l.list, sessions.len(), l.visible(), ui.scroll);
-    }
-
-    // Footer hints.
-    cx.hline(dock.x, l.footer.y, dock.w.saturating_sub(1), tk.border);
-    cx.hint_row(
-        dock.x + tk.sp.md,
-        l.footer.y,
-        dock.w.saturating_sub(2 * tk.sp.md),
-        l.footer.h,
-        &[("Enter", "jump"), ("n", "next"), ("Esc", "back")],
-    );
 }
 
 /// Badges on the tab bar: an accent dot + count, amber and pulsing when any
@@ -519,8 +682,21 @@ fn theme_amber(theme: &Theme) -> Rgb {
     tk.warning
 }
 
+/// Selection / hover fill helper shared with the dock drawing.
+pub fn card_bg(tk: &Tokens, selected: bool, hover: bool) -> Rgb {
+    if selected {
+        tk.selection
+    } else if hover {
+        tk.surface_alt
+    } else {
+        mix(tk.surface, tk.surface_alt, 0.35)
+    }
+}
+
+// ───────────────────────────── tests ─────────────────────────────
+
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::agents::registry::PaneObs;
 
@@ -535,6 +711,9 @@ mod tests {
         assert_eq!(format_elapsed(Duration::from_secs(60)), "1m");
         assert_eq!(format_elapsed(Duration::from_secs(3599)), "59m");
         assert_eq!(format_elapsed(Duration::from_secs(3720)), "1h02m");
+        assert_eq!(format_turn(Duration::from_secs(161)), "2m 41s");
+        assert_eq!(format_turn(Duration::from_secs(7)), "7s");
+        assert_eq!(format_turn(Duration::from_secs(3720)), "1h 02m");
     }
 
     #[test]
@@ -546,45 +725,24 @@ mod tests {
     }
 
     #[test]
-    fn navigation_wraps_and_jumps() {
-        let uids = [10, 20, 30];
-        let mut ui = AgentsUi::new();
-        assert_eq!(ui.selected_index(&uids), Some(0));
-        assert_eq!(ui.on_key(DockKey::Down, &uids), UiAction::None);
-        assert_eq!(ui.selected, Some(20));
-        ui.on_key(DockKey::Char('j'), &uids);
-        assert_eq!(ui.selected, Some(30));
-        ui.on_key(DockKey::Down, &uids);
-        assert_eq!(ui.selected, Some(10), "wraps");
-        ui.on_key(DockKey::Up, &uids);
-        assert_eq!(ui.selected, Some(30), "wraps backwards");
-        assert_eq!(ui.on_key(DockKey::Enter, &uids), UiAction::Jump(30));
-        ui.on_key(DockKey::Home, &uids);
-        assert_eq!(ui.selected, Some(10));
-        ui.on_key(DockKey::End, &uids);
-        assert_eq!(ui.selected, Some(30));
-        assert_eq!(ui.on_key(DockKey::Char('2'), &uids), UiAction::Jump(20));
-        assert_eq!(ui.on_key(DockKey::Char('9'), &uids), UiAction::None);
-        assert_eq!(ui.on_key(DockKey::Char('n'), &uids), UiAction::NextAttention);
-        assert_eq!(ui.on_key(DockKey::Escape, &uids), UiAction::Blur);
-        assert_eq!(ui.on_key(DockKey::Char('x'), &uids), UiAction::PassThrough);
-        assert_eq!(ui.on_key(DockKey::Chord, &uids), UiAction::PassThrough);
+    fn preferred_width_is_clamped_and_never_starves_the_terminal() {
+        assert_eq!(dock_width_pref(2000, 10, 0), 340, "0 = default");
+        assert_eq!(dock_width_pref(2000, 10, 50), 500);
+        assert_eq!(dock_width_pref(2000, 10, 10), 280, "min width");
+        assert_eq!(dock_width_pref(2000, 10, 500), 800, "max width");
+        assert_eq!(dock_width_pref(1000, 10, 60), 440, "56 columns stay for the terminal");
+        assert_eq!(dock_width_pref(700, 10, 60), 0);
+        assert_eq!(dock_rect_pref(2000, 1000, 40, 0, 10, 50).unwrap(), Rect::new(0, 40, 500, 960));
+        assert_eq!(dock_rect(2000, 1000, 40, 60, 10).unwrap(), Rect::new(0, 40, 340, 900));
     }
 
     #[test]
-    fn navigation_with_no_sessions_is_safe() {
-        let mut ui = AgentsUi::new();
-        for k in [DockKey::Up, DockKey::Down, DockKey::Home, DockKey::End, DockKey::Enter] {
-            assert_eq!(ui.on_key(k, &[]), UiAction::None);
-        }
-        assert_eq!(ui.selected_index(&[]), None);
-    }
-
-    #[test]
-    fn stale_selection_falls_back_to_the_first() {
-        let mut ui = AgentsUi::new();
-        ui.selected = Some(99);
-        assert_eq!(ui.selected_index(&[1, 2]), Some(0));
+    fn edge_drag_maps_pointer_to_columns() {
+        assert_eq!(cols_for_drag(450, 0, 10), 45);
+        assert_eq!(cols_for_drag(50, 0, 10), MIN_COLS);
+        assert_eq!(cols_for_drag(5000, 0, 10), MAX_COLS);
+        let z = edge_zone(Rect::new(0, 40, 340, 500));
+        assert!(z.contains(339, 100) && z.contains(343, 100) && !z.contains(330, 100));
     }
 
     #[test]
@@ -592,42 +750,160 @@ mod tests {
         let mut ui = AgentsUi::new();
         ui.toggle();
         assert!(ui.visible && ui.focused);
+        ui.resizing = true;
         ui.toggle();
-        assert!(!ui.visible && !ui.focused);
+        assert!(!ui.visible && !ui.focused && !ui.resizing);
     }
 
     #[test]
-    fn layout_hit_testing_and_scrolling() {
+    fn stale_selection_falls_back_to_the_first() {
+        let mut ui = AgentsUi::new();
+        ui.selected = Some(99);
+        assert_eq!(ui.selected_index(&[1, 2]), Some(0));
+        assert_eq!(ui.selected_uid(&[7, 2]), Some(7));
+        assert_eq!(ui.selected_index(&[]), None);
+    }
+
+    #[test]
+    fn hits_resolve_topmost_first() {
+        let mut ui = AgentsUi::new();
+        ui.hits.push((Rect::new(0, 0, 100, 100), Hit::Card(1)));
+        ui.hits.push((Rect::new(10, 10, 20, 20), Hit::Reply(1)));
+        assert_eq!(ui.hit_at(15, 15), Some(Hit::Reply(1)));
+        assert_eq!(ui.hit_at(60, 60), Some(Hit::Card(1)));
+        assert_eq!(ui.hit_at(200, 200), None);
+    }
+
+    fn flags() -> CardFlags {
+        CardFlags { metrics_lines: 2, ..Default::default() }
+    }
+
+    #[test]
+    fn rows_grow_with_content_and_never_lose_the_header() {
         let tk = tk();
-        let dock = Rect::new(0, 40, 340, 500);
-        let l = layout(dock, &tk);
-        assert!(l.list.h > 0 && l.list.y > dock.y);
-        assert_eq!(l.list.bottom() + l.footer.h, dock.bottom());
-        let vis = l.visible();
-        assert!(vis >= 2, "a 500px dock shows several cards");
-        let n = vis + 5;
-        // First card is hit in its middle, not in the gap below it.
-        let c0 = l.card(0, 0).unwrap();
-        assert_eq!(l.hit(n, 0, 20, c0.y + c0.h / 2), Some(0));
-        assert_eq!(l.hit(n, 0, 20, c0.bottom() + l.gap / 2), None);
-        let c1 = l.card(1, 0).unwrap();
-        assert_eq!(l.hit(n, 0, 20, c1.y + 1), Some(1));
-        // Outside the list.
-        assert_eq!(l.hit(n, 0, 20, l.header.y), None);
-        assert_eq!(l.hit(n, 0, 400, c0.y + 1), None);
-        // Beyond the last card.
-        assert_eq!(l.hit(1, 0, 20, c1.y + 1), None);
-        // Scrolling moves which card sits at the top.
-        assert_eq!(l.hit(n, 2, 20, c0.y + 2), Some(2));
-        assert!(l.card(0, 2).is_none(), "scrolled out of view");
-        assert!(l.card(vis + 1, 2).is_some());
-        assert!(l.card(vis + 2, 2).is_none(), "below the fold");
-        assert_eq!(l.max_scroll(n), 5);
-        assert_eq!(l.max_scroll(1), 0);
-        // scroll_to keeps the selection visible.
-        assert_eq!(l.scroll_to(n - 1, 0), n - vis);
-        assert_eq!(l.scroll_to(0, 3), 0);
-        assert_eq!(l.scroll_to(1, 0), 0, "already visible");
+        let base = rows(&flags(), Detail::Full);
+        assert_eq!(base, vec![Row::Header, Row::Place, Row::Status, Row::Metrics(2)]);
+        let compact = rows(&flags(), Detail::Compact);
+        assert_eq!(compact, vec![Row::Header, Row::Status, Row::Metrics(1)], "metrics survive compaction, on one line");
+        assert!(card_height(&compact, &tk) < card_height(&base, &tk));
+
+        let waiting = CardFlags { waiting: true, prompt_lines: 6, prompt_lines_compact: 4, selected: true, collision: true, turns: 6, ..flags() };
+        let full = rows(&waiting, Detail::Full);
+        assert_eq!(
+            full,
+            vec![Row::Header, Row::Place, Row::Status, Row::Metrics(2), Row::Chips { hint: false }, Row::Prompt(6), Row::Buttons, Row::Actions, Row::Timeline(MAX_TURNS_SHOWN)]
+        );
+        // A collision card that is not waiting carries the worktree tip.
+        let idle = CardFlags { collision: true, ..flags() };
+        assert!(rows(&idle, Detail::Full).contains(&Row::Chips { hint: true }));
+        // Compact keeps a trimmed prompt (it must stay answerable) but drops the timeline.
+        let c = rows(&waiting, Detail::Compact);
+        assert!(c.contains(&Row::Prompt(4)) && c.contains(&Row::Buttons) && !c.iter().any(|r| matches!(r, Row::Timeline(_))));
+        // Min is just header + status.
+        assert_eq!(rows(&waiting, Detail::Min), vec![Row::Header, Row::Status]);
+        // Composer replaces the action row; confirm sits above it.
+        let comp = CardFlags { selected: true, composer: true, confirm: true, ..flags() };
+        let r = rows(&comp, Detail::Compact);
+        assert_eq!(r, vec![Row::Header, Row::Status, Row::Metrics(1), Row::Confirm, Row::Composer]);
+    }
+
+    #[test]
+    fn heights_are_the_sum_of_rows_plus_gaps_and_padding() {
+        let tk = tk();
+        let r = vec![Row::Header, Row::Status];
+        let want = row_h(Row::Header, &tk) + row_h(Row::Status, &tk) + rows_gap(&tk) + 2 * card_pad(&tk);
+        assert_eq!(card_height(&r, &tk), want);
+        assert_eq!(card_height(&[], &tk), 2 * card_pad(&tk));
+    }
+
+    #[test]
+    fn fit_detail_downgrades_instead_of_overflowing() {
+        let tk = tk();
+        let f = CardFlags { waiting: true, prompt_lines: 5, prompt_lines_compact: 3, selected: true, turns: 4, collision: true, ..flags() };
+        let (d, h) = fit_detail(&f, Detail::Full, 10_000, &tk);
+        assert_eq!(d, Detail::Full);
+        let (d2, h2) = fit_detail(&f, Detail::Full, h - 1, &tk);
+        assert_eq!(d2, Detail::Compact);
+        assert!(h2 < h);
+        let (d3, h3) = fit_detail(&f, Detail::Full, 10, &tk);
+        assert_eq!(d3, Detail::Min, "never below Min, even if it still does not fit");
+        assert!(h3 > 10);
+        assert_eq!(fit_detail(&f, Detail::Compact, 10_000, &tk).0, Detail::Compact);
+    }
+
+    #[test]
+    fn fit_cards_drops_optional_content_before_hiding_agents() {
+        let tk = tk();
+        let sel = CardFlags { selected: true, waiting: true, prompt_lines: 6, prompt_lines_compact: 4, turns: 5, collision: true, metrics_lines: 2, ..Default::default() };
+        let other = CardFlags { metrics_lines: 2, ..Default::default() };
+        let flags = [sel, other, other];
+        let full = fit_cards(&flags, Some(0), Detail::Full, 100_000, 8, &tk);
+        assert!(full.iter().all(|f| f.detail == Detail::Full));
+        assert_eq!(full[0].flags.turns, 5, "plenty of room: the timeline stays");
+        let total = |v: &[Fitted]| v.iter().map(|f| f.height).sum::<usize>() + 8 * (v.len() - 1);
+
+        // Slightly too tall: the timeline goes first.
+        let tight = fit_cards(&flags, Some(0), Detail::Full, total(&full) - 1, 8, &tk);
+        assert_eq!(tight[0].flags.turns, 0);
+        assert!(tight.iter().all(|f| f.detail == Detail::Full));
+        assert!(total(&tight) <= total(&full) - 1);
+
+        // Tighter: the other cards turn compact, the selected one keeps its prompt.
+        let tighter = fit_cards(&flags, Some(0), Detail::Full, total(&tight) - 1, 8, &tk);
+        assert_eq!(tighter[0].detail, Detail::Full);
+        assert_eq!((tighter[1].detail, tighter[2].detail), (Detail::Compact, Detail::Compact));
+        assert!(rows(&tighter[0].flags, tighter[0].detail).contains(&Row::Buttons));
+
+        // Tighter still: everything compact, prompt still answerable.
+        let all_c = fit_cards(&flags, Some(0), Detail::Full, total(&tighter) - 1, 8, &tk);
+        assert!(all_c.iter().all(|f| f.detail == Detail::Compact));
+        assert!(rows(&all_c[0].flags, Detail::Compact).contains(&Row::Buttons));
+
+        // Far too many agents: keep the wanted detail and scroll; a lone tall card is downgraded.
+        let many = vec![other; 20];
+        let s = fit_cards(&many, Some(0), Detail::Full, 300, 8, &tk);
+        assert!(s.iter().all(|f| f.detail == Detail::Full));
+        let big = fit_cards(&[sel], Some(0), Detail::Full, 60, 8, &tk);
+        assert_eq!(big[0].detail, Detail::Min);
+        assert!(fit_cards(&[], None, Detail::Full, 100, 8, &tk).is_empty());
+    }
+
+    #[test]
+    fn plan_scroll_and_follow() {
+        let list = Rect::new(0, 100, 300, 300);
+        let heights = [100, 100, 100, 100, 100];
+        let p = plan(list, 10, &heights, 0);
+        assert_eq!(p.iter().map(|(i, _)| *i).collect::<Vec<_>>(), vec![0, 1], "100+10+100 fits, a third does not");
+        assert_eq!(p[1].1.y, 210);
+        assert_eq!(plan(list, 10, &heights, 3).len(), 2);
+        // A card taller than the list is still returned (and downgraded by the caller).
+        assert_eq!(plan(Rect::new(0, 0, 10, 50), 5, &[500], 0).len(), 1);
+        assert_eq!(max_scroll(300, 10, &heights), 3);
+        assert_eq!(max_scroll(300, 10, &[100]), 0);
+        assert_eq!(max_scroll(300, 10, &[]), 0);
+        // Following the selection moves the window only as far as needed.
+        assert_eq!(scroll_to(list, 10, &heights, 1, 0), 0);
+        assert_eq!(scroll_to(list, 10, &heights, 2, 0), 1);
+        assert_eq!(scroll_to(list, 10, &heights, 4, 0), 3);
+        assert_eq!(scroll_to(list, 10, &heights, 0, 3), 0);
+        // Variable heights.
+        let mixed = [250, 60, 60, 60];
+        assert_eq!(scroll_to(list, 10, &mixed, 3, 0), 1, "250 + 60 + 60 overflow with gaps; cards 1..3 fit");
+    }
+
+    #[test]
+    fn flow_breaks_lines_greedily() {
+        assert_eq!(flow(&[8, 9, 6], 30, 3), vec![vec![0, 1, 2]]);
+        assert_eq!(flow(&[8, 9, 12], 30, 3), vec![vec![0, 1], vec![2]]);
+        assert_eq!(flow(&[40], 30, 3), vec![vec![0]], "overlong item keeps its own line");
+        assert!(flow(&[], 30, 3).is_empty());
+    }
+
+    #[test]
+    fn wrap_breaks_on_spaces_and_cuts_long_words() {
+        assert_eq!(wrap("add the file to the chat please", 12), vec!["add the file", "to the chat", "please"]);
+        assert_eq!(wrap("abcdefghij", 4), vec!["abcd", "efgh", "ij"]);
+        assert!(wrap("   ", 10).is_empty());
     }
 
     #[test]
@@ -640,7 +916,7 @@ mod tests {
         assert_eq!(state_label(AgentState::Done { exit: None }), "done");
     }
 
-    fn registry_with(states: &[(usize, usize, &str)]) -> AgentRegistry {
+    pub(crate) fn registry_with(states: &[(usize, usize, &str)]) -> AgentRegistry {
         // (pane uid, tab index, "wait" | "work")
         let t0 = Instant::now();
         let mut r = AgentRegistry::new();
@@ -668,6 +944,24 @@ mod tests {
     }
 
     #[test]
+    fn dock_env_reports_answerable_only_for_waiting_agents_with_a_prompt() {
+        use crate::agents::prompt;
+        let r = registry_with(&[(1, 0, "work"), (2, 0, "wait")]);
+        let mut info = InfoMap::new();
+        let screen: Vec<String> = prompt::fixtures::CLAUDE_BASH.lines().map(str::to_string).collect();
+        let p = prompt::parse(None, &screen).unwrap();
+        for uid in [1, 2] {
+            info.insert(uid, PaneInfo { prompt: Some(p.clone()), ..Default::default() });
+        }
+        let env = DockEnv::new(&r, &info, Instant::now());
+        assert!(!env.answerable(1), "working agent: a stale prompt is not answerable");
+        assert!(env.answerable(2));
+        assert_eq!(env.option_for_digit(2, 2), Some(1));
+        assert!(env.grants(2, 1) && !env.grants(2, 2));
+        assert!(env.busy(1) && env.live(2) && !env.live(99));
+    }
+
+    #[test]
     fn pulse_is_bounded() {
         for i in 0..100 {
             let p = pulse(i as f32 * 0.07, 0.9);
@@ -676,24 +970,16 @@ mod tests {
     }
 
     #[test]
-    fn dock_tab_badges_and_borders_render_in_every_theme() {
-        use crate::ui::kit::gallery::qa::each_theme;
-        let r = registry_with(&[(1, 0, "work"), (2, 0, "wait"), (3, 1, "work"), (4, 1, "wait")]);
-        let mut ui = AgentsUi::new();
-        ui.visible = true;
-        ui.selected = Some(2);
-        let now = Instant::now() + Duration::from_secs(125);
-        each_theme("agents-dock", |b, w, h, f, t| {
-            let dock = Rect::new(0, 40, dock_width(w, f.cell_width), h - 40);
-            draw_dock(b, w, h, f, t, dock, &r, &mut ui, now, 0.3);
-            draw_tab_badges(b, w, h, f, t, 40, &r, 3, 0.3);
-            draw_attention_borders(b, w, h, &[Rect::new(dock.right() + 4, 44, 400, 300)], t, 2, 0.3);
-        });
-        let empty = AgentRegistry::new();
-        each_theme("agents-dock-empty", |b, w, h, f, t| {
-            let dock = Rect::new(0, 40, dock_width(w, f.cell_width), h - 40);
-            draw_dock(b, w, h, f, t, dock, &empty, &mut ui, now, 0.0);
-        });
+    fn worktree_dir_only_for_linked_worktrees() {
+        let r = registry_with(&[(1, 0, "work")]);
+        let mut s = r.sessions()[0].clone();
+        s.repo = Some("aurora".into());
+        s.git_root = Some("/Users/maya/dev/aurora".into());
+        assert_eq!(worktree_dir(&s), None);
+        s.git_root = Some("/Users/maya/dev/aurora-claude-1".into());
+        assert_eq!(worktree_dir(&s).as_deref(), Some("aurora-claude-1"));
+        s.git_root = None;
+        assert_eq!(worktree_dir(&s), None);
     }
 
     #[test]
