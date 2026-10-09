@@ -47,6 +47,8 @@ pub struct Runtime {
     installed: Option<(Instant, Vec<AgentKind>)>,
     /// Control-console bookkeeping (command risk checks, launch commands).
     pub console: console::Console,
+    /// Autopilot policy files, trust and audit log.
+    pub auto_host: super::autopilot::Host,
 }
 
 impl Runtime {
@@ -218,6 +220,10 @@ pub fn poll(app: &mut App, wake_at: &mut Instant) {
     notify_events(app, now);
     update_badge(app);
     console::refresh(app, now);
+    super::autopilot::tick(app, now);
+    if let Some(d) = app.agents_ui.auto.next_deadline() {
+        *wake_at = (*wake_at).min(d);
+    }
     if app.agents_rt.console.checking() {
         *wake_at = (*wake_at).min(now + Duration::from_millis(60));
     }
@@ -239,7 +245,7 @@ pub fn poll(app: &mut App, wake_at: &mut Instant) {
 /// Does the agent UI need frames (pulsing pills, badges)?
 pub fn animating(app: &App) -> bool {
     app.agents.enabled()
-        && ((app.agents_ui.visible && app.agents.animating()) || app.agents.attention_count() > 0)
+        && ((app.agents_ui.visible && app.agents.animating()) || app.agents.attention_count() > 0 || (app.agents_ui.visible && app.agents_ui.auto.any_pending()))
 }
 
 fn notify_events(app: &mut App, now: Instant) {
@@ -483,6 +489,15 @@ fn dir_label(dir: &Path) -> String {
         Some(i) => i.branch.unwrap_or(i.name),
         None => dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "~".into()),
     }
+}
+
+/// A new tab titled `title` in `dir` that runs `cmd` once its shell is up
+/// (used to open the policy file in `$EDITOR`).
+pub fn open_command_tab(app: &mut App, dir: &Path, title: &str, cmd: String) -> usize {
+    let (c, r) = pane_dims(app);
+    let uid = app.wm.new_tab_in(c, r, dir.to_str(), Some(title));
+    queue_cmd(app, uid, cmd);
+    uid
 }
 
 fn pane_dims(app: &App) -> (usize, usize) {

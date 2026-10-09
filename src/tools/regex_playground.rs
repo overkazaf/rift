@@ -810,6 +810,16 @@ fn compile_pattern(pattern: &str) -> Result<Program, String> {
     Ok(compile(&ast, p.group_count))
 }
 
+/// Does `pattern` match anywhere in `text`? `Err` for an invalid pattern,
+/// `Ok(None)` when it is too complex to decide (callers treat that as no match).
+/// Used by the agent policy engine (`agents::policy`) for `command_regex`.
+pub fn is_match(pattern: &str, text: &str) -> Result<Option<bool>, String> {
+    let prog = compile_pattern(pattern)?;
+    let ctx = MatchCtx { case_insensitive: false, multiline: false, dot_all: true };
+    let (m, overflowed) = find_all(text, &prog, &ctx);
+    Ok(if overflowed { None } else { Some(!m.is_empty()) })
+}
+
 // ── VM ──
 
 struct MatchCtx {

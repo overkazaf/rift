@@ -123,6 +123,9 @@ pub fn try_intercept(app: &mut App, event: &KeyEvent, event_loop: &ActiveEventLo
     if app.mcp.overlay.visible {
         return handle_mcp_activity(app, event);
     }
+    if app.agents_ui.policy_log.visible {
+        return handle_policy_log(app, event);
+    }
     if crate::review::visible(app) {
         return handle_review(app, event);
     }
@@ -698,6 +701,7 @@ fn dispatch_palette_action(app: &mut App, action: PaletteAction, event_loop: &Ac
         PaletteAction::McpActivity => app.mcp.overlay.toggle(),
         PaletteAction::Agent(l) => crate::agents::runtime::launch(app, l),
         PaletteAction::Workflow(c) => crate::workflow::run_command(app, c),
+        PaletteAction::Autopilot(c) => crate::agents::autopilot::run_command(app, c),
         PaletteAction::Template(_) => {}
     }
 }
@@ -899,6 +903,21 @@ fn handle_mcp_activity(app: &mut App, event: &KeyEvent) -> bool {
     };
     let total = app.mcp.shared.as_ref().map_or(0, |s| s.activity_len());
     app.mcp.overlay.handle_key(key, total);
+    app.request_redraw();
+    true
+}
+
+fn handle_policy_log(app: &mut App, event: &KeyEvent) -> bool {
+    use crate::agents::autopilot::LogKey;
+    let key = match event.logical_key {
+        Key::Named(NamedKey::Escape) => LogKey::Escape,
+        Key::Named(NamedKey::ArrowUp) => LogKey::Up,
+        Key::Named(NamedKey::ArrowDown) => LogKey::Down,
+        Key::Named(NamedKey::PageUp) => LogKey::PageUp,
+        Key::Named(NamedKey::PageDown) => LogKey::PageDown,
+        _ => return true,
+    };
+    app.agents_ui.policy_log.handle_key(key);
     app.request_redraw();
     true
 }

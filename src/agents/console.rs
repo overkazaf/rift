@@ -142,7 +142,9 @@ impl Console {
 /// the dock is open.
 pub fn refresh(app: &mut App, now: Instant) {
     let arrived = app.agents_rt.console.poll_jobs();
-    if !app.agents_ui.visible {
+    // Autopilot answers prompts with the dock closed, so it keeps the views fresh too.
+    let auto = app.agents_ui.auto.active();
+    if !app.agents_ui.visible && !auto {
         return;
     }
     let due = app.agents_rt.console.next_refresh.map_or(true, |t| now >= t);
@@ -163,7 +165,7 @@ pub fn refresh(app: &mut App, now: Instant) {
 
     for s in &sessions {
         let waiting = s.state == AgentState::WaitingForUser;
-        let mut parsed: Option<(metrics::Metrics, Option<prompt::ApprovalPrompt>, Vec<String>)> = None;
+        let mut parsed: Option<(metrics::Metrics, Option<prompt::ApprovalPrompt>, Vec<String>, bool)> = None;
         if s.state.is_live() {
             let scan = app.agents_rt.console.scans.entry(s.uid).or_default();
             if let Some((ti, pi)) = app.wm.locate_pane(s.uid) {
@@ -183,7 +185,8 @@ pub fn refresh(app: &mut App, now: Instant) {
                         } else {
                             (None, Vec::new())
                         };
-                        parsed = Some((m, p, raw));
+                        let settled = p.as_ref().is_some_and(|p| prompt::at_bottom(&lines, p));
+                        parsed = Some((m, p, raw, settled));
                     }
                 }
             }
@@ -194,18 +197,20 @@ pub fn refresh(app: &mut App, now: Instant) {
         let old_info = app.agents_ui.info.get(&s.uid).cloned().unwrap_or_default();
         // Command of the prompt on screen: the fresh parse if there is one, else the last one.
         let cmd = match &parsed {
-            Some((_, p, _)) => p.as_ref().and_then(|p| p.command.clone()),
+            Some((_, p, _, _)) => p.as_ref().and_then(|p| p.command.clone()),
             None => old_info.prompt.as_ref().and_then(|p| p.command.clone()),
         };
         let old = old_info;
         let mut info = old.clone();
-        if let Some((m, p, raw)) = parsed {
+        if let Some((m, p, raw, settled)) = parsed {
             info.metrics = metrics::merge(&info.metrics, &m);
             info.prompt = p;
             info.raw_tail = raw;
+            info.settled = settled;
         }
         if !waiting {
             info.prompt = None;
+            info.settled = false;
             info.raw_tail.clear();
         }
         info.risk = match cmd {
@@ -224,7 +229,10 @@ pub fn refresh(app: &mut App, now: Instant) {
     app.agents_ui.info.retain(|u, _| uids.contains(u));
     app.agents_rt.console.scans.retain(|u, _| uids.contains(u));
     app.agents_ui.ctl.prune(&uids);
-    if changed {
+    if auto {
+        super::autopilot::evaluate_all(app, now);
+    }
+    if changed || app.agents_ui.auto.any_pending() {
         app.request_redraw();
     }
 }
@@ -261,35 +269,59 @@ fn toast(app: &mut App, msg: impl Into<String>) {
 
 // ───────────────────────────── actions ─────────────────────────────
 
+/// Why an answer was not sent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SendError {
+    /// The screen moved on: the prompt that was parsed is not the one showing.
+    Changed,
+    /// The agent's UI cannot be driven from here.
+    Unanswerable,
+    Gone,
+}
+
+/// Answer option `option` of prompt `p`, but only if `p` is still what the
+/// agent's screen shows (the same check for the dock's keys and for autopilot).
+pub(crate) fn send_verified(app: &mut App, uid: usize, p: &prompt::ApprovalPrompt, option: usize, bottom_only: bool) -> Result<(), SendError> {
+    let Some(kind) = app.agents.session(uid).map(|s| s.kind) else { return Err(SendError::Gone) };
+    let lines = app.wm.locate_pane(uid).and_then(|(ti, pi)| app.wm.tabs[ti].pane(pi)).map(|pane| screen_lines(&pane.terminal));
+    let fresh = lines.as_ref().and_then(|l| prompt::parse(Some(kind), l));
+    // `bottom_only` (autopilot): the prompt must also be the live UI at the bottom, not text higher up.
+    let placed = !bottom_only || fresh.as_ref().zip(lines.as_ref()).is_some_and(|(f, l)| prompt::at_bottom(l, f));
+    if !placed || !fresh.as_ref().is_some_and(|f| f.question == p.question && f.options == p.options) {
+        if let Some(i) = app.agents_ui.info.get_mut(&uid) {
+            i.prompt = None;
+        }
+        return Err(SendError::Changed);
+    }
+    let Some(keys) = prompt::plan_answer(p, option) else { return Err(SendError::Unanswerable) };
+    let bytes = prompt::encode_keys(&keys, &encode_opts(app, uid));
+    if !send(app, uid, &bytes) {
+        return Err(SendError::Gone);
+    }
+    if let Some(i) = app.agents_ui.info.get_mut(&uid) {
+        // Drop the answered prompt at once; the next scan confirms the state.
+        i.prompt = None;
+        i.raw_tail.clear();
+        i.risk = Risk::Safe;
+    }
+    app.agents_ui.ctl.mode = Mode::Browse;
+    app.agents_rt.console.next_refresh = None;
+    app.request_redraw();
+    Ok(())
+}
+
 /// Answer option `option` of agent `uid`'s approval prompt.
 pub fn answer(app: &mut App, uid: usize, option: usize) {
     let Some(p) = app.agents_ui.info.get(&uid).and_then(|i| i.prompt.clone()) else {
         return toast(app, "No approval prompt to answer");
     };
-    let Some(kind) = app.agents.session(uid).map(|s| s.kind) else { return };
-    // The screen may have moved on since the last refresh: only answer what is still there.
-    let fresh = app.wm.locate_pane(uid).and_then(|(ti, pi)| app.wm.tabs[ti].pane(pi)).and_then(|pane| prompt::parse(Some(kind), &screen_lines(&pane.terminal)));
-    if !fresh.as_ref().is_some_and(|f| f.question == p.question && f.options == p.options) {
-        if let Some(i) = app.agents_ui.info.get_mut(&uid) {
-            i.prompt = None;
-        }
-        return toast(app, "That prompt changed: look again before answering");
-    }
-    let Some(keys) = prompt::plan_answer(&p, option) else {
-        return toast(app, "Cannot answer this prompt from the dock: open the pane");
-    };
-    let bytes = prompt::encode_keys(&keys, &encode_opts(app, uid));
-    if send(app, uid, &bytes) {
-        if let Some(i) = app.agents_ui.info.get_mut(&uid) {
-            // Drop the answered prompt at once; the next scan confirms the state.
-            i.prompt = None;
-            i.raw_tail.clear();
-            i.risk = Risk::Safe;
-        }
-        app.agents_ui.ctl.mode = Mode::Browse;
-        app.agents_rt.console.next_refresh = None;
-    } else {
-        toast(app, "That agent's pane is gone");
+    // Answering by hand ends any countdown on this card.
+    app.agents_ui.auto.cancel(uid);
+    match send_verified(app, uid, &p, option, false) {
+        Ok(()) => {}
+        Err(SendError::Changed) => toast(app, "That prompt changed: look again before answering"),
+        Err(SendError::Unanswerable) => toast(app, "Cannot answer this prompt from the dock: open the pane"),
+        Err(SendError::Gone) => toast(app, "That agent's pane is gone"),
     }
     app.request_redraw();
 }
@@ -394,6 +426,9 @@ pub fn apply(app: &mut App, action: Action) -> bool {
             app.agents_ui.compact = !app.agents_ui.compact;
             app.agents_ui.follow = true;
         }
+        Action::ToggleAutopilot(uid) => super::autopilot::toggle_agent(app, uid),
+        Action::ToggleAutopilotAll => super::autopilot::toggle_global(app),
+        Action::AlwaysAllow(uid) => super::autopilot::always_allow(app, uid),
         Action::Notice(msg) => toast(app, msg),
     }
     app.request_redraw();
@@ -436,6 +471,12 @@ fn dock_key(event: &KeyEvent, app: &App) -> DockKey {
 pub fn handle_key(app: &mut App, event: &KeyEvent) -> bool {
     if !app.agents_ui.visible || !app.agents_ui.focused {
         return false;
+    }
+    // Any key stops a running autopilot countdown (and is not acted on): the
+    // prompt stays a human question.
+    if app.agents_ui.auto.cancel_all() {
+        app.request_redraw();
+        return true;
     }
     let composing = app.agents_ui.composing();
     // Cmd+V in the composer pastes into it (not into the terminal behind).
@@ -590,6 +631,11 @@ pub fn on_mouse_press(app: &mut App) -> bool {
             app.agents_ui.selected = Some(uid);
             app.agents_ui.ctl.toggle_mark(uid);
         }
+        Some(Hit::Autopilot(uid)) => {
+            app.agents_ui.selected = Some(uid);
+            super::autopilot::click_card(app, uid);
+        }
+        Some(Hit::AutopilotAll) => super::autopilot::toggle_global(app),
         Some(Hit::Answer { uid, option }) => {
             app.agents_ui.selected = Some(uid);
             let action = {
@@ -662,7 +708,7 @@ pub fn on_right_press(app: &mut App) -> bool {
         return false;
     }
     let uid = match app.agents_ui.hit_at(app.cursor_x, app.cursor_y) {
-        Some(Hit::Card(u) | Hit::Mark(u) | Hit::Interrupt(u) | Hit::Reply(u) | Hit::Review(u) | Hit::Restart(u) | Hit::Close(u) | Hit::More(u) | Hit::Queue(u)) => Some(u),
+        Some(Hit::Card(u) | Hit::Mark(u) | Hit::Interrupt(u) | Hit::Reply(u) | Hit::Review(u) | Hit::Restart(u) | Hit::Close(u) | Hit::More(u) | Hit::Queue(u) | Hit::Autopilot(u)) => Some(u),
         Some(Hit::Answer { uid, .. } | Hit::Turn { uid, .. }) => Some(uid),
         _ => None,
     };

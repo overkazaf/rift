@@ -452,6 +452,11 @@ pub fn redraw(app: &mut App) {
             app.mcp.shared.as_deref(), &app.mcp.status,
         );
     }
+    if app.agents_ui.policy_log.visible {
+        // Beside the dock, not over it: a running countdown stays readable.
+        let area = agents_dock_rect.map(|d| crate::ui::kit::Rect::new(d.right(), 0, (width as usize).saturating_sub(d.right()), height as usize));
+        app.agents_ui.policy_log.render(&mut buffer, width as usize, height as usize, &mut app.renderer.font, &app.renderer.theme, area);
+    }
     if app.system_info.visible {
         app.system_info.render(
             &mut buffer, width as usize, height as usize,
@@ -1021,6 +1026,7 @@ fn about_to_wait_inner(app: &mut App, event_loop: &ActiveEventLoop) {
         || app.network_monitor.visible
         || app.process_tree.visible
         || app.mcp.overlay.visible
+        || app.agents_ui.policy_log.visible
         || app.review.ui.visible
         || app.workflows.overlay_visible()
         || app.system_info.visible

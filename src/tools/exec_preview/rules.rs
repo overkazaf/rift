@@ -47,6 +47,11 @@ struct Cmd {
     xargs: bool,
     /// A shell run with `-c <script>` (does not read a script from stdin).
     shell_c: bool,
+    /// The command word as written (before `base_name`): `/tmp/x/cat` stays
+    /// distinguishable from `cat`.
+    raw: String,
+    /// Run through `env` (which may have set variables for it).
+    env: bool,
 }
 
 struct Resolved {
@@ -133,6 +138,7 @@ fn resolve(simple: &Simple) -> Resolved {
     let words = &simple.words;
     let mut sudo = false;
     let mut xargs = false;
+    let mut env_wrapped = false;
     let mut i = 0;
     let mut inner = Vec::new();
     for _guard in 0..16 {
@@ -155,6 +161,7 @@ fn resolve(simple: &Simple) -> Resolved {
                 i = skip_opts(words, i + 1, "", &["user"]);
             }
             "env" => {
+                env_wrapped = true;
                 i = skip_opts(words, i + 1, "uSCP", &["unset", "split-string", "chdir"]);
                 while i < words.len() && is_assignment(&words[i].text) {
                     i += 1;
@@ -206,15 +213,15 @@ fn resolve(simple: &Simple) -> Resolved {
                 if let Some(s) = script_at.and_then(|k| words.get(k)) {
                     inner.push(shell_parse::parse(&s.text));
                 }
-                return Resolved { cmd: Some(Cmd { name: n.to_string(), args, sudo, xargs, shell_c: script_at.is_some() }), inner };
+                return Resolved { cmd: Some(Cmd { name: n.to_string(), args, sudo, xargs, shell_c: script_at.is_some(), raw: raw.clone(), env: env_wrapped }), inner };
             }
             "eval" => {
                 let joined: Vec<&str> = words[i + 1..].iter().map(|w| w.text.as_str()).collect();
                 inner.push(shell_parse::parse(&joined.join(" ")));
-                return Resolved { cmd: Some(Cmd { name: "eval".into(), args: words[i + 1..].to_vec(), sudo, xargs, shell_c: true }), inner };
+                return Resolved { cmd: Some(Cmd { name: "eval".into(), args: words[i + 1..].to_vec(), sudo, xargs, shell_c: true, raw: raw.clone(), env: env_wrapped }), inner };
             }
             _ => {
-                return Resolved { cmd: Some(Cmd { name: base, args: words[i + 1..].to_vec(), sudo, xargs, shell_c: false }), inner };
+                return Resolved { cmd: Some(Cmd { name: base, args: words[i + 1..].to_vec(), sudo, xargs, shell_c: false, raw: raw.clone(), env: env_wrapped }), inner };
             }
         }
     }
@@ -1244,4 +1251,126 @@ fn rule_redis(cmd: &Cmd) -> Option<Finding> {
         }
     }
     None
+}
+
+// ── Flattened view for policy engines ──
+
+/// One argument of a [`FlatCmd`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FlatArg {
+    pub text: String,
+    /// Not known until the shell expands it (`$HOME`, `${X}`, `$(..)`).
+    pub dynamic: bool,
+    /// Contains an unquoted glob character; the text is the unexpanded pattern.
+    pub glob: bool,
+}
+
+/// One simple command that the line would run, resolved through wrappers
+/// (`sudo`, `env`, `command`, `sh -c '..'`, quoting tricks). Command and
+/// process substitutions are flattened into the list as commands of their own.
+#[derive(Debug, Clone, Default)]
+pub struct FlatCmd {
+    /// Base name of the program (`/usr/bin/cat` -> `cat`); empty when unknown.
+    pub name: String,
+    /// The command word as written.
+    pub raw: String,
+    pub args: Vec<FlatArg>,
+    pub sudo: bool,
+    pub xargs: bool,
+    /// Run through `env`, which may set variables for it.
+    pub env: bool,
+    /// `VAR=value` prefixes (names only).
+    pub assigns: Vec<String>,
+    /// Files this command's output redirections write.
+    pub writes: Vec<FlatArg>,
+    /// The program is not a plain literal (expansion, `eval`, unresolved wrapper).
+    pub opaque: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Flat {
+    pub cmds: Vec<FlatCmd>,
+    pub fork_bomb: bool,
+    /// The line was too large to analyse completely.
+    pub truncated: bool,
+}
+
+fn plain_program(raw: &str) -> bool {
+    !raw.is_empty() && raw.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '-' | '/' | '~'))
+}
+
+pub fn flatten(script: &Script) -> Flat {
+    let mut f = Flat::default();
+    let mut steps = 0usize;
+    flatten_script(script, 0, &mut f, &mut steps);
+    f
+}
+
+fn flatten_script(s: &Script, depth: usize, out: &mut Flat, steps: &mut usize) {
+    if depth > 10 {
+        out.truncated = true;
+        return;
+    }
+    if !s.skeleton.is_empty() && shell_parse::has_fork_bomb(&s.skeleton) {
+        out.fork_bomb = true;
+    }
+    for p in &s.pipelines {
+        for simple in &p.cmds {
+            *steps += 1;
+            if *steps > MAX_STEPS {
+                out.truncated = true;
+                return;
+            }
+            let words = simple.words.iter().chain(simple.assigns.iter().map(|a| &a.1)).chain(simple.redirs.iter().map(|r| &r.target));
+            for w in words {
+                for sub in &w.subs {
+                    flatten_script(sub, depth + 1, out, steps);
+                }
+            }
+            let r = resolve(simple);
+            for inner in &r.inner {
+                flatten_script(inner, depth + 1, out, steps);
+            }
+            let writes: Vec<FlatArg> = simple
+                .redirs
+                .iter()
+                .filter(|re| re.op.contains('>') || re.op == "<>")
+                .filter(|re| !(re.op.ends_with('&') && (re.target.text == "-" || re.target.text.chars().all(|c| c.is_ascii_digit()))))
+                .map(|re| FlatArg { text: re.target.text.clone(), dynamic: re.target.dynamic, glob: re.target.glob })
+                .collect();
+            let assigns: Vec<String> = simple.assigns.iter().map(|(n, _)| n.clone()).collect();
+            match r.cmd {
+                // `sh -c '<script>'` / `eval ..`: the script's commands stand for it.
+                Some(c) if c.shell_c && !r.inner.is_empty() && !c.sudo && !c.xargs && !c.env && assigns.is_empty() && writes.is_empty() => {}
+                Some(c) => {
+                    // The command word is the one just before its arguments; an expansion there is no literal program.
+                    let name_dynamic = simple.words.len().checked_sub(c.args.len() + 1).and_then(|i| simple.words.get(i)).is_some_and(|w| w.dynamic);
+                    let opaque = name_dynamic || !plain_program(&c.raw) || c.name == "eval" || (c.shell_c && r.inner.is_empty());
+                    out.cmds.push(FlatCmd {
+                        name: if opaque { String::new() } else { c.name.clone() },
+                        raw: c.raw.clone(),
+                        args: c.args.iter().map(|w| FlatArg { text: w.text.clone(), dynamic: w.dynamic, glob: w.glob }).collect(),
+                        sudo: c.sudo,
+                        xargs: c.xargs,
+                        env: c.env,
+                        assigns,
+                        writes,
+                        opaque,
+                    });
+                }
+                None => {
+                    // Nothing resolvable ("command -v x", a bare `VAR=x`, a lone redirection).
+                    out.cmds.push(FlatCmd {
+                        name: String::new(),
+                        raw: simple.words.first().map(|w| w.text.clone()).unwrap_or_default(),
+                        args: simple.words.iter().skip(1).map(|w| FlatArg { text: w.text.clone(), dynamic: w.dynamic, glob: w.glob }).collect(),
+                        assigns,
+                        writes,
+                        opaque: true,
+                        ..FlatCmd::default()
+                    });
+                }
+            }
+        }
+    }
 }

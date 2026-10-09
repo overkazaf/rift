@@ -47,6 +47,8 @@ impl Risk {
 pub struct PaneInfo {
     /// The approval prompt on screen, when one parses.
     pub prompt: Option<ApprovalPrompt>,
+    /// The prompt sits at the bottom of the screen (autopilot acts only then).
+    pub settled: bool,
     /// Last lines of the screen, shown when a waiting agent's prompt does not parse.
     pub raw_tail: Vec<String>,
     pub metrics: Metrics,
@@ -127,6 +129,12 @@ pub enum Action {
     /// Stop the workflow loop this agent belongs to.
     StopWorkflow(usize),
     ToggleDensity,
+    /// Autopilot on / off for this agent.
+    ToggleAutopilot(usize),
+    /// Autopilot on / off for every agent (the dock header switch).
+    ToggleAutopilotAll,
+    /// Offer to add a policy rule for the approval prompt on this card.
+    AlwaysAllow(usize),
     /// Show a one-line message.
     Notice(String),
 }
@@ -139,13 +147,26 @@ pub enum MenuItem {
     CtrlC,
     Reply,
     Review,
+    Autopilot,
+    AlwaysAllow,
     Mark,
     Restart,
     Close,
 }
 
 impl MenuItem {
-    pub const ALL: [MenuItem; 8] = [MenuItem::Jump, MenuItem::Interrupt, MenuItem::CtrlC, MenuItem::Reply, MenuItem::Review, MenuItem::Mark, MenuItem::Restart, MenuItem::Close];
+    pub const ALL: [MenuItem; 10] = [
+        MenuItem::Jump,
+        MenuItem::Interrupt,
+        MenuItem::CtrlC,
+        MenuItem::Reply,
+        MenuItem::Review,
+        MenuItem::Autopilot,
+        MenuItem::AlwaysAllow,
+        MenuItem::Mark,
+        MenuItem::Restart,
+        MenuItem::Close,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -154,6 +175,8 @@ impl MenuItem {
             MenuItem::CtrlC => "Send Ctrl+C",
             MenuItem::Reply => "Reply\u{2026}",
             MenuItem::Review => "Review changes",
+            MenuItem::Autopilot => "Toggle autopilot",
+            MenuItem::AlwaysAllow => "Always allow this\u{2026}",
             MenuItem::Mark => "Toggle broadcast mark",
             MenuItem::Restart => "Restart",
             MenuItem::Close => "Close pane",
@@ -167,6 +190,8 @@ impl MenuItem {
             MenuItem::CtrlC => "^C",
             MenuItem::Reply => "r",
             MenuItem::Review => "v",
+            MenuItem::Autopilot => "p",
+            MenuItem::AlwaysAllow => "w",
             MenuItem::Mark => "Space",
             MenuItem::Restart => "R",
             MenuItem::Close => "x",
@@ -600,6 +625,13 @@ impl Control {
                 }
             }
             DockKey::Char('v') => sel_uid.map_or(Action::None, Action::Review),
+            DockKey::Char('p') => sel_uid.map_or(Action::None, Action::ToggleAutopilot),
+            DockKey::Char('P') => Action::ToggleAutopilotAll,
+            DockKey::Char('w') => match sel_uid {
+                Some(uid) if env.answerable(uid) => Action::AlwaysAllow(uid),
+                Some(_) => Action::Notice("\"Always allow\" needs an approval prompt on the card".into()),
+                None => Action::None,
+            },
             DockKey::Char('t') => sel_uid.map_or(Action::None, Action::Queue),
             DockKey::Char('f') => sel_uid.map_or(Action::None, Action::Forward),
             DockKey::Char('S') => sel_uid.map_or(Action::None, Action::StopWorkflow),
@@ -784,6 +816,9 @@ impl Control {
                 }
             }
             MenuItem::Review => Action::Review(uid),
+            MenuItem::Autopilot => Action::ToggleAutopilot(uid),
+            MenuItem::AlwaysAllow if env.answerable(uid) => Action::AlwaysAllow(uid),
+            MenuItem::AlwaysAllow => Action::Notice("\"Always allow\" needs an approval prompt on the card".into()),
             MenuItem::Mark => {
                 self.toggle_mark(uid);
                 Action::None
@@ -811,8 +846,8 @@ impl Control {
     /// Footer hints for the current mode: (key, label).
     pub fn hints(&self, waiting_selected: bool) -> Vec<(&'static str, &'static str)> {
         match &self.mode {
-            Mode::Browse if waiting_selected => vec![("1-3", "answer"), ("Esc", "interrupt"), ("r", "reply"), ("v", "review"), ("Enter", "jump")],
-            Mode::Browse => vec![("Enter", "jump"), ("r", "reply"), ("b", "broadcast"), ("v", "review"), ("t", "queue"), ("Esc", "interrupt"), ("x", "close")],
+            Mode::Browse if waiting_selected => vec![("1-3", "answer"), ("w", "allow rule"), ("p", "autopilot"), ("Esc", "interrupt"), ("r", "reply"), ("v", "review"), ("Enter", "jump")],
+            Mode::Browse => vec![("Enter", "jump"), ("r", "reply"), ("p", "autopilot"), ("b", "broadcast"), ("v", "review"), ("t", "queue"), ("Esc", "interrupt"), ("x", "close")],
             Mode::Compose { .. } => vec![("Enter", "send"), ("Esc", "cancel"), ("S-Enter", "newline")],
             Mode::ConfirmSend { .. } | Mode::ConfirmClose(_) | Mode::ConfirmRestart(_) | Mode::ConfirmRisk { .. } => vec![("Enter", "confirm"), ("Esc", "cancel")],
             Mode::Menu { .. } => vec![("Enter", "run"), ("Esc", "close")],
@@ -1109,6 +1144,26 @@ mod tests {
         assert_eq!(press(&mut c, &mut sel, &w, &[DockKey::Char('R')]), Action::None);
         assert_eq!(c.mode, Mode::ConfirmRestart(2));
         assert_eq!(press(&mut c, &mut sel, &w, &[DockKey::Char('y')]), Action::Restart(2));
+    }
+
+    #[test]
+    fn autopilot_keys_and_menu_items() {
+        let w = World::new(&[5, 6]).with_prompt(6, Risk::Safe);
+        let (mut c, mut sel) = (Control::default(), Some(5));
+        assert_eq!(press(&mut c, &mut sel, &w, &[DockKey::Char('p')]), Action::ToggleAutopilot(5));
+        assert_eq!(press(&mut c, &mut sel, &w, &[DockKey::Char('P')]), Action::ToggleAutopilotAll);
+        // "Always allow" needs an approval prompt on the selected card.
+        assert!(matches!(press(&mut c, &mut sel, &w, &[DockKey::Char('w')]), Action::Notice(_)));
+        sel = Some(6);
+        assert_eq!(press(&mut c, &mut sel, &w, &[DockKey::Char('w')]), Action::AlwaysAllow(6));
+        assert_eq!(c.run_item(MenuItem::Autopilot, 5, &mut sel, &w), Action::ToggleAutopilot(5));
+        assert_eq!(c.run_item(MenuItem::AlwaysAllow, 6, &mut sel, &w), Action::AlwaysAllow(6));
+        assert!(matches!(c.run_item(MenuItem::AlwaysAllow, 5, &mut sel, &w), Action::Notice(_)));
+        // The footer advertises them.
+        assert!(c.hints(false).iter().any(|h| h.0 == "p" && h.1 == "autopilot"));
+        assert!(c.hints(true).iter().any(|h| h.0 == "w"));
+        // The context menu keeps Close last (the wrap-around test relies on it).
+        assert_eq!(MenuItem::ALL.last(), Some(&MenuItem::Close));
     }
 
     #[test]

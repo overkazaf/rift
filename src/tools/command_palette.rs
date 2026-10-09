@@ -451,6 +451,8 @@ pub enum PaletteAction {
     Agent(crate::agents::runtime::Launch),
     /// Workflows: best of N, write & review, fix tests, queue, compare.
     Workflow(crate::workflow::WorkflowCmd),
+    /// Autopilot: toggle, policy log, edit policy.
+    Autopilot(crate::agents::autopilot::AutopilotCmd),
     /// Internal: completes the query to this keyword; never dispatched.
     Template(&'static str),
 }
@@ -1495,6 +1497,12 @@ fn catalog() -> Vec<PaletteItem> {
     v.push(entry("Next Agent Needing Attention", Agents, s("Shift+."), Menu(MenuAction::AgentNextAttention)));
     v.push(entry("New Agent...", Agents, None, Menu(MenuAction::AgentNew)));
     v.push(entry("Agent Layout: 2\u{d7}2", Agents, None, Menu(MenuAction::AgentLayout2x2)));
+    {
+        use crate::agents::autopilot::AutopilotCmd as A;
+        v.push(entry("Agents: Toggle Autopilot", Agents, None, PaletteAction::Autopilot(A::Toggle)));
+        v.push(entry("Agents: Policy Log", Agents, None, PaletteAction::Autopilot(A::Log)));
+        v.push(entry("Agents: Edit Policy", Agents, None, PaletteAction::Autopilot(A::EditPolicy)));
+    }
     {
         use crate::workflow::WorkflowCmd as W;
         v.push(entry("Workflow: Best of N\u{2026}", Agents, None, PaletteAction::Workflow(W::BestOfN)));

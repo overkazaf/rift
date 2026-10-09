@@ -4,6 +4,7 @@
 
 use std::time::Instant;
 
+use super::autopilot::{self, AutoView};
 use super::control::{Composer, MenuItem, Mode, PaneInfo, Risk};
 use super::metrics;
 use super::prompt::{self, ApprovalPrompt, PromptKind, Role};
@@ -341,6 +342,7 @@ struct CardData<'a> {
     mode: &'a Mode,
     composer: &'a Composer,
     marks: usize,
+    auto: AutoView,
 }
 
 impl CardData<'_> {
@@ -378,6 +380,8 @@ struct Plan {
     body_compact: Vec<(String, LineStyle)>,
     /// Workflow block (label, queue, countdown, reviewer note).
     wf: Vec<(String, Tone)>,
+    /// Autopilot block: countdown, switch state and counters.
+    auto: Vec<(String, Tone)>,
 }
 
 fn plan_card(d: &CardData, inner_cols: usize) -> Plan {
@@ -391,6 +395,7 @@ fn plan_card(d: &CardData, inner_cols: usize) -> Plan {
         _ => (Vec::new(), Vec::new()),
     };
     let wf = d.info.map(|i| crate::workflow::card_lines(&i.wf, inner_cols, if d.selected { 3 } else { 2 })).unwrap_or_default();
+    let auto = autopilot::auto_lines(&d.auto, inner_cols, d.selected);
     let raw = if d.waiting() && body.is_empty() { d.info.map_or(0, |i| i.raw_tail.len().min(3)) } else { 0 };
     let flags = CardFlags {
         selected: d.selected,
@@ -404,8 +409,9 @@ fn plan_card(d: &CardData, inner_cols: usize) -> Plan {
         composer: d.composing(),
         turns: d.info.map_or(0, |i| i.turns.len()),
         workflow_lines: wf.len(),
+        auto_lines: auto.len(),
     };
-    Plan { flags, lines, body, body_compact, wf }
+    Plan { flags, lines, body, body_compact, wf, auto }
 }
 
 fn draw_card(cx: &mut Ctx, fr: &mut Frame, r: Rect, d: &CardData, detail: Detail, row_list: &[Row], plan: &Plan) {
@@ -471,6 +477,17 @@ fn draw_card(cx: &mut Ctx, fr: &mut Frame, r: Rect, d: &CardData, detail: Detail
             Row::Composer => draw_composer(cx, fr, d, left, right, y, h),
             Row::Actions => draw_actions(cx, fr, d, left, right, y, h),
             Row::Timeline(n) => draw_timeline(cx, fr, d, left, right, y, n),
+            Row::Auto(n) => {
+                let band = Rect::new(left.saturating_sub(tk.sp.xs), y, inner_w + tk.sp.xs, n * lp + tk.sp.xs);
+                if fr.hot(&Hit::Autopilot(uid)) {
+                    cx.fill_rrect(band, tk.radius_sm, tk.surface_alt);
+                }
+                for (i, (text, tone)) in plan.auto.iter().take(n).enumerate() {
+                    let colour = if *tone == Tone::Neutral { tk.text_faint } else { tk.tone(*tone) };
+                    cx.text_fit(left, y + i * lp + lp.saturating_sub(tk.ch) / 2 + tk.sp.xs / 2, inner_w, text, colour);
+                }
+                fr.add(band, Hit::Autopilot(uid));
+            }
             Row::Workflow(n) => {
                 let band = Rect::new(left.saturating_sub(tk.sp.xs), y, inner_w + tk.sp.xs, n * lp);
                 for (i, (text, tone)) in plan.wf.iter().take(n).enumerate() {
@@ -827,19 +844,31 @@ pub fn draw_dock(
     if !sessions.is_empty() {
         draw_density_icon(&mut cx, &mut fr, Rect::new(icon.x, icon.y + (icon.h.saturating_sub(tk.row_h)) / 2, icon.w, tk.row_h), ui_state.compact);
     }
+    // Autopilot switch, right of the title.
+    let (auto_label, auto_tone) = autopilot::header_label(&ui_state.auto);
+    let auto_w = cx.badge_w(&auto_label);
+    let auto_x = hx + 8 * tk.cw;
+    let auto_shown = auto_x + auto_w + tk.sp.sm < icon.x;
+    let auto_end = if auto_shown { auto_x + auto_w } else { hx + 6 * tk.cw };
+    if auto_shown {
+        cx.badge(auto_x, l.header.y, &auto_label, auto_tone, l.header.h);
+        fr.add(Rect::new(auto_x, l.header.y, auto_w, l.header.h), Hit::AutopilotAll);
+    }
     let attention = reg.attention_count();
     let live = reg.live_count();
     let mut rx = icon.x.saturating_sub(tk.sp.sm);
     if attention > 0 {
         let label = format!("{attention} needs you");
         let bw = cx.badge_w(&label);
-        cx.badge(rx.saturating_sub(bw), l.header.y, &label, Tone::Warning, l.header.h);
+        if rx.saturating_sub(bw) > auto_end + tk.sp.sm {
+            cx.badge(rx.saturating_sub(bw), l.header.y, &label, Tone::Warning, l.header.h);
+        }
         rx = rx.saturating_sub(bw + tk.sp.sm);
     }
-    if live > 0 && rx > hx + 12 * tk.cw {
+    if live > 0 && rx > auto_end + 4 * tk.cw {
         let label = format!("{live} live");
         let bw = cx.badge_w(&label);
-        if rx.saturating_sub(bw) > hx + 8 * tk.cw {
+        if rx.saturating_sub(bw) > auto_end + tk.sp.sm {
             cx.badge(rx.saturating_sub(bw), l.header.y, &label, Tone::Neutral, l.header.h);
         }
     }
@@ -877,6 +906,7 @@ pub fn draw_dock(
                     mode: &mode,
                     composer: &composer,
                     marks,
+                    auto: ui_state.auto.view(s.pane_uid, now),
                 }
             })
             .collect();
@@ -1202,6 +1232,33 @@ mod tests {
             let dock = Rect::new(0, 40, ui::dock_width(w, f.cell_width), h - 40);
             draw_dock(b, w, h, f, t, dock, &empty, &mut ui2, now, 0.0, "");
             assert!(ui2.hits.iter().any(|(_, h)| *h == Hit::NewAgent) && ui2.hits.iter().any(|(_, h)| *h == Hit::Hooks));
+        });
+    }
+
+    #[test]
+    fn autopilot_countdown_and_header_switch_are_drawn_and_clickable() {
+        use crate::agents::policy::{Outcome, Tool, Verdict};
+        use crate::ui::kit::gallery::qa::each_theme;
+        let (r, mut ui) = scenario();
+        let now = Instant::now();
+        ui.auto.set_global(true);
+        let o = Outcome { verdict: Verdict::Approve, option: Some(0), rule: "default:cargo-checks".into(), reason: "cargo check/test".into(), subject: "cargo test --bin rift".into(), tool: Some(Tool::Bash) };
+        ui.auto.consider(2, "sig", &o, now);
+        ui.auto.record(1, Verdict::Approve);
+        each_theme("agents-dock-autopilot", |b, w, h, f, t| {
+            let dock = Rect::new(0, 40, ui::dock_width_pref(w, f.cell_width, 42), h - 40);
+            draw_dock(b, w, h, f, t, dock, &r, &mut ui, now, 0.3, "");
+            assert!(ui.hits.iter().any(|(_, h)| *h == Hit::AutopilotAll), "header switch");
+            assert!(ui.hits.iter().any(|(_, h)| *h == Hit::Autopilot(2)), "the countdown line is clickable (stops it)");
+        });
+        // Switched off: a quiet card shows nothing, the selected one a hint, the header says off.
+        ui.auto.set_global(false);
+        each_theme("agents-dock-autopilot-off", |b, w, h, f, t| {
+            let dock = Rect::new(0, 40, ui::dock_width_pref(w, f.cell_width, 34), h - 40);
+            draw_dock(b, w, h, f, t, dock, &r, &mut ui, now, 0.3, "");
+            assert!(ui.hits.iter().any(|(_, h)| *h == Hit::AutopilotAll));
+            assert!(ui.hits.iter().any(|(_, h)| *h == Hit::Autopilot(2)), "selected card offers the switch");
+            assert!(!ui.hits.iter().any(|(_, h)| *h == Hit::Autopilot(3)), "unselected quiet cards stay quiet");
         });
     }
 

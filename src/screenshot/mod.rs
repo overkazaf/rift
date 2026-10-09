@@ -11,6 +11,7 @@
 //!
 //! Nothing in this module opens a window or spawns a process.
 
+mod autopilot;
 mod frame;
 mod mission;
 mod page;

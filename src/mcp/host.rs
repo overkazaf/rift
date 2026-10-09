@@ -270,10 +270,34 @@ fn start_run(app: &mut App, reply: Sender<Reply>, cell: Arc<ApprovalCell>, pane_
         None => return refuse(&cell, &reply, "no such pane"),
     };
     let danger = approval::assess(&command, cwd.as_deref());
+    // Autopilot: the same policy that answers the dock's prompts. Off (the
+    // default) or "ask" falls through to the modal below.
+    let auto = crate::agents::autopilot::mcp_decision(app, pane_id, &command, cwd.as_deref(), danger.as_ref().map(|d| d.critical));
     let spec = modal_spec(pane_id, title.as_deref(), cwd.as_deref(), &command, danger.as_ref());
     app.mcp.pending.fetch_add(1, Ordering::SeqCst);
+    let shown = command.clone();
     let run = PendingRun { cell, reply, pane_id, command, run_index: spec.run_index, counter: app.mcp.pending.clone() };
     let deny_index = 1 - spec.run_index;
+    match auto {
+        crate::agents::autopilot::McpAuto::Approve(d) => {
+            crate::agents::autopilot::mcp_record(app, pane_id, &shown, crate::agents::policy::Verdict::Approve, &d);
+            let idx = run.run_index;
+            finish_run(app, Box::new(run), Some(idx));
+            // Non-blocking, and it replaces the generic "Ran command" toast.
+            app.blocks_ui.show_toast(format!("Autopilot approved `{}` from MCP ({})", short(&shown), d.rule));
+            app.request_redraw();
+            return;
+        }
+        crate::agents::autopilot::McpAuto::Deny(d) => {
+            crate::agents::autopilot::mcp_record(app, pane_id, &shown, crate::agents::policy::Verdict::Deny, &d);
+            finish_run(app, Box::new(run), Some(deny_index));
+            crate::agents::notify::post("Rift autopilot", &format!("Denied an MCP command automatically: {} ({})", short(&shown), d.reason), app.config.agents.sound);
+            app.blocks_ui.show_toast(format!("Autopilot denied `{}` from MCP: {}", short(&shown), d.reason));
+            app.request_redraw();
+            return;
+        }
+        crate::agents::autopilot::McpAuto::Ask => {}
+    }
     app.confirm.push(ConfirmRequest {
         title: spec.title,
         badge: spec.badge,
@@ -288,6 +312,17 @@ fn start_run(app: &mut App, reply: Sender<Reply>, cell: Arc<ApprovalCell>, pane_
         let _ = w.request_user_attention(Some(winit::window::UserAttentionType::Informational));
     }
     app.request_redraw();
+}
+
+/// One-line, shortened command for toasts.
+fn short(command: &str) -> String {
+    let one: String = command.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one.chars().count() > 50 {
+        let t: String = one.chars().take(49).collect();
+        format!("{t}\u{2026}")
+    } else {
+        one
+    }
 }
 
 /// Type `command` + Enter into the pane. Returns the index the command's

@@ -95,6 +95,9 @@ pub struct ApprovalPrompt {
     /// The shell command to risk-check, for [`PromptKind::Command`].
     pub command: Option<String>,
     pub file: Option<String>,
+    /// Every path the action's own lines name (edits can touch several files);
+    /// empty when the path was only guessed from the question's words.
+    pub files: Vec<String>,
     pub reason: Option<String>,
     pub options: Vec<PromptOption>,
     /// Index of the highlighted option (the `❯` marker), when visible.
@@ -292,6 +295,36 @@ fn clean_rows(lines: &[String]) -> Vec<String> {
     lines[from..].iter().map(|l| l.trim_end().to_string()).collect()
 }
 
+/// Most rows with text allowed under a prompt's last option for autopilot to
+/// trust it (agent footers: token counts, reset time, key hints).
+pub const MAX_ROWS_BELOW: usize = 4;
+
+/// Rows with text below the last option of `p` on this screen (frames and
+/// blanks ignored). `None` when the option cannot be located. A prompt that
+/// the agent printed higher up (say, in a tool's output) has the real UI
+/// below it, so autopilot only acts on prompts at the bottom of the screen.
+pub fn rows_below(lines: &[String], p: &ApprovalPrompt) -> Option<usize> {
+    let key = |s: &str| -> String { s.to_lowercase().chars().filter(|c| c.is_alphanumeric()).collect() };
+    let rows = clean_rows(lines);
+    // The last option's label, else (inline `(Y)es/(N)o` prompts) the question line.
+    let candidates = [p.options.last().map(|o| o.label.as_str()).unwrap_or(""), p.question.as_str()];
+    for c in candidates {
+        let needle: String = key(c).chars().take(14).collect();
+        if needle.chars().count() < 3 {
+            continue;
+        }
+        if let Some(at) = rows.iter().rposition(|r| key(r).contains(&needle)) {
+            return Some(rows[at + 1..].iter().filter(|r| unframe(r).chars().any(|c| c.is_alphanumeric())).count());
+        }
+    }
+    None
+}
+
+/// Is the prompt at the bottom of the screen (see [`rows_below`])?
+pub fn at_bottom(lines: &[String], p: &ApprovalPrompt) -> bool {
+    rows_below(lines, p).is_some_and(|n| n <= MAX_ROWS_BELOW)
+}
+
 /// The last lines of the screen, for cards whose prompt cannot be parsed.
 pub fn raw_tail(lines: &[String], n: usize) -> Vec<String> {
     let mut v: Vec<String> = lines.iter().map(|l| unframe(l)).filter(|l| !l.is_empty() && !is_rule(l)).collect();
@@ -464,6 +497,7 @@ fn build(agent: Option<AgentKind>, inner: &[String], qrow: usize, first_opt: usi
 
     let mut command = None;
     let mut file = None;
+    let mut files: Vec<String> = Vec::new();
     match kind {
         PromptKind::Command => {
             // "$ git push", or Cursor's "Not in allowlist: npm test".
@@ -483,7 +517,8 @@ fn build(agent: Option<AgentKind>, inner: &[String], qrow: usize, first_opt: usi
             }
         }
         PromptKind::Edit | PromptKind::Create => {
-            file = find_path(&subject).or_else(|| path_in_question(&question));
+            files = all_paths(&subject);
+            file = files.first().cloned().or_else(|| path_in_question(&question));
             let keep = file.clone();
             subject = keep.into_iter().collect();
         }
@@ -491,7 +526,7 @@ fn build(agent: Option<AgentKind>, inner: &[String], qrow: usize, first_opt: usi
     }
     subject.truncate(12);
     let _ = agent;
-    ApprovalPrompt { agent, kind, question, title, subject, command, file, reason, options, selected }
+    ApprovalPrompt { agent, kind, question, title, subject, command, file, files, reason, options, selected }
 }
 
 trait IfEmpty {
@@ -512,7 +547,7 @@ fn is_heading(l: &str) -> bool {
         && ["command", "edit", "create", "write", "update", "read", "tool", "fetch", "search", "plan", "overwrite", "delete", "mcp"].iter().any(|w| low.contains(w))
 }
 
-fn path_in_question(q: &str) -> Option<String> {
+pub fn path_in_question(q: &str) -> Option<String> {
     q.trim_end_matches('?').split_whitespace().rev().map(|w| w.trim_matches(|c| c == ':' || c == ',')).find(|w| is_pathish(w)).map(str::to_string)
 }
 
@@ -530,8 +565,22 @@ fn is_pathish(w: &str) -> bool {
     }
 }
 
+/// Every distinct path-looking word in `lines` (top to bottom, at most 12).
+pub fn all_paths(lines: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for w in lines.iter().flat_map(|l| l.split_whitespace()).map(|w| w.trim_matches(|c| c == ':' || c == ',')) {
+        if is_pathish(w) && !out.iter().any(|o| o == w) {
+            out.push(w.to_string());
+            if out.len() >= 12 {
+                break;
+            }
+        }
+    }
+    out
+}
+
 /// First path-looking word in `lines` (top to bottom).
-fn find_path(lines: &[String]) -> Option<String> {
+pub fn find_path(lines: &[String]) -> Option<String> {
     lines.iter().flat_map(|l| l.split_whitespace()).map(|w| w.trim_matches(|c| c == ':' || c == ',')).find(|w| is_pathish(w)).map(str::to_string)
 }
 
@@ -639,6 +688,7 @@ fn parse_horizontal(agent: Option<AgentKind>, rows: &[String]) -> Option<Approva
         subject,
         command,
         file: None,
+        files: Vec::new(),
         reason: None,
         options,
         selected: Some(0),
@@ -670,7 +720,7 @@ fn parse_yes_no(agent: Option<AgentKind>, rows: &[String]) -> Option<ApprovalPro
     let question = line.trim_end_matches(':').trim().to_string();
     // The thing being asked about is usually on the line(s) above.
     let subject: Vec<String> = (0..row).rev().take(3).map(|r| inner[r].clone()).filter(|l| !l.is_empty() && !is_rule(l)).take(2).collect::<Vec<_>>().into_iter().rev().collect();
-    Some(ApprovalPrompt { agent, kind: PromptKind::Generic, question, title: String::new(), subject, command: None, file: None, reason: None, options, selected: None })
+    Some(ApprovalPrompt { agent, kind: PromptKind::Generic, question, title: String::new(), subject, command: None, file: None, files: Vec::new(), reason: None, options, selected: None })
 }
 
 // ───────────────────────────── answering ─────────────────────────────
@@ -1040,6 +1090,30 @@ mod tests {
         let mut v = lines(CLAUDE_BASH);
         v.extend((0..60).map(|i| format!("log line {i}")));
         assert!(parse(None, &v).is_none());
+    }
+
+    #[test]
+    fn real_prompts_sit_at_the_bottom_and_printed_look_alikes_do_not() {
+        for f in [CLAUDE_BASH, CLAUDE_EDIT, CODEX_CMD, GEMINI_SHELL, GEMINI_EDIT, AIDER_YN, OPENCODE, CURSOR] {
+            let v = lines(f);
+            let p = parse(None, &v).expect("fixture");
+            assert!(at_bottom(&v, &p), "{f}");
+        }
+        // Agent footers (token counts, reset time) are fine.
+        let mut v = lines(CLAUDE_BASH);
+        v.push("  Opus 5.5 \u{b7} 57929 tokens \u{b7} $0.42 spent".into());
+        v.push("  4h 37m until reset".into());
+        let p = parse(None, &v).unwrap();
+        assert_eq!(rows_below(&v, &p), Some(2));
+        assert!(at_bottom(&v, &p));
+        // A prompt printed higher up, with the agent's real UI below it, is not trusted.
+        let mut fake = lines(CLAUDE_BASH);
+        fake.extend(lines(CODEX_EDITS).into_iter().filter(|l| !l.trim().is_empty() && !l.contains("1. Yes") && !l.contains("2. Yes") && !l.contains("3. No")));
+        fake.extend((0..5).map(|i| format!("  Working on step {i}")));
+        let p = parse(None, &fake).unwrap();
+        assert!(!at_bottom(&fake, &p), "{:?}", rows_below(&fake, &p));
+        // Unlocatable options never count as settled.
+        assert_eq!(rows_below(&lines("nothing here"), &p), None);
     }
 
     #[test]

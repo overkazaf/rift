@@ -237,7 +237,7 @@ Any other MCP client works with `{"command": "rift", "args": ["mcp"]}`. If Rift 
 | `read_pane` | Last N rows of a pane (optionally with scrollback), ANSI stripped, secrets redacted |
 | `list_blocks` / `read_block` | Recent OSC 133 command blocks and one block's command and output (64 KB cap, keeps the end) |
 | `search_scrollback` | Case-insensitive search with surrounding lines, most recent first |
-| `run_command` | Asks you to approve a command in a pane. Dangerous commands get a critical warning. Never auto-approved |
+| `run_command` | Asks you to approve a command in a pane. Dangerous commands get a critical warning. Only [autopilot](#autopilot--policy) with a matching policy rule can answer it for you; critical commands are never auto-approved |
 
 Resources: `rift://pane/{id}/screen` and `rift://pane/{id}/blocks`.
 
@@ -272,13 +272,72 @@ Rift is built to supervise AI coding agents: Claude Code, Codex CLI, Gemini CLI,
   - **Broadcast.** `Space` (or `Cmd+click`) marks cards; `b` types once to every marked agent (or to all live agents when none is marked) and asks for confirmation when there is more than one target. Agents waiting on an approval menu are skipped, since typed text would act as menu keys.
   - **Review.** `v` or the **Review** button opens the change-review overlay for that pane; clicking a turn in the card's timeline opens it at that turn.
   - **Restart / close.** `R` stops the agent (if running) and re-runs its original launch command in the same pane (the command text Rift saw, or the default for the agent); `x` closes the pane. Both ask first when work could be lost.
-  - Keys at a glance: arrows or `j`/`k` select, `Enter` jump, `1`–`3` answer (otherwise `1`–`9` jump to the Nth agent), `Esc` interrupt, `r` reply, `b` broadcast, `Space` mark, `a` mark all, `c` clear marks, `v` review, `t` task queue, `f` forward reviewer feedback, `S` stop a workflow loop, `R` restart, `x` close, `m` menu, `Tab` density, `n` next waiting.
+  - Keys at a glance: arrows or `j`/`k` select, `Enter` jump, `1`–`3` answer (otherwise `1`–`9` jump to the Nth agent), `Esc` interrupt, `r` reply, `b` broadcast, `Space` mark, `a` mark all, `c` clear marks, `v` review, `t` task queue, `p` / `P` autopilot (agent / all), `w` always allow this, `f` forward reviewer feedback, `S` stop a workflow loop, `R` restart, `x` close, `m` menu, `Tab` density, `n` next waiting.
 - **At a glance.** Each card shows the model, tokens, cost, context-window use and the usage reset time read from the agent's own UI (Claude Code status lines and spinner, Codex footer and `Token usage`, Gemini footer, Aider's token report, opencode's sidebar; parsers and fixtures in `src/agents/metrics.rs`), the files changed in the latest turn and over all turns (from change review), and a compact **turn timeline** (duration, files, outcome). The footer totals cost and tokens across agents and counts those waiting. If two agents run in the same git worktree *and* branch, both cards get an amber **same worktree as …** chip with a hint to use *New Agent > worktree*.
 - **Needs you.** `Cmd+Shift+.` jumps to the next agent waiting for you (cycling). Tabs show a badge with the agent count and an amber dot when one is waiting, and a waiting pane gets an amber border.
 - **Notifications.** When an agent needs approval or finishes a turn while its pane is not in front of you (or Rift is in the background) you get a macOS notification such as "Claude Code in rift/main needs your approval", plus a dock badge with the number of agents waiting. Notifications are de-duplicated and rate limited. Clicking a notification does not focus the pane (not supported yet).
 - **New Agent.** Command palette > `agent` (or *Agents > New Agent…*) lists the agent CLIs found on your `PATH`. Run one in the current directory, or in a **new git worktree** (`git worktree add ../<repo>-<agent>-<n> -b agent/<agent>-<n>`, created in the background with a progress toast). The tab is titled `<agent> · <branch>`. *Agent Layout: 2×2* (also `agent` palette entries for 2×1 and 3×2) starts a grid of agents, one worktree each.
 - **Change review.** Every turn is bracketed by `TurnStarted` / `TurnFinished` events that the change-review module uses to show what an agent changed.
 - **Workflows.** Several agents on one task, a writer with a reviewer, a fix-the-tests loop and per-agent task queues: see [Workflows](#workflows).
+- **Autopilot.** Auto-answer routine prompts by policy, with a countdown you can cancel and an audit log: see [Autopilot & policy](#autopilot--policy).
+
+### Autopilot & policy
+
+Stop babysitting routine prompts. **Autopilot** answers an agent's approval prompt for you when your *policy* says the request is routine, after a short, visible countdown. It is **off by default for every agent** and the policy never acts while it is off.
+
+> **Critical commands are never auto-approved.** Whatever the rules say, anything the safety engine rates *critical* (`rm -rf` on system directories, `curl | sh`, `dd` to a disk, a fork bomb, ...) is answered **No** and you get a notification. Commands rated *risky* can only be approved by a rule you wrote that names the program. A rule cannot approve protected paths either (`.git/**`, `.env*`, `*.pem`, `~/.ssh/**`, CI configs, agent settings, `.rift/**`), or anything outside the repo root (symlinks are resolved first).
+
+- **Turn it on.** `p` on a card (or click the card's autopilot line) for one agent, `P` (or the **AUTO** switch in the dock header, or *Agents: Toggle Autopilot* in the palette) for all of them. Each card then shows `autopilot on · 12 auto-approved`.
+- **Countdown.** When a waiting agent's prompt is approved or denied by policy, its card shows ``Auto-approving `cargo test` in 1.5s — Esc to stop`` and answers when it reaches zero. `Esc` (or any other dock key, or typing in the agent's pane) cancels it: that prompt stays a question for you. Just before sending, Rift re-reads the screen and the policy and answers only if the prompt is still exactly the one that was judged. It always presses the one-time *Yes* (never *Always*), or *No* for a deny.
+- **Audit log.** Every automatic decision is appended to `~/.config/rift/policy.log` (time, agent, pane, what was requested, decision, rule, reason). *Agents: Policy Log* shows it as a table.
+- **MCP.** `run_command` requests from MCP clients go through the same policy when autopilot is on for the pane's agent (or globally, for panes without an agent). An approved command still shows a non-blocking toast; a denied one is refused with a notification; everything else keeps the usual confirmation modal.
+
+**Where rules come from.** In order, first match wins: the repo's `.rift/policy.toml`, then `~/.config/rift/policy.toml`, then the built-in defaults. *Agents: Edit Policy* opens your file in `$EDITOR`. **Always allow this** (`w` on a waiting card, or the card's context menu) shows you the exact rule it would append (program + subcommand, or the exact command) and adds it to your file once you confirm.
+
+**Repo policies must be trusted.** A repository can ship `.rift/policy.toml`, but a malicious repo must not be able to approve itself. The first time Rift sees one for an agent with autopilot on, it asks *Trust policy from <repo>?* and shows the rules. Trust is remembered by repo path **and** the file's SHA-256 (`~/.config/rift/policy-trust`), so any change to the file asks again. Until trusted, the file is ignored. Repo policies cannot set the countdown or turn the defaults off.
+
+**Built-in defaults** (after your rules): approve read-only commands (`ls`, `cat`, `rg`/`grep`, `git status/diff/log/show`, `cargo check/test/clippy/build`, `npm test`, `pytest`, `go test`, ...) whose path arguments stay inside the repo; approve edits, writes and reads inside the repo root; always ask for network, installs and publishing (`git push`, `npm publish`, `pip install`, `curl`, `npx`, ...), web fetches and MCP tools. Compound commands (`a && b | c`, `$(...)`, `sh -c '...'`) are parsed with the safety engine's shell parser, so quoting tricks (`r\m`, `'rm'`, `$(echo rm)`) see through, and the line is approved only if **every** simple command is. `sudo`, `env`, `xargs`, programs run by a path outside the system bin directories, `VAR=x` prefixes (other than a few harmless ones) and truncated, multi-line or dynamic text always ask. Output redirections count as edits (`> /dev/null` and in-repo files are fine, `> ~/.zshrc` asks).
+
+```toml
+# ~/.config/rift/policy.toml  (or <repo>/.rift/policy.toml, once trusted)
+
+[autopilot]
+countdown_ms = 1500        # 0 = answer immediately; only the user policy may set it
+
+[policy]
+defaults = true            # false drops the built-in rules
+
+[[rule]]
+id = "make-test"
+tool = "bash"              # bash | edit | write | file (edit+write) | read | web_fetch | mcp
+program = "make"           # a name or a list; matched after unwrapping quotes, sudo, sh -c ...
+subcommand = ["test", "lint", "run build"]   # leading words of the arguments
+without_flags = ["--prod"] # flags that must be absent (flags = [...] must be present)
+action = "approve"         # approve | deny | ask
+reason = "safe in this repo"
+
+[[rule]]
+id = "codex-may-edit-docs"
+tool = ["edit", "write"]
+agent = "codex"            # claude | codex | gemini | opencode | aider | cursor
+paths = ["{repo}/docs/**"] # {repo} = repo root, ~ = home; ** spans directories
+action = "approve"
+
+[[rule]]
+id = "no-secret-greps"
+tool = "bash"
+program = ["rg", "grep"]
+command = "* password*"    # glob over `program args...` (command_regex = "..." also works)
+action = "deny"            # deny = answer No and notify
+reason = "do not search for passwords"
+
+[[rule]]
+tool = "web_fetch"         # web fetches and MCP tools ask unless a rule names them
+command = "https://docs.rs/*"
+action = "approve"
+```
+
+A rule Rift cannot read (unknown key, bad value, bad regex) does not disappear silently: it becomes an *ask everything* rule and Rift shows the problem, so a typo can never loosen the policy. Policy files are re-read every couple of seconds. Code: `src/agents/policy.rs` (rules, engine, trust, log format) and `src/agents/autopilot.rs` (switches, countdown, files, overlay).
 
 ### Workflows
 
@@ -475,7 +534,7 @@ src/
 ├── window/              WindowManager, tabs, recursive split tree, panes, selection
 ├── shell_integration/   Embedded zsh/bash/fish hooks + auto-injection (never touches rc files)
 ├── blocks_ui/           Warp-style command blocks: gutter, chips, hover toolbar, folding, navigation
-├── agents/              Mission Control: detection, dock, approvals, metrics, New Agent + worktrees
+├── agents/              Mission Control: detection, dock, approvals, metrics, autopilot policy, New Agent + worktrees
 ├── review/              Change Review: per-turn checkpoints (git trees), diff overlay, revert
 ├── workflow/            Workflows: best of N + compare/merge, write & review, fix tests, task queues, workflows.toml
 ├── mcp/                 Built-in MCP server: Unix socket, `rift mcp` stdio bridge, tools, approval flow

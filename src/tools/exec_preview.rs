@@ -18,6 +18,15 @@ mod analysis;
 mod rules;
 mod shell_parse;
 
+pub use rules::{Flat, FlatArg, FlatCmd};
+
+/// Every simple command `cmd` would run, resolved through wrappers and quoting
+/// tricks by the same parser the safety rules use (see [`FlatCmd`]). Never
+/// executes or expands anything.
+pub fn flatten_commands(cmd: &str) -> Flat {
+    rules::flatten(&shell_parse::parse(cmd.trim()))
+}
+
 /// A single consequence of running the previewed command, shown as a
 /// bulleted line in the modal (`description`), optionally followed by a
 /// dimmer detail line (`detail`) — e.g. a concrete path, file count, or

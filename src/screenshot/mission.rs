@@ -36,7 +36,22 @@ fn pin_bottom(rows: usize, block: &[String]) -> Vec<u8> {
     s.into_bytes()
 }
 
-fn claude(s: &mut Stage, idx: usize) {
+/// What Claude Code asks for in the scene.
+pub(super) struct Ask {
+    pub command: &'static str,
+    pub description: &'static str,
+    pub always: &'static str,
+    pub risk: Option<&'static str>,
+}
+
+pub(super) const FORCE_PUSH: Ask = Ask {
+    command: "git push --force origin main",
+    description: "Publish the rate limiter",
+    always: "2. Yes, and don't ask again for git push commands in /Users/maya/dev/aurora",
+    risk: Some("Force-push rewrites history on origin/main"),
+};
+
+fn claude(s: &mut Stage, idx: usize, ask: &Ask) {
     let (cols, rows) = (s.pane(idx).terminal.cols, s.pane(idx).terminal.rows);
     let mut sc = Script::new();
     sc.out("{bold}>{0} add rate limiting to /v1/orders");
@@ -59,12 +74,12 @@ fn claude(s: &mut Stage, idx: usize) {
     let mut block = vec![format!("{{byellow}}\u{256d}{}\u{256e}{{0}}", "\u{2500}".repeat(w - 2))];
     block.push(row("Bash command"));
     block.push(row(""));
-    block.push(row("  git push --force origin main"));
-    block.push(row("  Publish the rate limiter"));
+    block.push(row(&format!("  {}", ask.command)));
+    block.push(row(&format!("  {}", ask.description)));
     block.push(row(""));
     block.push(row("Do you want to proceed?"));
     block.push(row("\u{276f} 1. Yes"));
-    for (i, l) in wrap("2. Yes, and don't ask again for git push commands in /Users/maya/dev/aurora", inner.saturating_sub(2)).iter().enumerate() {
+    for (i, l) in wrap(ask.always, inner.saturating_sub(2)).iter().enumerate() {
         block.push(row(&format!("  {}{l}", if i == 0 { "" } else { "   " })));
     }
     block.push(row("  3. No, and tell Claude what to do differently (esc)"));
@@ -169,6 +184,10 @@ pub fn build_menu(s: &mut Stage) {
 }
 
 pub(super) fn base(s: &mut Stage) {
+    base_with(s, &FORCE_PUSH);
+}
+
+pub(super) fn base_with(s: &mut Stage, ask: &Ask) {
     s.window_title = "aurora \u{2014} rift".into();
     s.set_tabs(&["aurora"]);
     s.dock_cols = 42;
@@ -190,7 +209,7 @@ pub(super) fn base(s: &mut Stage) {
         t.focus_pane(0);
     }
     s.layout();
-    claude(s, 0);
+    claude(s, 0, ask);
     codex(s, 1);
     gemini(s, 2);
 
@@ -222,7 +241,8 @@ pub(super) fn base(s: &mut Stage) {
         let mut info = PaneInfo { metrics: metrics::parse_screen(Some(*kind), lines), ..Default::default() };
         if i == 0 {
             info.prompt = prompt::parse(Some(*kind), lines);
-            info.risk = Risk::Risky(vec!["Force-push rewrites history on origin/main".into()]);
+            info.risk = ask.risk.map_or(Risk::Safe, |r| Risk::Risky(vec![r.into()]));
+            info.settled = true;
             info.turns = vec![digest(1, Some(161), Some((3, 45, 12))), digest(2, Some(58), Some((0, 0, 0))), digest(3, None, None)];
             info.files = (Some(3), 5);
         } else if i == 1 {

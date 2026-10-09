@@ -106,6 +106,7 @@ fn modal_open(app: &App) -> bool {
         || app.network_monitor.visible
         || app.process_tree.visible
         || app.mcp.overlay.visible
+        || app.agents_ui.policy_log.visible
         || app.system_info.visible
         || app.port_dashboard.visible
         || app.regex_playground.visible

@@ -33,6 +33,10 @@ pub enum Hit {
     /// The workflow block of a card: opens its task queue.
     Queue(usize),
     Mark(usize),
+    /// The autopilot line of a card: stops a running countdown, else toggles autopilot for that agent.
+    Autopilot(usize),
+    /// The dock header's autopilot switch.
+    AutopilotAll,
     Turn { uid: usize, id: u64 },
     Menu { uid: usize, item: super::control::MenuItem },
     /// Click outside the open menu.
@@ -73,6 +77,10 @@ pub struct AgentsUi {
     pub resizing: bool,
     /// Caret rectangle of the composer in the last frame (IME candidate window).
     pub ime_rect: Option<Rect>,
+    /// Autopilot: per-agent switches, countdowns, counters (see `autopilot.rs`).
+    pub auto: super::autopilot::Autopilot,
+    /// "Agents: Policy Log" overlay.
+    pub policy_log: super::autopilot::PolicyLog,
 }
 
 impl AgentsUi {
@@ -310,6 +318,8 @@ pub enum Row {
     Timeline(usize),
     /// Workflow lines: label, queue, countdown, reviewer note.
     Workflow(usize),
+    /// Autopilot lines: countdown, or switch state and counters.
+    Auto(usize),
 }
 
 /// What decides a card's rows.
@@ -330,6 +340,8 @@ pub struct CardFlags {
     pub turns: usize,
     /// Text lines of the workflow block (0 = none).
     pub workflow_lines: usize,
+    /// Text lines of the autopilot block (0 = none).
+    pub auto_lines: usize,
 }
 
 pub fn rows(f: &CardFlags, detail: Detail) -> Vec<Row> {
@@ -370,6 +382,9 @@ pub fn rows(f: &CardFlags, detail: Detail) -> Vec<Row> {
             v.push(Row::Buttons);
         } else if f.waiting && f.raw_lines > 0 {
             v.push(Row::Raw(f.raw_lines));
+        }
+        if f.auto_lines > 0 {
+            v.push(Row::Auto(f.auto_lines));
         }
         if f.confirm {
             v.push(Row::Confirm);
@@ -418,6 +433,7 @@ pub fn row_h(r: Row, tk: &Tokens) -> usize {
         Row::Actions => action_h(tk),
         Row::Timeline(n) => (n + 1) * lp,
         Row::Workflow(n) => n * lp,
+        Row::Auto(n) => n * lp + tk.sp.xs,
     }
 }
 
@@ -792,6 +808,18 @@ pub(crate) mod tests {
 
     fn flags() -> CardFlags {
         CardFlags { metrics_lines: 2, ..Default::default() }
+    }
+
+    #[test]
+    fn the_autopilot_block_follows_the_prompt_in_every_detail() {
+        let f = CardFlags { waiting: true, prompt_lines: 3, prompt_lines_compact: 2, auto_lines: 2, ..flags() };
+        for d in [Detail::Full, Detail::Compact] {
+            let r = rows(&f, d);
+            let (buttons, auto) = (r.iter().position(|x| *x == Row::Buttons).unwrap(), r.iter().position(|x| *x == Row::Auto(2)).unwrap());
+            assert_eq!(auto, buttons + 1, "{d:?}: the countdown sits right under the buttons");
+        }
+        assert!(!rows(&f, Detail::Min).iter().any(|r| matches!(r, Row::Auto(_))), "tiny cards stay tiny");
+        assert!(!rows(&flags(), Detail::Full).iter().any(|r| matches!(r, Row::Auto(_))), "quiet cards have no block");
     }
 
     #[test]

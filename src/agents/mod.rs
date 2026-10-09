@@ -49,6 +49,17 @@
 //!   background command-risk checks, review timeline), carries out answers /
 //!   interrupts / replies / restart / close, and handles the dock's mouse.
 //!
+//! # Autopilot
+//!
+//! * `policy.rs`: the auto-approval policy. Rules from `policy.toml` (user,
+//!   trusted repo, built-in defaults), the engine that judges a parsed prompt
+//!   (shell parser + safety-engine severity as a hard floor), protected paths,
+//!   repo-policy trust (path + SHA-256) and the audit-log format.
+//! * `autopilot.rs`: per-agent switches, the cancellable countdown state
+//!   machine, policy files / trust / log on disk, the "Policy Log" overlay and
+//!   the glue that answers prompts (through `console::send_verified`) and
+//!   MCP `run_command` requests.
+//!
 //! The rest of the module is UI and glue: `runtime.rs` (polling `App`),
 //! `ui.rs` + `dock.rs` (dock state, layout and drawing, tab badges, pane tint),
 //! `notify.rs` (desktop notifications, dock badge), `launch.rs` ("New Agent",
@@ -63,6 +74,7 @@
 //! (queue, countdown, reviewer note) to the dock cards plus the `t` / `f` / `S`
 //! keys.
 
+pub mod autopilot;
 pub mod cli;
 pub mod console;
 pub mod control;
@@ -73,6 +85,7 @@ pub mod inbox;
 pub mod launch;
 pub mod metrics;
 pub mod notify;
+pub mod policy;
 pub mod prompt;
 pub mod registry;
 pub mod runtime;

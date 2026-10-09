@@ -27,7 +27,7 @@ use crate::tools::hud::{Hud, HudData};
 use crate::window::tab::{PaneNode, SplitDir, Tab};
 use crate::window::{Pane, PaneRect, WindowManager};
 
-pub const NAMES: [&str; 20] = [
+pub const NAMES: [&str; 21] = [
     "hero",
     "blocks",
     "ai-chat",
@@ -48,6 +48,7 @@ pub const NAMES: [&str; 20] = [
     "workflow-dock",
     "workflow-wizard",
     "workflow-queue",
+    "autopilot",
 ];
 
 pub struct SceneSpec {
@@ -82,6 +83,7 @@ pub fn spec(name: &str) -> Option<SceneSpec> {
         "workflow-dock" => (18.0 / 24.0, |s| super::workflow::build_dock(s)),
         "workflow-wizard" => (18.0 / 24.0, |s| super::workflow::build_wizard(s)),
         "workflow-queue" => (18.0 / 24.0, |s| super::workflow::build_queue(s)),
+        "autopilot" => (18.0 / 24.0, |s| super::autopilot::build(s)),
         _ => return None,
     };
     Some(SceneSpec { font_mul, build })
@@ -121,6 +123,8 @@ pub struct Stage {
     pub dock_cols: usize,
     /// A workflow overlay drawn over everything (wizard, queue editor, compare view).
     pub workflow: Option<super::workflow::Overlay>,
+    /// Fixed "now" for time-dependent drawing (countdowns); `None` = the real clock.
+    pub clock: Option<Instant>,
     font_path: String,
     font_px: f32,
 }
@@ -151,6 +155,7 @@ impl Stage {
             agents_ui: crate::agents::ui::AgentsUi::new(),
             dock_cols: 0,
             workflow: None,
+            clock: None,
             font_path: font_path.to_string(),
             font_px,
         }
@@ -301,7 +306,7 @@ impl Stage {
         if self.agents_ui.visible || !self.agents.sessions().is_empty() {
             let dock = self.agents_dock();
             crate::agents::runtime::draw(
-                &self.agents, &mut self.agents_ui, &self.wm, &mut self.renderer, &mut buf, w, h, area, dock, Instant::now(), "",
+                &self.agents, &mut self.agents_ui, &self.wm, &mut self.renderer, &mut buf, w, h, area, dock, self.clock.unwrap_or_else(Instant::now), "",
             );
         }
 
@@ -324,6 +329,10 @@ impl Stage {
         }
         if let Some(o) = &mut self.workflow {
             o.render(&mut buf, w, h, &mut self.renderer.font, &self.renderer.theme);
+        }
+        if self.agents_ui.policy_log.visible {
+            let area = self.agents_dock().map(|d| crate::ui::kit::Rect::new(d.right(), 0, w.saturating_sub(d.right()), h));
+            self.agents_ui.policy_log.render(&mut buf, w, h, &mut self.renderer.font, &self.renderer.theme, area);
         }
         buf
     }
