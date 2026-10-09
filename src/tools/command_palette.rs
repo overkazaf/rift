@@ -243,6 +243,8 @@ pub enum ParamKind {
     Ask,
     /// `model <name>`: switch the AI model (local models first).
     Model,
+    /// `agent <name>`: launch an AI coding agent (here / worktree / layout).
+    Agent,
 }
 
 impl ParamKind {
@@ -256,6 +258,7 @@ impl ParamKind {
             ParamKind::Shell => ">",
             ParamKind::Ask => "?",
             ParamKind::Model => "model",
+            ParamKind::Agent => "agent",
         }
     }
 }
@@ -267,6 +270,7 @@ const PARAM_WORDS: &[(&str, ParamKind)] = &[
     ("ssh", ParamKind::Ssh),
     ("cd", ParamKind::Cd),
     ("model", ParamKind::Model),
+    ("agent", ParamKind::Agent),
 ];
 
 #[derive(Debug, PartialEq, Eq)]
@@ -356,6 +360,7 @@ pub enum Category {
     Tabs,
     Tools,
     Ai,
+    Agents,
     Browser,
     Effects,
     Themes,
@@ -363,11 +368,12 @@ pub enum Category {
 }
 
 impl Category {
-    const ORDER: [Category; 8] = [
+    const ORDER: [Category; 9] = [
         Category::Panes,
         Category::Tabs,
         Category::Tools,
         Category::Ai,
+        Category::Agents,
         Category::Browser,
         Category::Effects,
         Category::Themes,
@@ -380,6 +386,7 @@ impl Category {
             Category::Tabs => "Tabs",
             Category::Tools => "Tools",
             Category::Ai => "AI",
+            Category::Agents => "Agents",
             Category::Browser => "Browser",
             Category::Effects => "Effects",
             Category::Themes => "Themes",
@@ -394,6 +401,7 @@ impl Category {
             Category::Tabs => '+',
             Category::Tools => '*',
             Category::Ai => '@',
+            Category::Agents => '!',
             Category::Browser => '~',
             Category::Effects => '%',
             Category::Themes => '&',
@@ -439,6 +447,8 @@ pub enum PaletteAction {
     PrivacyReport,
     /// "MCP Activity": what connected coding agents asked Rift to do.
     McpActivity,
+    /// "New Agent": launch an agent CLI (tab / worktree / grid).
+    Agent(crate::agents::runtime::Launch),
     /// Internal: completes the query to this keyword; never dispatched.
     Template(&'static str),
 }
@@ -489,6 +499,10 @@ pub struct PaletteContext {
     pub font_size: f32,
     /// Models for "AI: Select Model" (discovered local ones, then the cloud one).
     pub models: Vec<crate::ai::local::picker::ModelOption>,
+    /// Agent CLIs found on this machine (for `agent ...`).
+    pub agents: Vec<crate::agents::AgentKind>,
+    /// The active pane sits inside a git repository (worktrees possible).
+    pub in_git_repo: bool,
 }
 
 /// Live-preview request for the dispatcher (theme browsing).
@@ -796,6 +810,7 @@ impl CommandPalette {
                 v.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
                 v.into_iter().map(|(_, _, h)| h).collect()
             }
+            ParamKind::Agent => self.agent_hits(arg),
             ParamKind::Ssh => {
                 let mut v: Vec<(i32, usize, Hit)> = Vec::new();
                 for (order, h) in self.ctx.ssh_hosts.iter().enumerate() {
@@ -833,6 +848,59 @@ impl CommandPalette {
             }
             _ => Vec::new(),
         }
+    }
+
+    /// `agent <query>`: installed agents x {current dir, new worktree}, plus grid layouts.
+    fn agent_hits(&self, arg: &str) -> Vec<Hit> {
+        use crate::agents::runtime::Launch;
+        let sec = Section::Cat(Category::Agents);
+        let mk = |name: String, detail: String, action: PaletteAction, matches: Vec<usize>| Hit {
+            id: None,
+            name,
+            category: Category::Agents,
+            shortcut: Some(detail),
+            meta: true,
+            action,
+            matches,
+            section: sec,
+        };
+        let mut scored: Vec<(i32, usize, Hit)> = Vec::new();
+        let mut push = |label: String, detail: &str, action: PaletteAction| {
+            let order = scored.len();
+            if let Some(m) = fuzzy_match(arg, &label) {
+                scored.push((m.score, order, mk(label, detail.to_string(), action, m.indices)));
+            }
+        };
+        for &k in &self.ctx.agents {
+            push(format!("{}: current directory", k.name()), "new tab", PaletteAction::Agent(Launch::Here(k)));
+            if self.ctx.in_git_repo {
+                push(
+                    format!("{}: new git worktree", k.name()),
+                    "git worktree add ../<repo>-<agent>-<n>",
+                    PaletteAction::Agent(Launch::Worktree(k)),
+                );
+            }
+        }
+        if let Some(&k) = self.ctx.agents.first() {
+            for (c, r) in [(2usize, 1usize), (2, 2), (3, 2)] {
+                push(
+                    format!("Layout {c}\u{d7}{r}: {} x{}", k.name(), c * r),
+                    if self.ctx.in_git_repo { "one worktree each" } else { "shared directory" },
+                    PaletteAction::Agent(Launch::Layout { kind: k, cols: c, rows: r }),
+                );
+            }
+        }
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        let mut out: Vec<Hit> = scored.into_iter().map(|(_, _, h)| h).collect();
+        if self.ctx.agents.is_empty() {
+            out.push(mk(
+                "No agent CLI found on PATH".into(),
+                "claude, codex, gemini, opencode, aider, cursor-agent".into(),
+                PaletteAction::Template("agent "),
+                Vec::new(),
+            ));
+        }
+        out
     }
 
     // ── theme live preview ──
@@ -1105,6 +1173,7 @@ impl CommandPalette {
             ParamKind::Shell => "Run a shell command in the active pane".to_string(),
             ParamKind::Ask => "Ask the AI assistant".to_string(),
             ParamKind::Model => "Local models run on this machine (nothing is sent out); Enter switches".to_string(),
+            ParamKind::Agent => "Launch an AI coding agent: current directory, new git worktree, or a grid".to_string(),
         };
         Some((kind.keyword(), desc))
     }
@@ -1118,6 +1187,7 @@ impl CommandPalette {
             Some((ParamKind::Cd, _)) => "Type a directory",
             Some((ParamKind::Shell, _)) => "Type a shell command",
             Some((ParamKind::Ask, _)) => "Type a question",
+            Some((ParamKind::Agent, _)) => "No matching agent",
             Some((ParamKind::Model, _)) => "No model found - start Ollama / LM Studio, or set [llm] in config.toml",
             None => "No matching commands",
         }
@@ -1410,6 +1480,11 @@ fn catalog() -> Vec<PaletteItem> {
     v.push(entry("Observer Mode", Ai, s("Shift+N"), Menu(MenuAction::ObserverMode)));
     v.push(entry("Advisor Mode", Ai, None, Menu(MenuAction::AdvisorMode)));
     v.push(entry("Ask AI About This", Ai, if cfg!(target_os = "macos") { s("K") } else { None }, Menu(MenuAction::AskAboutThis)));
+    // Agents (Mission Control)
+    v.push(entry("Agent Mission Control", Agents, s("Shift+;"), Menu(MenuAction::AgentMissionControl)));
+    v.push(entry("Next Agent Needing Attention", Agents, s("Shift+."), Menu(MenuAction::AgentNextAttention)));
+    v.push(entry("New Agent...", Agents, None, Menu(MenuAction::AgentNew)));
+    v.push(entry("Agent Layout: 2\u{d7}2", Agents, None, Menu(MenuAction::AgentLayout2x2)));
     v.push(entry("Toggle Auto Fix Suggestions", Ai, None, Menu(MenuAction::AutoFixToggle)));
     v.push(entry("Toggle # Natural Language", Ai, None, Menu(MenuAction::NaturalLanguageToggle)));
     v.push(entry("AI: Select Model", Ai, None, PaletteAction::Template("model ")));
@@ -1452,6 +1527,8 @@ fn catalog() -> Vec<PaletteItem> {
     v.push(entry("Reset Zoom", Settings, s("0"), Menu(MenuAction::ZoomReset)));
     v.push(entry("UI Gallery", Settings, None, Menu(MenuAction::UiGallery)));
     v.push(entry("MCP Activity", Tools, None, PaletteAction::McpActivity));
+    v.push(entry("Review: Changes Since Checkpoint", Tools, s("Shift+J"), Menu(MenuAction::ReviewChanges)));
+    v.push(entry("Review: Mark Checkpoint", Tools, None, Menu(MenuAction::ReviewMark)));
 
     // Parameterised commands (Tab / Enter completes the keyword)
     v.push(entry("theme <name>", Themes, None, PaletteAction::Template("theme ")));
@@ -1461,6 +1538,7 @@ fn catalog() -> Vec<PaletteItem> {
     v.push(entry("cd <path>", Tools, None, PaletteAction::Template("cd ")));
     v.push(entry("> shell command", Tools, None, PaletteAction::Template("> ")));
     v.push(entry("? ask AI", Ai, None, PaletteAction::Template("? ")));
+    v.push(entry("agent <name>", Agents, None, PaletteAction::Template("agent ")));
     v
 }
 
@@ -1497,6 +1575,8 @@ mod tests {
                 SshHostInfo { alias: "staging".into(), detail: "dev@stg.example.com:2222".into() },
             ],
             font_size: 15.0,
+            agents: vec![crate::agents::AgentKind::ClaudeCode, crate::agents::AgentKind::Codex],
+            in_git_repo: true,
             models: vec![
                 crate::ai::local::picker::ModelOption {
                     label: "qwen2.5-coder:7b".into(),
@@ -2052,7 +2132,10 @@ mod tests {
             | MenuAction::ObserverMode | MenuAction::AdvisorMode | MenuAction::AskAboutThis
             | MenuAction::AutoFixToggle | MenuAction::NaturalLanguageToggle | MenuAction::TimeWarp
             | MenuAction::HudToggle | MenuAction::BroadcastToggle | MenuAction::Find | MenuAction::ClearBuffer
-            | MenuAction::CompareOutput | MenuAction::UiGallery | MenuAction::Pane(_) => {}
+            | MenuAction::CompareOutput | MenuAction::UiGallery | MenuAction::ReviewChanges
+            | MenuAction::ReviewMark | MenuAction::Pane(_)
+            | MenuAction::AgentMissionControl | MenuAction::AgentNextAttention | MenuAction::AgentNew
+            | MenuAction::AgentLayout2x2 => {}
         }
     }
 
@@ -2067,7 +2150,8 @@ mod tests {
             M::PortDashboard, M::RegexPlayground, M::Heatmap, M::SecretMask, M::AuditLog, M::TeachingMode,
             M::AiAssistant, M::ObserverMode, M::AdvisorMode, M::AskAboutThis, M::AutoFixToggle,
             M::NaturalLanguageToggle, M::TimeWarp, M::HudToggle, M::BroadcastToggle,
-            M::Find, M::ClearBuffer, M::CompareOutput, M::UiGallery,
+            M::Find, M::ClearBuffer, M::CompareOutput, M::UiGallery, M::ReviewChanges, M::ReviewMark,
+            M::AgentMissionControl, M::AgentNextAttention, M::AgentNew, M::AgentLayout2x2,
         ];
         for c in [BrowserCmd::Back, BrowserCmd::Forward, BrowserCmd::Reload, BrowserCmd::FocusAddress, BrowserCmd::Close] {
             expected.push(M::Browser(c));
@@ -2091,6 +2175,33 @@ mod tests {
         for m in expected {
             assert!(have.contains(&format!("{m:?}")), "missing palette entry for {m:?}");
         }
+    }
+
+    #[test]
+    fn agent_mode_lists_installed_agents_worktrees_and_layouts() {
+        use crate::agents::runtime::Launch;
+        use crate::agents::AgentKind;
+        let mut p = pal();
+        open(&mut p);
+        p.set_query("agent ");
+        let n = names(&p);
+        assert!(n.contains(&"Claude Code: current directory"), "{n:?}");
+        assert!(n.contains(&"Claude Code: new git worktree"));
+        assert!(n.contains(&"Codex: current directory"));
+        assert!(n.iter().any(|x| x.starts_with("Layout 2\u{d7}2")));
+        p.set_query("agent codex wor");
+        assert_eq!(names(&p).first().copied(), Some("Codex: new git worktree"));
+        let act = p.handle_key(PaletteKey::Enter);
+        assert!(matches!(act, Some(PaletteAction::Agent(Launch::Worktree(AgentKind::Codex)))));
+        // Outside a repo only "current directory" is offered.
+        let mut p = pal();
+        p.open(PaletteContext { agents: vec![AgentKind::Aider], in_git_repo: false, ..Default::default() });
+        p.set_query("agent ");
+        assert!(!names(&p).iter().any(|x| x.contains("worktree")));
+        // Nothing installed: an explanatory row instead of an empty list.
+        p.open(PaletteContext::default());
+        p.set_query("agent ");
+        assert_eq!(names(&p), vec!["No agent CLI found on PATH"]);
     }
 
     #[test]

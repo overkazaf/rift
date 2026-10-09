@@ -25,3 +25,26 @@ pub fn apply_transparency(window: &winit::window::Window, opacity: f64) {
         log::info!("macOS: window transparency set to {:.0}%", opacity * 100.0);
     }
 }
+
+/// Set (or clear, with 0) the number shown on the Dock icon.
+#[allow(deprecated)]
+pub fn set_dock_badge(count: usize) {
+    use cocoa::appkit::NSApp;
+    use cocoa::foundation::NSString;
+    unsafe {
+        let app: id = NSApp();
+        if app.is_null() {
+            return;
+        }
+        let tile: id = objc::msg_send![app, dockTile];
+        if tile.is_null() {
+            return;
+        }
+        let label: id = if count == 0 {
+            nil
+        } else {
+            NSString::alloc(nil).init_str(&count.to_string())
+        };
+        let _: () = objc::msg_send![tile, setBadgeLabel: label];
+    }
+}

@@ -58,6 +58,16 @@ pub enum MenuAction {
     Find,
     ClearBuffer,
     CompareOutput,
+    /// Change Review: open the diff since the last checkpoint.
+    ReviewChanges,
+    /// Change Review: snapshot the repo of the active pane.
+    ReviewMark,
+    /// Toggle the Agent Mission Control dock.
+    AgentMissionControl,
+    AgentNextAttention,
+    /// "New Agent..." (opens the palette in agent mode).
+    AgentNew,
+    AgentLayout2x2,
     Pane(PaneCmd),
 }
 
@@ -299,6 +309,8 @@ impl AppMenuBar {
         let secret = MenuItem::new("Secret Masking", true, accel("CmdOrCtrl+Shift+M"));
         let audit = MenuItem::new("Audit Log", true, accel("CmdOrCtrl+Shift+U"));
         let teach = MenuItem::new("Teaching Mode", true, accel("CmdOrCtrl+Shift+L"));
+        let review = MenuItem::new("Review: Changes Since Checkpoint", true, accel("CmdOrCtrl+Shift+J"));
+        let review_mark = MenuItem::new("Review: Mark Checkpoint", true, None::<Accelerator>);
 
         actions.insert(fm.id().clone(), MenuAction::FileManager);
         actions.insert(git.id().clone(), MenuAction::GitPanel);
@@ -313,6 +325,8 @@ impl AppMenuBar {
         actions.insert(secret.id().clone(), MenuAction::SecretMask);
         actions.insert(audit.id().clone(), MenuAction::AuditLog);
         actions.insert(teach.id().clone(), MenuAction::TeachingMode);
+        actions.insert(review.id().clone(), MenuAction::ReviewChanges);
+        actions.insert(review_mark.id().clone(), MenuAction::ReviewMark);
 
         let _ = tools_menu.append_items(&[
             &fm, &git, &docker, &cicd,
@@ -322,6 +336,8 @@ impl AppMenuBar {
             &regex_play,
             &PredefinedMenuItem::separator(),
             &heatmap, &secret, &audit, &teach,
+            &PredefinedMenuItem::separator(),
+            &review, &review_mark,
         ]);
 
         // ── AI menu ──
@@ -348,6 +364,18 @@ impl AppMenuBar {
             &observer,
             &advisor,
         ]);
+
+        // ── Agents menu ──
+        let agents_menu = Submenu::new("Agents", true);
+        let mc = MenuItem::new("Mission Control", true, accel("CmdOrCtrl+Shift+;"));
+        let next_att = MenuItem::new("Next Agent Needing Attention", true, accel("CmdOrCtrl+Shift+."));
+        let new_agent = MenuItem::new("New Agent...", true, None::<Accelerator>);
+        let layout22 = MenuItem::new("Agent Layout: 2\u{d7}2", true, None::<Accelerator>);
+        actions.insert(mc.id().clone(), MenuAction::AgentMissionControl);
+        actions.insert(next_att.id().clone(), MenuAction::AgentNextAttention);
+        actions.insert(new_agent.id().clone(), MenuAction::AgentNew);
+        actions.insert(layout22.id().clone(), MenuAction::AgentLayout2x2);
+        let _ = agents_menu.append_items(&[&mc, &next_att, &PredefinedMenuItem::separator(), &new_agent, &layout22]);
 
         // ── Window menu ──
         let window_menu = Submenu::new("Window", true);
@@ -377,6 +405,7 @@ impl AppMenuBar {
             &term_menu,
             &tools_menu,
             &ai_menu,
+            &agents_menu,
             &window_menu,
             &help_menu,
         ]);

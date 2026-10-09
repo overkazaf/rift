@@ -226,6 +226,7 @@ impl<'a> Ctx<'a> {
 
     /// Darken the whole buffer; `amount` is the darkening fraction (0..=1).
     pub fn backdrop(&mut self, amount: f32) {
+        crate::ui::mark_backdrop();
         let keep = ((1.0 - amount.clamp(0.0, 1.0)) * 256.0) as u32;
         for px in self.buf.iter_mut() {
             let r = ((*px >> 16) & 0xff) * keep >> 8;

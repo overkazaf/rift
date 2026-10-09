@@ -1,4 +1,4 @@
-use super::{Config, Osc52Policy, Rgb};
+use super::{Config, Osc52Policy, RendererMode, Rgb};
 use crate::ai::consent::Consent;
 use crate::effects::EffectKind;
 use std::collections::HashMap;
@@ -401,6 +401,15 @@ fn parse_toml_config(content: &str) -> Config {
     if let Some(v) = get_int(&map, "general", "bold_is_bright").or_else(|| get_int(&map, "", "bold_is_bright")) {
         config.bold_is_bright = v != 0;
     }
+    if let Some(v) = get_str(&map, "general", "renderer").or_else(|| get_str(&map, "", "renderer")) {
+        match RendererMode::parse(&v) {
+            Some(m) => config.renderer = m,
+            None => log::warn!("Unknown renderer '{v}' (valid: auto, gpu, cpu)"),
+        }
+    }
+    if let Some(v) = get_int(&map, "general", "font_ligatures").or_else(|| get_int(&map, "", "font_ligatures")) {
+        config.font_ligatures = Some(v != 0);
+    }
 
     if let Some(fg) = get_rgb(&map, "theme.custom", "fg") {
         config.theme.fg = fg;
@@ -455,6 +464,30 @@ fn parse_toml_config(content: &str) -> Config {
             Some(a) => config.mcp.allow_run = a,
             None => log::warn!("Unknown [mcp] allow_run '{v}' (valid: ask, never)"),
         }
+    }
+
+    // [agents]: Agent Mission Control.
+    if let Some(v) = get_int(&map, "agents", "enabled") {
+        config.agents.enabled = v != 0;
+    }
+    if let Some(v) = get_int(&map, "agents", "notify") {
+        config.agents.notify = v != 0;
+    }
+    if let Some(v) = get_int(&map, "agents", "sound") {
+        config.agents.sound = v != 0;
+    }
+    if let Some(v) = get_str(&map, "agents", "default_agent") {
+        config.agents.default_agent = v;
+    }
+    match map.get("agents").and_then(|s| s.get("approval_patterns")) {
+        Some(TomlValue::Array(items)) => {
+            config.agents.approval_patterns = items
+                .iter()
+                .filter_map(|v| if let TomlValue::Str(s) = v { Some(s.clone()) } else { None })
+                .collect();
+        }
+        Some(TomlValue::Str(s)) => config.agents.approval_patterns = vec![s.clone()],
+        _ => {}
     }
 
     // LLM config: a `[llm]` section with a provider is an explicit opt-in.
@@ -638,6 +671,34 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn renderer_and_ligature_settings_parse() {
+        let c = parse_toml_config("");
+        assert_eq!(c.renderer, RendererMode::Auto);
+        assert_eq!(c.font_ligatures, None);
+        let c = parse_toml_config("[general]\nrenderer = \"cpu\"\nfont_ligatures = false\n");
+        assert_eq!(c.renderer, RendererMode::Cpu);
+        assert_eq!(c.font_ligatures, Some(false));
+        let c = parse_toml_config("renderer = \"GPU\"\nfont_ligatures = true\n");
+        assert_eq!(c.renderer, RendererMode::Gpu);
+        assert_eq!(c.font_ligatures, Some(true));
+        let c = parse_toml_config("renderer = \"vulkan-or-bust\"\n");
+        assert_eq!(c.renderer, RendererMode::Auto, "unknown values keep the default");
+    }
+
+    #[test]
+    fn agents_section_defaults_and_parses() {
+        let c = parse_toml_config("");
+        assert!(c.agents.enabled && c.agents.notify && !c.agents.sound);
+        assert!(c.agents.approval_patterns.is_empty());
+        let c = parse_toml_config(
+            "[agents]\nenabled = false\nnotify = false\nsound = true\ndefault_agent = \"codex\"\napproval_patterns = [\"ship it?\", \"CONFIRM\"]\n",
+        );
+        assert!(!c.agents.enabled && !c.agents.notify && c.agents.sound);
+        assert_eq!(c.agents.default_agent, "codex");
+        assert_eq!(c.agents.approval_patterns, vec!["ship it?".to_string(), "CONFIRM".to_string()]);
+    }
 
     #[test]
     fn mcp_section_defaults_and_parses() {

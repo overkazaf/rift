@@ -10,8 +10,10 @@
 //!   fontdue cannot rasterize it. Such fonts are skipped; emoji fall back to a
 //!   monochrome font if one is installed (Noto Emoji, Symbola, Apple Symbols),
 //!   otherwise a placeholder box outline is drawn so the cell is not blank.
-//! * Ligatures: fontdue does no shaping, so ligatures are not supported.
-//!   TODO(ligatures): out of scope; would need a shaping engine (rustybuzz).
+//! * Ligatures: fontdue does no shaping. Runs of same-style primary-font cells
+//!   are shaped with rustybuzz in `renderer::shape`; glyphs that differ from
+//!   the plain cmap mapping (contextual alternates, ligatures) are rasterized
+//!   by glyph id through [`FontManager::rasterize_gid`].
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -180,9 +182,35 @@ pub fn discover_fallbacks(dirs: &[PathBuf], exclude: Option<&Path>) -> Vec<PathB
 struct GFont {
     font: fontdue::Font,
     latin1: [u16; 128],
+    /// Raw font bytes (primary / styled faces only) for the shaper.
+    data: Option<&'static [u8]>,
+    index: u32,
+}
+
+/// Read a font file once and keep it for the lifetime of the process, so
+/// parsed faces (rustybuzz) can borrow it. Cached per path: re-initialising
+/// the font (zoom, display scale change) does not leak another copy.
+fn static_font_data(path: &Path) -> Option<&'static [u8]> {
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, &'static [u8]>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut map = cache.lock().ok()?;
+    if let Some(d) = map.get(path) {
+        return Some(d);
+    }
+    let bytes = std::fs::read(path).ok()?;
+    let leaked: &'static [u8] = Box::leak(bytes.into_boxed_slice());
+    map.insert(path.to_path_buf(), leaked);
+    Some(leaked)
 }
 
 impl GFont {
+    fn from_static(data: &'static [u8], size: f32, index: u32) -> Option<Self> {
+        let mut f = Self::from_bytes(data, size, index)?;
+        f.data = Some(data);
+        Some(f)
+    }
+
     fn from_bytes(data: &[u8], size: f32, index: u32) -> Option<Self> {
         let settings = fontdue::FontSettings {
             collection_index: index,
@@ -207,7 +235,7 @@ impl GFont {
                 }
             }
         }
-        Some(Self { font, latin1 })
+        Some(Self { font, latin1, data: None, index })
     }
 
     fn glyph(&self, c: char) -> u16 {
@@ -268,11 +296,11 @@ fn load_font(path: &Path, size: f32) -> Option<GFont> {
 
 impl FontManager {
     pub fn new(font_path: &str, font_size: f32) -> Self {
-        let font_data = std::fs::read(font_path)
-            .unwrap_or_else(|e| panic!("Failed to read font {font_path}: {e}"));
+        let font_data = static_font_data(Path::new(font_path))
+            .unwrap_or_else(|| panic!("Failed to read font {font_path}"));
         log::info!("Loaded font: {font_path}");
 
-        let font = GFont::from_bytes(&font_data, font_size, 0).expect("Failed to parse font");
+        let font = GFont::from_static(font_data, font_size, 0).expect("Failed to parse font");
 
         let metrics = font
             .font
@@ -283,7 +311,7 @@ impl FontManager {
 
         let (m_metrics, _) = font.font.rasterize('M', font_size);
         let cell_width = m_metrics.advance_width.ceil() as usize;
-        let deco = deco_metrics(&font_data, font_size, baseline, cell_height, cell_width);
+        let deco = deco_metrics(font_data, font_size, baseline, cell_height, cell_width);
 
         let fallbacks = discover_fallbacks(&system_font_dirs(), Some(Path::new(font_path)))
             .into_iter()
@@ -317,8 +345,8 @@ impl FontManager {
         if self.styled[slot].is_none() {
             let (b, i) = (slot & BOLD as usize != 0, slot & ITALIC as usize != 0);
             let face = find_face(&self.primary_path, b, i).and_then(|(path, idx)| {
-                let data = std::fs::read(&path).ok()?;
-                let f = GFont::from_bytes(&data, self.font_size, idx)?;
+                let data = static_font_data(&path)?;
+                let f = GFont::from_static(data, self.font_size, idx)?;
                 log::info!("Loaded styled face (bold={b}, italic={i}): {} #{idx}", path.display());
                 Some(f)
             });
@@ -504,6 +532,94 @@ impl FontManager {
             Source::None => return vec![0u8; target_w * ch],
         };
         place_mark(&metrics, &bitmap, target_w, ch, baseline)
+    }
+}
+
+/// The face a run of `style` text is shaped with (see [`FontManager::shaping_face`]).
+#[derive(Clone, Copy)]
+pub struct ShapeFace {
+    /// Raw font file bytes and collection index (for rustybuzz).
+    pub data: &'static [u8],
+    pub index: u32,
+    /// Face slot: 0 = primary, otherwise the style bits of a loaded styled face.
+    pub slot: usize,
+    /// Bold / italic still to be synthesized on top of this face.
+    pub synth_bold: bool,
+    pub synth_italic: bool,
+}
+
+/// A glyph rasterized by glyph id: tight coverage bitmap plus the offset of
+/// its top-left corner from the glyph origin (left edge of the glyph's first
+/// cell, top of the cell). The ink may extend outside the cell (ligature
+/// glyphs reach back into the previous cell).
+pub struct GidBitmap {
+    pub data: Vec<u8>,
+    pub w: usize,
+    pub h: usize,
+    pub x: i32,
+    pub y: i32,
+}
+
+impl FontManager {
+    pub fn font_size(&self) -> f32 {
+        self.font_size
+    }
+
+    /// Whether the primary face maps `c` to a real glyph.
+    #[inline]
+    pub fn primary_has_glyph(&self, c: char) -> bool {
+        self.primary.glyph(c) != 0
+    }
+
+    /// Whether the face in `slot` maps `c` to a real glyph.
+    pub fn slot_has_glyph(&self, slot: usize, c: char) -> bool {
+        if slot == 0 {
+            return self.primary.glyph(c) != 0;
+        }
+        self.styled[slot].as_ref().and_then(|f| f.as_ref()).map_or(false, |f| f.glyph(c) != 0)
+    }
+
+    /// The face used for primary-font text of `style`, with the synthesis
+    /// that [`render`](Self::render) would apply on top of it. `None` when
+    /// the font bytes are unavailable.
+    pub fn shaping_face(&mut self, style: u8) -> Option<ShapeFace> {
+        let (slot, synth_bold, synth_italic) = self.face_for(style);
+        let f = if slot == 0 { Some(&self.primary) } else { self.styled[slot].as_ref().and_then(|f| f.as_ref()) }?;
+        Some(ShapeFace { data: f.data?, index: f.index, slot, synth_bold, synth_italic })
+    }
+
+    /// Rasterize glyph `gid` of the face in `slot`, baseline-aligned to the
+    /// cell grid with its origin at the cell's left edge. Unlike
+    /// [`place_glyph`] the ink is not clipped to one cell horizontally.
+    pub fn rasterize_gid(&mut self, slot: usize, gid: u16, synth_bold: bool, synth_italic: bool) -> GidBitmap {
+        let (ch, baseline, size) = (self.cell_height, self.baseline, self.font_size);
+        let empty = GidBitmap { data: Vec::new(), w: 0, h: 0, x: 0, y: 0 };
+        let font = if slot == 0 { Some(&self.primary) } else { self.styled[slot].as_ref().and_then(|f| f.as_ref()) };
+        let Some(font) = font else { return empty };
+        let (m, bitmap) = font.font.rasterize_indexed(gid, size);
+        if bitmap.is_empty() || m.width == 0 || m.height == 0 {
+            return empty;
+        }
+        // Margins leave room for the horizontal spill of synthetic bold / oblique.
+        let margin = 2 + (ch as f32 * OBLIQUE_SLANT).ceil() as usize;
+        let w = m.width + 2 * margin;
+        let mut out = vec![0u8; w * ch];
+        let top = baseline as i32 - m.ymin - m.height as i32;
+        for gy in 0..m.height {
+            let cy = top + gy as i32;
+            if cy < 0 || cy >= ch as i32 {
+                continue;
+            }
+            let dst = &mut out[cy as usize * w + margin..cy as usize * w + margin + m.width];
+            dst.copy_from_slice(&bitmap[gy * m.width..(gy + 1) * m.width]);
+        }
+        if synth_bold {
+            embolden(&mut out, w, ch);
+        }
+        if synth_italic {
+            shear(&mut out, w, ch, baseline);
+        }
+        GidBitmap { data: out, w, h: ch, x: m.xmin - margin as i32, y: 0 }
     }
 }
 

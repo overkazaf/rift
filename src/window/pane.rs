@@ -155,6 +155,14 @@ impl PtyKind {
         }
     }
 
+    /// Shell pid and the PTY's current foreground process group (local panes only).
+    pub fn shell_and_foreground(&self) -> Option<(u32, u32)> {
+        match self {
+            PtyKind::Local(p) => Some((p.pid()?, p.foreground_pgid()?)),
+            _ => None,
+        }
+    }
+
     pub fn write(&mut self, data: &[u8]) {
         match self {
             PtyKind::Local(p) => p.write(data),
@@ -187,14 +195,48 @@ pub struct Pane {
     carry_pos: usize,
     /// Set once the child exited and "[process exited N]" was printed.
     pub exited: Option<u32>,
+    /// Output / input timing for the agent supervisor (see `crate::agents`).
+    pub act: PaneActivity,
 }
+
+/// Output and input timing of a pane, used by Agent Mission Control to tell an
+/// agent that is working (output keeps coming) from one that waits for you.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PaneActivity {
+    /// Output bytes parsed so far, not counting local echo of typed keys.
+    pub bytes: u64,
+    /// When non-echo output last arrived.
+    pub last_output: Option<Instant>,
+    /// Last write to the PTY (keys, paste).
+    pub last_input: Option<Instant>,
+    /// Last write that contained a line break (a submitted prompt / answer).
+    pub last_submit: Option<Instant>,
+}
+
+/// Keys and pastes count as "the user is answering"; terminal-generated
+/// reports (focus in/out, mouse) do not.
+pub fn is_user_input(data: &[u8]) -> bool {
+    !(data.starts_with(b"\x1b[I") || data.starts_with(b"\x1b[O") || data.starts_with(b"\x1b[<") || data.starts_with(b"\x1b[M"))
+}
+
+/// Does this PTY write contain a submitted line (Enter, plain or kitty-encoded)?
+pub fn is_submit(data: &[u8]) -> bool {
+    data.iter().any(|b| *b == b'\r' || *b == b'\n')
+        || data.windows(5).any(|w| w == b"\x1b[13u")
+        || data.windows(5).any(|w| w == b"\x1b[13;")
+}
+
+/// Output arriving this soon after a keystroke, and at most [`ECHO_MAX_BYTES`]
+/// long, is the shell/agent echoing what was typed, not agent work.
+const ECHO_WINDOW: Duration = Duration::from_millis(150);
+const ECHO_MAX_BYTES: usize = 8192;
 
 impl Pane {
     pub fn new(id: usize, cols: usize, rows: usize, proxy: EventLoopProxy<()>) -> Self {
         Self {
             id,
             terminal: Terminal::new(cols, rows),
-            pty: PtyKind::Local(Pty::spawn(cols as u16, rows as u16, proxy)),
+            pty: PtyKind::Local(Pty::spawn_with_env(cols as u16, rows as u16, proxy, None, &[("RIFT_PANE_ID", id.to_string())])),
             vt_parser: vte::Parser::new(),
             recorder: None,
             label: None,
@@ -202,6 +244,7 @@ impl Pane {
             carry: Vec::new(),
             carry_pos: 0,
             exited: None,
+            act: PaneActivity::default(),
         }
     }
 
@@ -210,7 +253,7 @@ impl Pane {
         Self {
             id,
             terminal: Terminal::new(cols, rows),
-            pty: PtyKind::Local(Pty::spawn_in(cols as u16, rows as u16, proxy, cwd)),
+            pty: PtyKind::Local(Pty::spawn_with_env(cols as u16, rows as u16, proxy, cwd, &[("RIFT_PANE_ID", id.to_string())])),
             vt_parser: vte::Parser::new(),
             recorder: None,
             label: None,
@@ -218,6 +261,7 @@ impl Pane {
             carry: Vec::new(),
             carry_pos: 0,
             exited: None,
+            act: PaneActivity::default(),
         }
     }
 
@@ -234,6 +278,7 @@ impl Pane {
             carry: Vec::new(),
             carry_pos: 0,
             exited: None,
+            act: PaneActivity::default(),
         }
     }
 
@@ -251,6 +296,7 @@ impl Pane {
             carry: Vec::new(),
             carry_pos: 0,
             exited: None,
+            act: PaneActivity::default(),
         }
     }
 
@@ -304,6 +350,15 @@ impl Pane {
         }
         self.backlog = more;
         let mut changed = bytes > 0;
+        if bytes > 0 {
+            let now = Instant::now();
+            let echo = bytes <= ECHO_MAX_BYTES
+                && self.act.last_input.is_some_and(|t| now.duration_since(t) <= ECHO_WINDOW);
+            if !echo {
+                self.act.bytes += bytes as u64;
+                self.act.last_output = Some(now);
+            }
+        }
 
         // Child exit: announce once the output is fully drained.
         if !more && self.exited.is_none() {
@@ -318,6 +373,13 @@ impl Pane {
     }
 
     pub fn write(&mut self, data: &[u8]) {
+        if is_user_input(data) {
+            let now = Instant::now();
+            self.act.last_input = Some(now);
+            if is_submit(data) {
+                self.act.last_submit = Some(now);
+            }
+        }
         if let Some(rec) = &mut self.recorder {
             rec.record_input(data);
         }

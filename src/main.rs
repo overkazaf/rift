@@ -2,6 +2,8 @@
 #[macro_use]
 extern crate objc;
 
+#[allow(dead_code)]
+mod agents;
 mod app;
 mod blocks_ui;
 mod config;
@@ -14,6 +16,7 @@ mod terminal;
 mod renderer;
 mod window;
 mod ui;
+mod review;
 mod network;
 #[allow(dead_code)]
 mod ai;
@@ -36,6 +39,10 @@ fn main() {
     // `rift mcp`: stdio <-> running Rift's MCP socket (for `claude mcp add rift -- rift mcp`).
     if args.get(1).map(String::as_str) == Some("mcp") {
         std::process::exit(mcp::bridge::run());
+    }
+    // `rift agent-event <state>`: agent hooks tell the running Rift what an agent is doing.
+    if args.get(1).map(String::as_str) == Some("agent-event") {
+        std::process::exit(agents::cli::run(&args[2..]));
     }
     // Headless scene renderer: no window, no event loop, no shell.
     if args.iter().any(|a| a == "--screenshot") {
@@ -115,6 +122,7 @@ fn print_help() {
     println!();
     println!("USAGE: rift [OPTIONS]");
     println!("       rift mcp          MCP stdio bridge to the running Rift (see README)");
+    println!("       rift agent-event working|waiting|done|idle|error   report an AI agent's state (hooks)");
     println!();
     println!("OPTIONS:");
     println!("  -h, --help       Print this help message");

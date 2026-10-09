@@ -146,6 +146,8 @@ fn run_action(app: &mut App, action: Action, event: &KeyEvent, event_loop: &Acti
         SecretMask => handle_menu_action(app, MenuAction::SecretMask, event_loop),
         AuditLog => handle_menu_action(app, MenuAction::AuditLog, event_loop),
         Broadcast => handle_menu_action(app, MenuAction::BroadcastToggle, event_loop),
+        ReviewChanges => handle_menu_action(app, MenuAction::ReviewChanges, event_loop),
+        ReviewMark => handle_menu_action(app, MenuAction::ReviewMark, event_loop),
         Observer => {
             if !app.observer.enabled {
                 app.observer.toggle();
@@ -156,6 +158,8 @@ fn run_action(app: &mut App, action: Action, event: &KeyEvent, event_loop: &Acti
         ZoomIn => zoom_font(app, 1.0),
         ZoomOut => zoom_font(app, -1.0),
         ZoomReset => reset_font(app),
+        AgentMissionControl => handle_menu_action(app, MenuAction::AgentMissionControl, event_loop),
+        AgentNextAttention => handle_menu_action(app, MenuAction::AgentNextAttention, event_loop),
         EffectCrt => set_effect(app, Some(EffectKind::Crt)),
         EffectGlitch => set_effect(app, Some(EffectKind::Glitch)),
         EffectNeon => set_effect(app, Some(EffectKind::Neon)),
@@ -436,6 +440,8 @@ pub fn handle_menu_action(app: &mut App, action: MenuAction, event_loop: &Active
         MenuAction::Heatmap => app.heatmap.toggle(),
         MenuAction::SecretMask => app.secret_mask.toggle(),
         MenuAction::AuditLog => app.audit.toggle(),
+        MenuAction::ReviewChanges => crate::review::open_changes(app),
+        MenuAction::ReviewMark => crate::review::mark_checkpoint(app),
         MenuAction::TeachingMode => {
             // While on, using the shortcut again with a command typed at the prompt
             // explains that command (before it runs); with an empty prompt it toggles off.
@@ -493,6 +499,16 @@ pub fn handle_menu_action(app: &mut App, action: MenuAction, event_loop: &Active
             let panes = app.wm.active_tab().panes();
             app.compare_view.collect_and_compare(&panes);
         }
+        MenuAction::AgentMissionControl => crate::agents::runtime::toggle_dock(app),
+        MenuAction::AgentNextAttention => crate::agents::runtime::next_attention(app),
+        MenuAction::AgentNew => {
+            super::overlays::open_command_palette(app);
+            app.command_palette.set_query("agent ");
+        }
+        MenuAction::AgentLayout2x2 => match crate::agents::runtime::default_agent(app) {
+            Some(kind) => crate::agents::runtime::launch(app, crate::agents::runtime::Launch::Layout { kind, cols: 2, rows: 2 }),
+            None => app.blocks_ui.show_toast("No agent CLI found (claude, codex, gemini, opencode, aider, cursor-agent)"),
+        },
     }
     app.request_redraw();
 }

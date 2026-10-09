@@ -246,6 +246,52 @@ allow_run = "ask"    # "never": run_command is not offered
 - The tab bar shows **MCP · 1 client** while an agent is connected. **Command Palette > MCP Activity** lists every call, including denied ones.
 - Terminal output is untrusted input to the agent. Treat anything an agent reads from a pane the way you would treat a pasted web page.
 
+## Mission control for AI agents
+
+Rift is built to supervise AI coding agents: Claude Code, Codex CLI, Gemini CLI, opencode, Aider and Cursor CLI. Run them in any pane; Rift notices, tracks what each one is doing across every tab, and tells you when one needs you.
+
+- **Detection.** From the command you ran (OSC 633;E / command blocks, including `npx @anthropic-ai/claude-code`, `env FOO=1 aider`, `cd x && codex`), then the PTY's foreground process (so aliases and wrapper scripts work), then the window title.
+- **States.** Starting, Working, Waiting for you, Idle, Done, Error. Rift infers them from output activity, approval prompts on a quiet screen ("Do you want to proceed?", `1. Yes`, `[y/n]`, Codex "Allow command?", ...), OSC 9 / 777 notifications, command exit, and, most reliably, agent hooks (below).
+- **Mission Control dock** (`Cmd+Shift+;`, or *Agents > Mission Control*). One card per agent across all tabs: icon, repo and branch, state pill (working pulses with the accent colour, **needs you** pulses amber, done ✓, error ✗), elapsed time and the last line of output. Click a card or press `Enter` to jump to its tab and pane; `j`/`k` or the arrow keys move, `1`-`9` jump directly, `n` cycles agents that need you, `Esc` hands the keyboard back.
+- **Needs you.** `Cmd+Shift+.` jumps to the next agent waiting for you (cycling). Tabs show a badge with the agent count and an amber dot when one is waiting, and a waiting pane gets an amber border.
+- **Notifications.** When an agent needs approval or finishes a turn while its pane is not in front of you (or Rift is in the background) you get a macOS notification such as "Claude Code in rift/main needs your approval", plus a dock badge with the number of agents waiting. Notifications are de-duplicated and rate limited. Clicking a notification does not focus the pane (not supported yet).
+- **New Agent.** Command palette > `agent` (or *Agents > New Agent…*) lists the agent CLIs found on your `PATH`. Run one in the current directory, or in a **new git worktree** (`git worktree add ../<repo>-<agent>-<n> -b agent/<agent>-<n>`, created in the background with a progress toast). The tab is titled `<agent> · <branch>`. *Agent Layout: 2×2* (also `agent` palette entries for 2×1 and 3×2) starts a grid of agents, one worktree each.
+- **Change review.** Every turn is bracketed by `TurnStarted` / `TurnFinished` events that the change-review module uses to show what an agent changed.
+
+### Claude Code hooks
+
+The screen heuristics work without setup, but hooks make state exact. `rift agent-event` sends the event to the running Rift over its MCP socket and finds the right pane through `$RIFT_PANE_ID`, which Rift sets in every shell it starts. Add to `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "rift agent-event working" }] }],
+    "Notification":     [{ "hooks": [{ "type": "command", "command": "rift agent-event waiting" }] }],
+    "Stop":             [{ "hooks": [{ "type": "command", "command": "rift agent-event done" }] }]
+  }
+}
+```
+
+`Notification` fires when Claude Code needs permission or has been idle, `Stop` when it finishes responding. `UserPromptSubmit` is optional (Rift also infers the start of a turn). The command reads Claude's hook JSON from stdin for the working directory and message. It never fails the hook: if Rift is not running it exits 0 silently (add `--verbose` to see why). Alternatively, set Claude Code's notification channel to a terminal notification and Rift will read the OSC 9 it sends.
+
+Usage: `rift agent-event working|waiting|done|idle|error [--agent claude|codex|gemini|opencode|aider|cursor] [--pane ID] [--message TEXT] [--cwd DIR] [--verbose]`. Without a state, the hook name in the JSON payload decides (`Notification`, `Stop`, `UserPromptSubmit`).
+
+### Codex, Gemini and others
+
+- **Codex CLI**: its `notify` setting runs a program with a JSON argument when a turn completes. In `~/.codex/config.toml`: `notify = ["rift", "agent-event", "done", "--agent", "codex"]`. Approval prompts ("Would you like to run the following command?", "Allow command?") are recognised from the screen. Recent versions can also send terminal (OSC 9) notifications for approvals and completed turns; Rift reads those when enabled.
+- **Gemini CLI, opencode, Aider, Cursor CLI**: detected and tracked from output, the title and their approval prompts (`Allow execution of`, `Allow once / Allow always`, `(Y)es/(N)o`, `Run (once)`). If your version has a hook or notification command, point it at `rift agent-event` as above. The prompt patterns live in one table (`APPROVAL_PATTERNS` in `src/agents/state.rs`); add your own with `approval_patterns`.
+
+### Configuration
+
+```toml
+[agents]
+enabled = true            # false: no detection, dock, badges or notifications
+notify = true             # desktop notification + dock badge
+sound = false             # play the system sound with notifications
+default_agent = "claude"  # used by "Agent Layout" (default: first installed)
+approval_patterns = ["ship it?"]   # extra case-insensitive prompt substrings
+```
+
 ## Keyboard shortcuts
 
 macOS bindings. On Linux, the `Cmd+Shift+…` shortcuts use `Ctrl+Shift+…`. You can also search any action in the command palette (`Cmd+P`).
@@ -257,6 +303,8 @@ macOS bindings. On Linux, the `Cmd+Shift+…` shortcuts use `Ctrl+Shift+…`. Yo
 | `Cmd+P` | Command palette |
 | `Cmd+K` | Ask AI about this (selection / block / screen) |
 | `Cmd+Shift+A` | AI chat sidebar |
+| `Cmd+Shift+;` | Agent Mission Control dock |
+| `Cmd+Shift+.` | Jump to the next agent that needs you |
 | `Tab` / `Esc` | Accept / dismiss an inline fix suggestion |
 | `# …` + `Enter` | Natural language → command |
 | `Cmd+Y` | History search |

@@ -100,6 +100,43 @@ pub fn focus_pane_idx(app: &mut App, idx: usize) {
     app.selection.clear();
 }
 
+/// Make pane `uid` (by stable id) the active pane, switching tabs if needed.
+/// Sends focus reports like any other focus change.
+pub fn focus_pane_uid(app: &mut App, uid: usize) -> bool {
+    let Some((ti, pi)) = app.wm.locate_pane(uid) else { return false };
+    if ti != app.wm.active_tab {
+        // Leaving a tab: the pane that was focused loses focus, the target gains it.
+        let old_tab = app.wm.active_tab;
+        let old = app.wm.tabs[old_tab].active;
+        if let Some(p) = app.wm.tabs[old_tab].pane_mut(old) {
+            if p.terminal.focus_reporting {
+                p.write(b"\x1b[O");
+            }
+        }
+        app.wm.switch_tab(ti);
+        app.wm.tabs[ti].focus_pane(pi);
+        if let Some(p) = app.wm.tabs[ti].pane_mut(pi) {
+            if p.terminal.focus_reporting {
+                p.write(b"\x1b[I");
+            }
+        }
+        app.selection.clear();
+    } else {
+        focus_pane_idx(app, pi);
+    }
+    super::shortcuts::sync_webview_for_tab(app);
+    app.update_title();
+    true
+}
+
+/// After tabs / panes were created programmatically: re-flow sizes, title, redraw.
+pub fn after_layout_change(app: &mut App) {
+    super::shortcuts::sync_webview_for_tab(app);
+    super::shortcuts::resize_from_window(app);
+    app.update_title();
+    app.request_redraw();
+}
+
 /// Send CSI O / CSI I to the panes losing / gaining focus (DECSET 1004).
 fn notify_focus(app: &mut App, old: usize, new: usize) {
     let tab = app.wm.active_tab_mut();

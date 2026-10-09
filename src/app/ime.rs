@@ -144,6 +144,7 @@ fn other_panel_visible(app: &App) -> bool {
         || app.network_monitor.visible
         || app.process_tree.visible
         || app.mcp.overlay.visible
+        || app.review.ui.visible
         || app.system_info.visible
         || app.port_dashboard.visible
 }

@@ -645,6 +645,10 @@ pub fn on_left_press(app: &mut App, event_loop: &ActiveEventLoop) -> bool {
         menu_press(app, event_loop);
         return true;
     }
+    // Change Review chip on a pane.
+    if !app.review.ui.visible && crate::review::on_click(app, app.cursor_x, app.cursor_y) {
+        return true;
+    }
     // A click anywhere else commits an in-progress tab rename.
     tabs::press_outside_editor(app);
     if app.cursor_y >= app.tab_bar_height() && scrollbar_press(app) {

@@ -66,6 +66,21 @@ pub fn set_px(buffer: &mut [u32], width: usize, y: usize, x: usize, px: u32) {
     }
 }
 
+static BACKDROP_USED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Record that a full-window dim backdrop was drawn this frame. The GPU text
+/// renderer cannot dim terminal text it did not draw into the CPU buffer, so
+/// it hands such frames to the CPU renderer (see `Renderer::set_gpu_suspended`).
+pub fn mark_backdrop() {
+    BACKDROP_USED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether a backdrop was drawn since the last call.
+#[allow(dead_code)]
+pub fn take_backdrop() -> bool {
+    BACKDROP_USED.swap(false, std::sync::atomic::Ordering::Relaxed)
+}
+
 #[inline]
 pub fn pack(r: u8, g: u8, b: u8) -> u32 {
     (r as u32) << 16 | (g as u32) << 8 | b as u32
@@ -93,6 +108,7 @@ pub fn dim(c: Rgb, f: f32) -> Rgb {
 
 #[allow(dead_code)]
 pub fn dim_backdrop(buffer: &mut [u32], factor: u32) {
+    mark_backdrop();
     for px in buffer.iter_mut() {
         let r = ((*px >> 16) & 0xff) / factor;
         let g = ((*px >> 8) & 0xff) / factor;

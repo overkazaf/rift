@@ -112,6 +112,17 @@ impl BlockManager {
         self.current.is_some() || self.osc.running.is_some()
     }
 
+    /// Text of the command OSC 133 says is running right now (OSC 633;E text
+    /// when the shell sent it). `None` at the prompt or without shell integration.
+    pub fn running_command(&self) -> Option<&str> {
+        self.osc.running.as_ref().map(|(b, _)| b.command.as_str())
+    }
+
+    /// Exit code of the most recently finished block.
+    pub fn last_exit_code(&self) -> Option<i32> {
+        self.blocks.last().and_then(|b| b.exit_code)
+    }
+
     /// Elapsed time of the currently running command.
     pub fn running_elapsed_ms(&self) -> Option<u64> {
         if let Some((_, t)) = &self.osc.running {

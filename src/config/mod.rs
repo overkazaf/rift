@@ -105,6 +105,11 @@ pub struct Config {
     pub startup_animation: bool,
     /// Draw bold text with the bright palette variant (colors 0-7 -> 8-15).
     pub bold_is_bright: bool,
+    /// Which renderer draws the terminal (`renderer = "auto" | "gpu" | "cpu"`).
+    pub renderer: RendererMode,
+    /// Programming ligatures (`font_ligatures`). `None` = default: on with
+    /// the GPU text renderer, off with the CPU one.
+    pub font_ligatures: Option<bool>,
     /// Scrollback history per pane in lines (`scrollback_lines`, default 10000).
     pub scrollback_lines: usize,
     /// Notify when a command (OSC 133 block) ran at least this many seconds and
@@ -120,6 +125,8 @@ pub struct Config {
     pub osc52: Osc52Policy,
     /// `[mcp]`: built-in MCP server for coding agents.
     pub mcp: crate::mcp::McpConfig,
+    /// `[agents]`: Agent Mission Control.
+    pub agents: crate::agents::AgentsConfig,
     /// `[ai] fix_provider / nl_provider / chat_provider`.
     pub ai_routing: crate::ai::local::Routing,
     /// Write `[llm] provider/model/api_url` on save (set once the user picked a
@@ -129,6 +136,38 @@ pub struct Config {
     /// or an explicit non-local `[llm]`). A local-only setup never has this,
     /// so a stray API key in the environment cannot be switched to.
     pub cloud_opt_in: bool,
+}
+
+/// `renderer` setting. Only has an effect in builds with `--features gpu`;
+/// without it the CPU renderer is the only one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum RendererMode {
+    /// GPU when a usable adapter exists, otherwise CPU.
+    #[default]
+    Auto,
+    /// Prefer the GPU (falls back to CPU, loudly, if it cannot start).
+    Gpu,
+    /// Never touch the GPU.
+    Cpu,
+}
+
+impl RendererMode {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(Self::Auto),
+            "gpu" => Some(Self::Gpu),
+            "cpu" | "software" => Some(Self::Cpu),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Gpu => "gpu",
+            Self::Cpu => "cpu",
+        }
+    }
 }
 
 impl Default for Config {
@@ -150,6 +189,8 @@ impl Default for Config {
             effect_intensity: crate::effects::DEFAULT_INTENSITY,
             startup_animation: true,
             bold_is_bright: false,
+            renderer: RendererMode::Auto,
+            font_ligatures: None,
             scrollback_lines: 10_000,
             notify_after_secs: 10.0,
             input: crate::input::InputConfig::default(),
@@ -157,6 +198,7 @@ impl Default for Config {
             llm_explicit: false,
             osc52: Osc52Policy::WriteOnly,
             mcp: crate::mcp::McpConfig::default(),
+            agents: crate::agents::AgentsConfig::default(),
             ai_routing: crate::ai::local::Routing::default(),
             llm_persist: false,
             cloud_opt_in: false,

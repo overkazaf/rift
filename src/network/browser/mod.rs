@@ -127,6 +127,8 @@ impl App {
     /// Width available to terminal panes for a window `win_w` pixels wide.
     pub fn terminal_width(&self, win_w: usize) -> usize {
         let avail = win_w - self.chat.dock_w(win_w).min(win_w);
+        // The Mission Control dock sits on the left edge (hidden while the browser shows).
+        let avail = avail.saturating_sub(crate::agents::runtime::dock_w(self, win_w));
         match self.browser_layout() {
             Some(l) => l.terminal_w.min(avail),
             None => avail,

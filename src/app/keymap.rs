@@ -92,9 +92,13 @@ actions! {
     AuditLog,       "audit_log",       "Audit log",                          Passthrough, ["mod+shift+u"], ["ctrl+shift+u"];
     Broadcast,      "broadcast",       "Broadcast input to all panes",       Passthrough, ["mod+shift+p"], ["ctrl+shift+p"];
     Observer,       "observer",        "Observer summary",                   Passthrough, ["mod+shift+n"], ["ctrl+shift+n"];
+    ReviewChanges,  "review_changes",  "Review: changes since checkpoint",   Passthrough, ["mod+shift+j"], ["ctrl+shift+j"];
+    ReviewMark,     "review_mark",     "Review: mark checkpoint",            Passthrough, [], [];
     ZoomIn,         "zoom_in",         "Font zoom in",                       Passthrough, ["cmd+=", "cmd+shift+="], ["ctrl+="];
     ZoomOut,        "zoom_out",        "Font zoom out",                      Passthrough, ["cmd+-"], ["ctrl+-"];
     ZoomReset,      "zoom_reset",      "Reset font zoom",                    Passthrough, ["cmd+0"], ["ctrl+0"];
+    AgentMissionControl, "agent_mission_control", "Agent Mission Control dock", Essential, ["mod+shift+;"], ["ctrl+shift+;"];
+    AgentNextAttention,  "agent_next_attention",  "Next agent needing you",     Essential, ["mod+shift+."], ["ctrl+shift+."];
     EffectCrt,      "effect_crt",      "Effect: CRT",                        Passthrough, ["ctrl+shift+1"], ["ctrl+shift+1"];
     EffectGlitch,   "effect_glitch",   "Effect: Glitch",                     Passthrough, ["ctrl+shift+2"], ["ctrl+shift+2"];
     EffectNeon,     "effect_neon",     "Effect: Neon",                       Passthrough, ["ctrl+shift+3"], ["ctrl+shift+3"];

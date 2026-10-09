@@ -177,6 +177,11 @@ pub fn handle_line(sess: &mut Session, line: &str, backend: &dyn Backend, shared
             result_response(&id, &format!(r#"{{"resourceTemplates":{}}}"#, tools::resource_templates_json()))
         }
         "resources/read" => resources_read(sess, &id, params, backend, shared),
+        // `rift agent-event` (agent hooks): queued for Agent Mission Control, not an MCP tool.
+        crate::agents::inbox::METHOD => match crate::agents::inbox::handle_request(params) {
+            Ok(()) => result_response(&id, "{}"),
+            Err(e) => error_response(&id, INVALID_PARAMS, &e),
+        },
         _ => error_response(&id, METHOD_NOT_FOUND, &format!("Method not found: {method}")),
     })
 }
@@ -280,6 +285,15 @@ pub(crate) mod tests {
             _ => Reply::err("boom"),
         });
         (Session::new(1), b, Shared::new(AllowRun::Ask))
+    }
+
+    #[test]
+    fn agent_event_method_is_accepted_and_validated() {
+        let (mut s, b, sh) = setup();
+        let r = run(&mut s, &b, &sh, r#"{"jsonrpc":"2.0","id":1,"method":"rift/agent_event","params":{"state":"done","pane_id":4000123}}"#).unwrap();
+        assert!(r.get("result").is_some(), "{r:?}");
+        let r = run(&mut s, &b, &sh, r#"{"jsonrpc":"2.0","id":2,"method":"rift/agent_event","params":{"state":"bogus"}}"#).unwrap();
+        assert_eq!(r.get("error").and_then(|e| e.get("code")).and_then(Json::as_f64), Some(INVALID_PARAMS as f64));
     }
 
     #[test]

@@ -57,20 +57,18 @@ pub fn on_resumed(app: &mut App, event_loop: &ActiveEventLoop) {
 
     app.menubar.init_for_nsapp();
 
-    // Initialize wgpu GPU pipeline (if feature enabled)
+    // Initialize wgpu GPU pipeline (if feature enabled and `renderer` allows it)
     #[cfg(feature = "gpu")]
-    {
-        match crate::renderer::gpu::GpuPipeline::new(window.clone()) {
-            Ok(pipeline) => {
-                app.gpu_pipeline = Some(pipeline);
-                app.renderer.shader.set_gpu_active(true);
-                log::info!("wgpu GPU pipeline initialized");
-            }
-            Err(e) => {
-                log::warn!("wgpu init failed: {e} — using softbuffer fallback");
-            }
-        }
+    init_gpu(app, &window);
+    #[cfg(not(feature = "gpu"))]
+    if app.config.renderer == crate::config::RendererMode::Gpu {
+        log::warn!("renderer = \"gpu\" but this build has no GPU support (cargo build --features gpu); using the CPU renderer");
     }
+    #[cfg(feature = "gpu")]
+    let gpu_text = app.renderer.gpu_text_active();
+    #[cfg(not(feature = "gpu"))]
+    let gpu_text = false;
+    app.renderer.set_ligatures(app.config.font_ligatures.unwrap_or(gpu_text));
 
     app.menubar.set_gpu_effects(app.renderer.shader.gpu_active());
 
@@ -89,6 +87,7 @@ pub fn startup_active(app: &App) -> bool {
 }
 
 pub fn redraw(app: &mut App) {
+    let agents_dock_rect = crate::agents::runtime::current_dock_rect(app);
     // DEC 2026 synchronized output: hold the frame while the app is mid-update
     // (the scheduler re-requests a redraw once the 150 ms safety timeout hits).
     if app.wm.active_pane().terminal.sync_pending() {
@@ -161,10 +160,12 @@ pub fn redraw(app: &mut App) {
         )
     });
     let content_w = blayout.map_or(avail_w, |l| l.terminal_w.min(avail_w));
+    // Mission Control dock on the left edge.
+    let agents_dock = agents_dock_rect.map_or(0, |r| r.w);
     let content_area = PaneRect {
-        x: 0,
+        x: agents_dock,
         y: tbh,
-        width: content_w,
+        width: content_w.saturating_sub(agents_dock),
         height: (height as usize).saturating_sub(tbh + hud_h),
     };
 
@@ -220,16 +221,41 @@ pub fn redraw(app: &mut App) {
         dragging_border: app.dragging_border,
         zoomed: app.wm.active_tab().is_zoomed(),
     };
+    // GPU text: selection and search matches become instance quads of the
+    // rows they cover instead of being blended into the CPU buffer.
+    #[cfg(feature = "gpu")]
+    let gpu_text_frame = app.renderer.gpu_text_active();
+    #[cfg(not(feature = "gpu"))]
+    let gpu_text_frame = false;
+    #[cfg(feature = "gpu")]
+    if gpu_text_frame {
+        let (pane, rects) = gpu_highlights(&app.wm, &app.selection, &app.search, &app.renderer, content_area);
+        app.renderer.set_highlights(pane, rects);
+    }
     app.renderer.link_hover = app.link_hover;
     app.renderer.chrome = app.mui.chrome(std::time::Instant::now());
     app.renderer.chrome.mcp_clients = app.mcp.clients().min(u16::MAX as usize) as u16;
     app.renderer.render_tabbed_with_cmd(&app.wm, content_area, &mut buffer, width, height, cmd_held, &app.blocks, split_ui);
     // Command-block chrome (gutter bars, chips, toolbar) on the output buffer
     crate::blocks_ui::draw::draw(&app.wm, &mut app.renderer, &app.blocks_ui, &mut buffer, width, height, content_area);
+    // Change Review chips ("3 files changed · Review") at each pane's bottom-right.
+    let review_key = app.keymap.display(super::keymap::Action::ReviewChanges);
+    let review_key = if review_key == "(unbound)" { String::new() } else { review_key };
+    app.review.draw_chips(
+        &app.wm, &mut app.renderer.font, &app.renderer.theme,
+        &mut buffer, width as usize, height as usize, content_area, &review_key,
+    );
+    // Agent Mission Control: dock, tab badges, amber borders for waiting agents.
+    {
+        crate::agents::runtime::draw(
+            &app.agents, &mut app.agents_ui, &app.wm, &mut app.renderer, &mut buffer,
+            width as usize, height as usize, content_area, agents_dock_rect, std::time::Instant::now(),
+        );
+    }
     let t_overlays = std::time::Instant::now();
 
     // Selection highlight
-    if app.selection.active {
+    if app.selection.active && !gpu_text_frame {
         let sel_rect = app.wm.pane_layouts(content_area)
             .into_iter()
             .find(|(_, _, active)| *active)
@@ -257,7 +283,7 @@ pub fn redraw(app: &mut App) {
     }
 
     // Search match highlights
-    if app.search.visible && !app.search.matches.is_empty() {
+    if app.search.visible && !app.search.matches.is_empty() && !gpu_text_frame {
         let cw = app.renderer.cell_width();
         let ch = app.renderer.cell_height();
         let w = width as usize;
@@ -408,6 +434,12 @@ pub fn redraw(app: &mut App) {
             &mut app.renderer.font, &app.renderer.theme,
         );
     }
+    if app.review.ui.visible {
+        app.review.render(
+            &mut buffer, width as usize, height as usize,
+            &mut app.renderer.font, &app.renderer.theme,
+        );
+    }
     if app.mcp.overlay.visible {
         app.mcp.overlay.render(
             &mut buffer, width as usize, height as usize,
@@ -520,6 +552,14 @@ pub fn redraw(app: &mut App) {
         cx.spinner_toast(&msg, elapsed);
     }
 
+    // Worktree creation for "New Agent" in progress.
+    if let Some(label) = app.agents_rt.progress_label() {
+        let elapsed = app.renderer.start_time.elapsed().as_secs_f32();
+        let tk = crate::ui::kit::Tokens::new(&app.renderer.theme, app.renderer.font.cell_width, app.renderer.font.cell_height);
+        let mut cx = crate::ui::kit::Ctx::new(&mut buffer, width as usize, height as usize, &mut app.renderer.font, &tk);
+        cx.spinner_toast(label, elapsed);
+    }
+
     // Inline tab rename field and the right-click menu sit above the overlays.
     if let Some(ed) = &app.mui.tabs.editor {
         let slot = crate::ui::tabbar::layout(width as usize, app.wm.tab_count(), tbh)
@@ -558,9 +598,10 @@ pub fn redraw(app: &mut App) {
         );
     }
 
-    // Pixel-level opacity fallback (non-macOS only; macOS uses native NSWindow alpha)
+    // Pixel-level opacity fallback (non-macOS only; macOS uses native NSWindow alpha).
+    // With the GPU pipeline the composite shader applies it instead.
     #[cfg(not(target_os = "macos"))]
-    if app.renderer.opacity < 0.99 {
+    if app.renderer.opacity < 0.99 && app.gpu_pipeline_absent() {
         let alpha = (app.renderer.opacity * 255.0) as u32;
         for px in buffer.iter_mut() {
             let r = ((*px >> 16) & 0xff) * alpha / 255;
@@ -573,13 +614,36 @@ pub fn redraw(app: &mut App) {
     let t_present = std::time::Instant::now();
     app.renderer.prof_add(crate::renderer::Phase::Overlays, t_present - t_overlays);
 
-    // GPU rendering path: upload pixel buffer to GPU, present via wgpu
+    // GPU rendering path: terminal layer from instance buffers, UI layer
+    // diff-uploaded from the CPU buffer, effects over the composite.
     #[cfg(feature = "gpu")]
-    if let Some(ref mut gpu) = app.gpu_pipeline {
+    if app.gpu_pipeline.is_some() {
+        // A full-window dim backdrop (modal dialogs) must dim the terminal
+        // text too, which only the CPU renderer can do: switch modes and
+        // redo this frame.
+        let backdrop = crate::ui::take_backdrop();
+        if app.renderer.gpu_text_enabled() && backdrop != app.renderer.gpu_suspended() {
+            app.renderer.set_gpu_suspended(backdrop);
+            if backdrop {
+                drop(buffer);
+                return redraw(app);
+            }
+        }
         let effect = app.renderer.active_effect();
         let time = app.renderer.start_time.elapsed().as_secs_f32();
-        gpu.render_frame(&buffer, width, height, effect, time);
+        let opacity = if cfg!(target_os = "macos") { 1.0 } else { app.renderer.opacity };
+        let Some(gpu) = app.gpu_pipeline.as_mut() else { return };
+        gpu.render_scene(
+            if gpu_text_frame { app.renderer.gpu.as_deref_mut() } else { None },
+            &buffer, gpu_text_frame, width, height, effect, time, opacity,
+        );
+        let st = gpu.last;
+        app.renderer.prof_add(crate::renderer::Phase::GpuInst, st.t_inst);
+        app.renderer.prof_add(crate::renderer::Phase::GpuUi, st.t_ui);
         drop(buffer);
+        if app.renderer.take_redraw_request() {
+            if let Some(w) = &app.window { w.request_redraw(); }
+        }
         finish_frame(app, t_present);
         return;
     }
@@ -660,7 +724,13 @@ fn about_to_wait_inner(app: &mut App, event_loop: &ActiveEventLoop) {
 
     // PTY reader thread calls proxy.send_event(()) which wakes the loop from Wait.
     // Use 16ms for animations, otherwise a short poll for responsiveness.
-    let poll_ms = if has_shader || in_startup { 16 } else { IDLE_POLL_MS };
+    let poll_ms = if has_shader || in_startup {
+        16
+    } else if crate::agents::runtime::animating(app) {
+        100
+    } else {
+        IDLE_POLL_MS
+    };
     let mut wake_at = std::time::Instant::now() + std::time::Duration::from_millis(poll_ms);
     event_loop.set_control_flow(ControlFlow::WaitUntil(wake_at));
 
@@ -677,6 +747,16 @@ fn about_to_wait_inner(app: &mut App, event_loop: &ActiveEventLoop) {
 
     // MCP: answer queued requests from connected coding agents (never blocks).
     crate::mcp::host::poll(app);
+
+    // Change Review: collect finished git jobs (snapshots, diffs, reverts).
+    crate::review::poll(app);
+    if let Some(d) = app.review.next_deadline() {
+        wake_at = wake_at.min(d);
+    }
+    if app.review.busy() {
+        wake_at = wake_at.min(std::time::Instant::now() + std::time::Duration::from_millis(250));
+    }
+    event_loop.set_control_flow(ControlFlow::WaitUntil(wake_at));
 
     // Browser: drain webview events (title/url/loading/focus)
     crate::network::browser::poll(app);
@@ -861,7 +941,16 @@ fn about_to_wait_inner(app: &mut App, event_loop: &ActiveEventLoop) {
                 for (pi, pane) in tab.panes_mut().into_iter().enumerate() {
                     let notes = pane.terminal.take_notifications();
                     let visible = ti == active_tab && (!zoomed || pi == active_leaf);
-                    if notes.is_empty() || (focused && visible) {
+                    if notes.is_empty() {
+                        continue;
+                    }
+                    // Agent panes: Mission Control classifies the notification and posts its own.
+                    if crate::agents::runtime::route_notifications(
+                        &mut app.agents, app.config.agents.notify, pane.id, &notes, std::time::Instant::now(),
+                    ) {
+                        continue;
+                    }
+                    if focused && visible {
                         continue;
                     }
                     for n in notes {
@@ -886,6 +975,10 @@ fn about_to_wait_inner(app: &mut App, event_loop: &ActiveEventLoop) {
     if app.hud_visible && app.hud.needs_update() {
         app.hud.update();
     }
+
+    // Agent Mission Control: detection, state machine, notifications.
+    crate::agents::runtime::poll(app, &mut wake_at);
+    event_loop.set_control_flow(ControlFlow::WaitUntil(wake_at));
 
     // Scrollbar auto-hide, drag-select auto-scroll, tab-list bookkeeping.
     if let Some(t) = super::mouse::tick(app) {
@@ -925,6 +1018,7 @@ fn about_to_wait_inner(app: &mut App, event_loop: &ActiveEventLoop) {
         || app.network_monitor.visible
         || app.process_tree.visible
         || app.mcp.overlay.visible
+        || app.review.ui.visible
         || app.system_info.visible
         || app.port_dashboard.visible
         || app.regex_playground.visible
@@ -932,8 +1026,9 @@ fn about_to_wait_inner(app: &mut App, event_loop: &ActiveEventLoop) {
         || app.history.visible
         || app.teaching.enabled;
     let timewarp_active = app.timewarp_browser.active;
+    let agents_anim = crate::agents::runtime::animating(app);
 
-    if has_shader || ssh_pending || ai_waiting || any_overlay || timewarp_active || app.hud_visible {
+    if has_shader || ssh_pending || ai_waiting || any_overlay || timewarp_active || app.hud_visible || agents_anim {
         app.request_redraw();
         return;
     }
@@ -1028,4 +1123,93 @@ fn load_icon_from_png(png_data: &[u8]) -> Option<winit::window::Icon> {
     }
 
     winit::window::Icon::from_rgba(rgba, width, height).ok()
+}
+
+// ── GPU renderer glue ──
+
+/// Start the wgpu pipeline according to `renderer` (config / `RIFT_RENDERER`).
+#[cfg(feature = "gpu")]
+fn init_gpu(app: &mut App, window: &Arc<winit::window::Window>) {
+    use crate::config::RendererMode;
+    let mode = std::env::var("RIFT_RENDERER")
+        .ok()
+        .and_then(|v| RendererMode::parse(&v))
+        .unwrap_or(app.config.renderer);
+    if mode == RendererMode::Cpu {
+        log::info!("renderer = cpu: GPU pipeline disabled");
+        return;
+    }
+    match crate::renderer::gpu::GpuPipeline::new(window.clone()) {
+        Ok(pipeline) => {
+            app.gpu_pipeline = Some(pipeline);
+            app.renderer.shader.set_gpu_active(true);
+            app.renderer.enable_gpu_text(true);
+            log::info!("wgpu GPU pipeline initialized (GPU text renderer on)");
+        }
+        Err(e) if mode == RendererMode::Gpu => {
+            log::error!("renderer = \"gpu\" but wgpu init failed: {e} - falling back to the CPU renderer");
+        }
+        Err(e) => {
+            log::warn!("wgpu init failed: {e} - using the CPU renderer");
+        }
+    }
+}
+
+/// Selection and search-match highlights of the active pane as per-row quads.
+#[cfg(feature = "gpu")]
+fn gpu_highlights(
+    wm: &crate::window::WindowManager,
+    selection: &crate::window::Selection,
+    search: &crate::tools::search::SearchOverlay,
+    renderer: &crate::renderer::Renderer,
+    content_area: PaneRect,
+) -> (usize, Vec<crate::renderer::gpu_text::HlRect>) {
+    use crate::renderer::gpu_text::HlRect;
+    let tab = wm.active_tab();
+    let pane_idx = tab.active;
+    let mut out = Vec::new();
+    let want_sel = selection.active;
+    let want_search = search.visible && !search.matches.is_empty();
+    if !want_sel && !want_search {
+        return (pane_idx, out);
+    }
+    let cw = renderer.cell_width().max(1);
+    let rect = wm.pane_layouts(content_area)
+        .into_iter()
+        .find(|(i, _, _)| *i == pane_idx)
+        .map(|(_, r, _)| r)
+        .unwrap_or(content_area);
+    let max_col = rect.width / cw;
+    let row_abs = crate::blocks_ui::view::view_abs_rows(&wm.active_pane().terminal);
+    if want_sel {
+        for (row, abs) in row_abs.iter().enumerate() {
+            let Some(abs) = abs else { continue };
+            let mut start: Option<usize> = None;
+            for col in 0..=max_col {
+                let on = col < max_col && selection.contains(*abs, col);
+                match (on, start) {
+                    (true, None) => start = Some(col),
+                    (false, Some(s)) => {
+                        // Same tint as `Renderer::render_selection`: (80, 120, 200) at 105/255.
+                        out.push(HlRect { row, c0: s, c1: col, rgba: [80, 120, 200, 105] });
+                        start = None;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    if want_search {
+        let accent = renderer.theme.cursor;
+        for (i, m) in search.matches.iter().enumerate() {
+            let Some(row) = row_abs.iter().position(|r| *r == Some(m.row)) else { continue };
+            let is_current = i == search.current_match;
+            let (c, a) = if is_current { (accent, 120u8) } else { (crate::ui::dim(accent, 0.3), 60u8) };
+            let c1 = m.col_end.min(max_col);
+            if c1 > m.col_start {
+                out.push(HlRect { row, c0: m.col_start, c1, rgba: [c.0, c.1, c.2, a] });
+            }
+        }
+    }
+    (pane_idx, out)
 }

@@ -19,6 +19,8 @@ pub enum ConfirmAction {
     /// An MCP client asked to run a command; buttons are laid out by
     /// `mcp::host::modal_spec` (`run_index` says which one runs it).
     McpRun(Box<crate::mcp::host::PendingRun>),
+    /// Change Review: buttons Revert / Cancel.
+    ReviewRevert(Box<crate::review::RevertPlan>),
 }
 
 pub struct ConfirmRequest {
@@ -360,6 +362,7 @@ pub fn resolve(app: &mut App, req: ConfirmRequest, choice: Option<usize>) {
             }
         }
         ConfirmAction::McpRun(run) => crate::mcp::host::finish_run(app, run, choice),
+        ConfirmAction::ReviewRevert(plan) => crate::review::finish_revert(app, *plan, choice),
         ConfirmAction::SshHostKey { mut reply } => {
             if let Some(tx) = reply.take() {
                 let _ = tx.send(choice == Some(0));

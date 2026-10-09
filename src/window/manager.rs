@@ -217,6 +217,53 @@ impl WindowManager {
         true
     }
 
+    /// New tab whose shell starts in `cwd`, optionally with a fixed title.
+    /// Returns the id of its pane.
+    pub fn new_tab_in(&mut self, cols: usize, rows: usize, cwd: Option<&str>, title: Option<&str>) -> usize {
+        let id = self.alloc_id();
+        let pane = self.make_pane(id, cols, rows, cwd);
+        self.tabs.push(Tab::new(pane));
+        self.active_tab = self.tabs.len() - 1;
+        self.renumber_tabs();
+        if let Some(t) = title {
+            self.rename_tab(self.active_tab, t);
+        }
+        id
+    }
+
+    /// Where pane `uid` lives: (tab index, leaf index within the tab).
+    pub fn locate_pane(&self, uid: usize) -> Option<(usize, usize)> {
+        self.tabs.iter().enumerate().find_map(|(ti, t)| t.panes().iter().position(|p| p.id == uid).map(|pi| (ti, pi)))
+    }
+
+    pub fn pane_by_id_mut(&mut self, uid: usize) -> Option<&mut Pane> {
+        let (t, p) = self.locate_pane(uid)?;
+        self.tabs[t].pane_mut(p)
+    }
+
+    /// Split pane `target` (which becomes focused first) along `dir`; the new
+    /// shell starts in `cwd`. Refuses (None) when a half would fall below `min`.
+    pub fn split_pane_in(&mut self, target: usize, dir: SplitDir, area: PaneRect, min: MinSize, cwd: Option<&str>) -> Option<usize> {
+        let (t, p) = self.locate_pane(target)?;
+        self.tabs[t].unzoom();
+        self.tabs[t].focus_pane(p);
+        if !self.tabs[t].can_split(area, dir, min) {
+            return None;
+        }
+        let (cols, rows) = {
+            let pane = self.tabs[t].active_pane();
+            (pane.terminal.cols, pane.terminal.rows)
+        };
+        let id = self.alloc_id();
+        let (c, r) = match dir {
+            SplitDir::Horizontal => ((cols / 2).max(1), rows),
+            SplitDir::Vertical => (cols, (rows / 2).max(1)),
+        };
+        let pane = self.make_pane(id, c, r, cwd);
+        self.tabs[t].split(dir, pane);
+        Some(id)
+    }
+
     /// Replace a freshly created single-pane tab's root with a restored
     /// layout. The existing pane becomes the first leaf; every other leaf is
     /// spawned in its saved working directory.

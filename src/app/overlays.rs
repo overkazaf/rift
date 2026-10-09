@@ -114,6 +114,9 @@ pub fn try_intercept(app: &mut App, event: &KeyEvent, event_loop: &ActiveEventLo
     if app.mcp.overlay.visible {
         return handle_mcp_activity(app, event);
     }
+    if crate::review::visible(app) {
+        return handle_review(app, event);
+    }
     if app.system_info.visible {
         return handle_sysinfo(app, event);
     }
@@ -125,6 +128,9 @@ pub fn try_intercept(app: &mut App, event: &KeyEvent, event_loop: &ActiveEventLo
     }
     // Docked AI chat: keys go to its composer while it has focus; chords it
     // doesn't use (Cmd+T, Cmd+P, ...) fall through to the global shortcuts.
+    if app.agents_ui.focused && crate::agents::runtime::handle_key(app, event) {
+        return true;
+    }
     if app.chat.focused && crate::ai::chat::handle_key(app, event) {
         return true;
     }
@@ -495,6 +501,11 @@ pub fn open_command_palette(app: &mut App) {
             .collect(),
         font_size: app.config.font_size,
         models: crate::ai::local::picker::current_options(app),
+        agents: crate::agents::runtime::installed(app),
+        in_git_repo: {
+            let p = app.wm.active_pane();
+            p.terminal.cwd.as_deref().is_some_and(|c| crate::agents::git::repo_info(std::path::Path::new(c)).is_some())
+        },
     };
     app.command_palette.open(ctx);
 }
@@ -675,6 +686,7 @@ fn dispatch_palette_action(app: &mut App, action: PaletteAction, event_loop: &Ac
         PaletteAction::SelectModel(choice) => crate::ai::local::picker::select(app, &choice),
         PaletteAction::PrivacyReport => crate::ui::confirm::show_privacy_report(app),
         PaletteAction::McpActivity => app.mcp.overlay.toggle(),
+        PaletteAction::Agent(l) => crate::agents::runtime::launch(app, l),
         PaletteAction::Template(_) => {}
     }
 }
@@ -786,6 +798,35 @@ fn handle_netmon(app: &mut App, event: &KeyEvent) -> bool {
     };
     app.network_monitor.handle_key(key);
     app.request_redraw();
+    true
+}
+
+/// Change Review overlay: modal, consumes every key.
+fn handle_review(app: &mut App, event: &KeyEvent) -> bool {
+    use crate::review::ReviewKey;
+    if app.modifiers.super_key() || app.modifiers.control_key() {
+        return true;
+    }
+    let key = match &event.logical_key {
+        Key::Named(NamedKey::Escape) => ReviewKey::Escape,
+        Key::Named(NamedKey::ArrowUp) => ReviewKey::Up,
+        Key::Named(NamedKey::ArrowDown) => ReviewKey::Down,
+        Key::Named(NamedKey::PageUp) => ReviewKey::PageUp,
+        Key::Named(NamedKey::PageDown) => ReviewKey::PageDown,
+        Key::Named(NamedKey::Home) => ReviewKey::Home,
+        Key::Named(NamedKey::End) => ReviewKey::End,
+        Key::Named(NamedKey::Tab) => ReviewKey::Tab,
+        Key::Named(NamedKey::Space) => ReviewKey::Char(' '),
+        Key::Character(s) => match s.chars().next() {
+            Some(c) => ReviewKey::Char(c),
+            None => return true,
+        },
+        _ => return true,
+    };
+    if event.repeat && matches!(key, ReviewKey::Char('r' | 'R' | 'a' | 'i' | 'c' | 'C')) {
+        return true;
+    }
+    crate::review::handle_key(app, key);
     true
 }
 

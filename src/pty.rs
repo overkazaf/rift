@@ -54,17 +54,24 @@ pub struct Pty {
 }
 
 impl Pty {
-    pub fn spawn(cols: u16, rows: u16, proxy: EventLoopProxy<()>) -> Self {
-        Self::spawn_in(cols, rows, proxy, None)
-    }
-
-    /// Like [`Pty::spawn`], starting the shell in `cwd` when it is an existing directory.
-    pub fn spawn_in(cols: u16, rows: u16, proxy: EventLoopProxy<()>, cwd: Option<&str>) -> Self {
+    /// Spawn the user's shell in `cwd` (when it is an existing directory) with
+    /// extra environment variables
+    /// (e.g. `RIFT_PANE_ID`, which lets `rift agent-event` find its pane).
+    pub fn spawn_with_env(
+        cols: u16,
+        rows: u16,
+        proxy: EventLoopProxy<()>,
+        cwd: Option<&str>,
+        env: &[(&str, String)],
+    ) -> Self {
         // Launches the user's shell with OSC 133/OSC 7 shell integration
         // injected (see shell_integration; opt out with RIFT_NO_SHELL_INTEGRATION).
         let mut cmd = crate::shell_integration::build_shell_command();
         if let Some(dir) = cwd.filter(|d| std::path::Path::new(d).is_dir()) {
             cmd.cwd(dir);
+        }
+        for (k, v) in env {
+            cmd.env(k, v);
         }
         let waker: Waker = Arc::new(move || {
             let _ = proxy.send_event(());
@@ -139,6 +146,15 @@ impl Pty {
     #[allow(dead_code)]
     pub fn pid(&self) -> Option<u32> {
         self.pid
+    }
+
+    /// Process group currently in the PTY's foreground (`tcgetpgrp` on the
+    /// master). Equals the shell's pid while the shell itself is at the prompt.
+    pub fn foreground_pgid(&self) -> Option<u32> {
+        if self.is_reaped() {
+            return None;
+        }
+        self.master.process_group_leader().filter(|p| *p > 0).map(|p| p as u32)
     }
 
     /// Exit code once the child has exited and its output had time to drain.

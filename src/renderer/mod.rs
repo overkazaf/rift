@@ -1,6 +1,13 @@
 pub mod font;
+pub mod shape;
+#[cfg(any(feature = "gpu", test))]
+pub mod atlas;
 #[cfg(feature = "gpu")]
 pub mod gpu;
+#[cfg(feature = "gpu")]
+pub mod gpu_text;
+#[cfg(all(test, feature = "gpu"))]
+mod gpu_tests;
 
 use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, Hasher};
@@ -170,16 +177,16 @@ fn blit_tile(buffer: &mut [u32], buf_width: usize, x0: usize, y0: usize, cw: usi
 // ── Opt-in frame profiler (RIFT_PROFILE=1) ──
 
 #[derive(Clone, Copy)]
-pub enum Phase { Pty = 0, Render = 1, Overlays = 2, Present = 3 }
+pub enum Phase { Pty = 0, Render = 1, Overlays = 2, Present = 3, GpuInst = 4, GpuUi = 5 }
 
-const PHASE_NAMES: [&str; 4] = ["pty", "render_tabbed", "overlays", "present"];
+const PHASE_NAMES: [&str; 6] = ["pty", "render_tabbed", "overlays", "present", "gpu_inst", "gpu_ui"];
 const PROFILE_REPORT_FRAMES: u32 = 120;
 
 #[derive(Default)]
 pub struct Profiler {
-    sum: [Duration; 4],
-    max: [Duration; 4],
-    cnt: [u32; 4],
+    sum: [Duration; 6],
+    max: [Duration; 6],
+    cnt: [u32; 6],
     frames: u32,
 }
 
@@ -195,7 +202,8 @@ impl Profiler {
         self.frames += 1;
         if self.frames < PROFILE_REPORT_FRAMES { return; }
         let mut line = format!("[rift-profile] {} frames:", self.frames);
-        for i in 0..4 {
+        for i in 0..PHASE_NAMES.len() {
+            if self.cnt[i] == 0 && i >= 4 { continue; }
             let n = self.cnt[i].max(1) as f64;
             line.push_str(&format!(
                 " | {} avg {:.2} max {:.2} ms (n={})",
@@ -254,6 +262,27 @@ pub struct Renderer {
     /// the app right before each frame.
     pub chrome: crate::ui::tabbar::ChromeUi,
     pub prof: Option<Profiler>,
+    /// Shaping engine and cache for programming ligatures.
+    shaper: shape::Shaper,
+    /// Shape runs of cells for ligatures / contextual alternates.
+    ligatures: bool,
+    /// GPU text renderer state (None = CPU rendering).
+    #[cfg(feature = "gpu")]
+    pub gpu: Option<Box<gpu_text::GpuText>>,
+    /// GPU text temporarily off: the CPU renders terminal text this frame
+    /// (a full-window dim backdrop must also dim the text underneath).
+    #[cfg(feature = "gpu")]
+    gpu_suspended: bool,
+    /// Another frame is needed right away (GPU atlas had to be recycled).
+    #[cfg(feature = "gpu")]
+    redraw_requested: bool,
+    /// Highlighted ranges (selection, search) for the GPU path.
+    #[cfg(feature = "gpu")]
+    hl_pane: usize,
+    #[cfg(feature = "gpu")]
+    hl_rows: HashMap<usize, Vec<gpu_text::HlRect>>,
+    #[cfg(feature = "gpu")]
+    hl_hash: HashMap<usize, u64>,
 }
 
 /// How far unfocused panes are blended toward the background (0.0..1.0).
@@ -300,14 +329,44 @@ impl Renderer {
             } else {
                 None
             },
+            shaper: shape::Shaper::new(),
+            ligatures: false,
+            #[cfg(feature = "gpu")]
+            gpu: None,
+            #[cfg(feature = "gpu")]
+            gpu_suspended: false,
+            #[cfg(feature = "gpu")]
+            redraw_requested: false,
+            #[cfg(feature = "gpu")]
+            hl_pane: usize::MAX,
+            #[cfg(feature = "gpu")]
+            hl_rows: HashMap::new(),
+            #[cfg(feature = "gpu")]
+            hl_hash: HashMap::new(),
         }
     }
 
     pub fn reinit_font(&mut self, font_path: &str, font_size: f32) {
         log::info!("Reinit font: {font_size}px (scaled for display)");
         self.font = FontManager::new(font_path, font_size);
+        self.shaper.clear();
+        #[cfg(feature = "gpu")]
+        if let Some(g) = &mut self.gpu {
+            g.atlas.clear();
+            g.color_atlas.clear();
+        }
         self.invalidate();
     }
+
+    /// Enable / disable ligature shaping (config `font_ligatures`).
+    pub fn set_ligatures(&mut self, on: bool) {
+        if self.ligatures != on {
+            self.ligatures = on;
+            self.invalidate();
+        }
+    }
+
+    pub fn ligatures(&self) -> bool { self.ligatures }
 
     /// Drop all cached pixels/hashes; the next frame is a full redraw.
     pub fn invalidate(&mut self) {
@@ -403,11 +462,36 @@ impl Renderer {
         self.frame_sig = sig;
         self.full_frame = full;
 
+        #[cfg(feature = "gpu")]
+        let gpu_on = self.gpu_text_active();
+        #[cfg(not(feature = "gpu"))]
+        let gpu_on = false;
+
         let mut back = std::mem::take(&mut self.back);
         if full {
             back.clear();
             back.resize(n, bg);
             self.pane_rows.clear();
+            #[cfg(feature = "gpu")]
+            if let (true, Some(g)) = (gpu_on, &mut self.gpu) {
+                // GPU text: pane areas are transparent in the UI layer and
+                // every pane row gets an instance slot.
+                let key = gpu_text::KEY | bg;
+                for (_, rect, _) in layouts.iter() {
+                    let x1 = rect.right().min(w);
+                    for y in rect.y..rect.bottom().min(h) {
+                        if x1 > rect.x { back[y * w + rect.x..y * w + x1].fill(key); }
+                    }
+                }
+                let panes: Vec<(usize, PaneRect)> = layouts.iter().map(|(i, r, _)| (*i, *r)).collect();
+                g.begin_rebuild();
+                g.layout(&panes, cw, ch);
+            }
+        }
+        #[cfg(feature = "gpu")]
+        if let (true, Some(g)) = (gpu_on, &mut self.gpu) {
+            g.atlas.begin_frame();
+            g.color_atlas.begin_frame();
         }
 
         for (idx, rect, is_active) in layouts.iter() {
@@ -430,11 +514,25 @@ impl Renderer {
         buffer.copy_from_slice(&back);
         self.back = back;
 
+        #[cfg(feature = "gpu")]
+        if gpu_on {
+            self.gpu_frame_tail(&layouts, wm, split_ui.hover_pane);
+            if self.gpu.as_mut().map_or(false, |g| g.take_stale()) {
+                // Atlas pages were recycled (or full) mid-frame: rows cached
+                // earlier may point at replaced glyphs. Rebuild everything on
+                // the very next frame.
+                self.force_full = true;
+                self.redraw_requested = true;
+            }
+        }
+
         // Split chrome is composited onto the output buffer (never the
         // persistent back buffer) so dimming cannot compound across frames.
         if layouts.len() > 1 {
             let borders = active_tab.split_borders(content_area);
-            self.dim_unfocused_panes(&layouts, buffer, w, h, split_ui.hover_pane);
+            if !gpu_on {
+                self.dim_unfocused_panes(&layouts, buffer, w, h, split_ui.hover_pane);
+            }
             self.render_pane_borders(&layouts, &borders, buffer, w, h, &split_ui);
         } else if split_ui.zoomed {
             if let Some((_, rect, _)) = layouts.first() {
@@ -765,6 +863,11 @@ impl Renderer {
                     }
                 }
             }
+            #[cfg(feature = "gpu")]
+            {
+                let hl = self.hl_row_hash(row);
+                if hl != 0 { h = mix(h, hl); }
+            }
             if row < ind_rows { h = mix(h, ind_hash); }
             // Edge rows may carry pane-border pixels that interior rows don't.
             if row == 0 || row + 1 == nrows { h = mix(h, 0xed9e + row.min(1) as u64); }
@@ -772,8 +875,20 @@ impl Renderer {
             new_hashes.push(h);
         }
 
+        #[cfg(feature = "gpu")]
+        let gpu_paint = self.gpu_text_on();
+        #[cfg(not(feature = "gpu"))]
+        let gpu_paint = false;
+        #[cfg(feature = "gpu")]
+        if gpu_paint {
+            self.gpu_paint_pane(
+                terminal, &visible, &dirty, old_hashes.len(), buffer, buf_width, buf_height,
+                rect, show_cursor, images_visible, cmd_held,
+            );
+        }
+
         for (row, cells) in visible.iter().enumerate() {
-            if !dirty[row] { continue; }
+            if gpu_paint || !dirty[row] { continue; }
             let url_ranges: Vec<(usize, usize)> = if cmd_held {
                 let line: String = cells.iter().map(|c| c.c).collect();
                 crate::tools::url_detect::detect_urls(&line)
@@ -791,7 +906,7 @@ impl Renderer {
 
         // Rows that existed last frame but are gone now (short scrollback view):
         // clear their bands, as the old whole-frame fill did.
-        if old_hashes.len() > nrows {
+        if old_hashes.len() > nrows && !gpu_paint {
             let dbg = self.def_bg();
             let bg_px = pack(dbg.0, dbg.1, dbg.2);
             let x1 = (rect.x + rect.width).min(buf_width);
@@ -1057,7 +1172,7 @@ impl Renderer {
                 self.theme.cursor
             } else { bg };
             let px = pack(fill.0, fill.1, fill.2);
-            let fill_w = if is_cursor { cursor_w } else { cw };
+            let fill_w = if is_cursor { cursor_w } else if wide { cw * 2 } else { cw };
             for cy in 0..ch {
                 let offset = (y0 + cy) * buf_width + x0;
                 if offset + fill_w <= buffer.len() {

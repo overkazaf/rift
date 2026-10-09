@@ -36,6 +36,7 @@ pollster = { version = "1", optional = true }
 muda = "0.21"
 ureq = "3"
 unicode-width = "0.2"
+rustybuzz = "0.20"
 bytemuck = { version = "1", features = ["derive"], optional = true }
 flate2 = "1"
 libc = "0.2"

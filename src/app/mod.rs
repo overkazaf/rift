@@ -3,7 +3,7 @@ pub mod keymap;
 mod lifecycle;
 pub mod mouse;
 mod overlays;
-mod panes;
+pub mod panes;
 pub mod shortcuts;
 mod tabs;
 
@@ -135,6 +135,12 @@ pub struct App {
     pub history: HistorySearch,
     /// Built-in MCP server (socket, approval queue, activity overlay).
     pub mcp: crate::mcp::host::UiState,
+    /// Change Review: per-pane checkpoints/turns, overlay, chips (see `crate::review`).
+    pub review: crate::review::Review,
+    /// Agent Mission Control: supervised AI coding agents (see `crate::agents`).
+    pub agents: crate::agents::AgentRegistry,
+    pub agents_ui: crate::agents::ui::AgentsUi,
+    pub agents_rt: crate::agents::runtime::Runtime,
 
     pub needs_render: bool,
     pub startup_time: std::time::Instant,
@@ -157,6 +163,19 @@ pub struct SshConnecting {
 }
 
 impl App {
+    /// No wgpu pipeline is driving the window (CPU renderer / softbuffer present).
+    #[allow(dead_code)]
+    pub fn gpu_pipeline_absent(&self) -> bool {
+        #[cfg(feature = "gpu")]
+        {
+            self.gpu_pipeline.is_none()
+        }
+        #[cfg(not(feature = "gpu"))]
+        {
+            true
+        }
+    }
+
     pub fn new(config: Config, renderer: Renderer, mut wm: WindowManager) -> Self {
         let prefs = Preferences::new(&config);
         let welcome = Welcome::new_auto();
@@ -171,6 +190,8 @@ impl App {
         let keymap = keymap::Keymap::build(&config.input.keybindings);
         let notify_after_secs = config.notify_after_secs;
         let config_mcp = config.mcp.clone();
+        let mut agents_registry = crate::agents::AgentRegistry::new();
+        agents_registry.configure(&config.agents);
         Self {
             config,
             wm,
@@ -243,6 +264,10 @@ impl App {
             regex_playground: RegexPlayground::new(),
             history: HistorySearch::new(),
             mcp: crate::mcp::host::start(&config_mcp),
+            review: Default::default(),
+            agents: agents_registry,
+            agents_ui: Default::default(),
+            agents_rt: Default::default(),
 
             startup_time: std::time::Instant::now(),
             startup_skipped: false,
@@ -310,7 +335,8 @@ impl App {
         let ch = self.renderer.cell_height();
         let hud_h = if self.hud_visible { ch * 3 + 20 } else { 0 };
         let width = self.terminal_width(w);
-        crate::window::PaneRect { x: 0, y: tbh, width, height: h.saturating_sub(tbh + hud_h) }
+        let dock = crate::agents::runtime::dock_w(self, w);
+        crate::window::PaneRect { x: dock, y: tbh, width, height: h.saturating_sub(tbh + hud_h) }
     }
 
     /// Cell under the pointer when it lies on an OSC 8 hyperlink.
@@ -411,6 +437,10 @@ impl ApplicationHandler for App {
                     return;
                 }
 
+                if crate::agents::runtime::on_cursor_moved(self) {
+                    return;
+                }
+
                 if crate::network::browser::on_cursor_moved(self) {
                     return;
                 }
@@ -508,6 +538,11 @@ impl ApplicationHandler for App {
                         self.mouse_pressed = true;
                         // Docked AI chat: focus, buttons, divider grab.
                         if crate::ai::chat::on_mouse_press(self) {
+                            self.mouse_pressed = false;
+                            return;
+                        }
+                        // Mission Control dock: select / jump to an agent.
+                        if crate::agents::runtime::on_mouse_press(self) {
                             self.mouse_pressed = false;
                             return;
                         }
@@ -637,6 +672,9 @@ impl ApplicationHandler for App {
                         }
                     };
                     overlays::palette_wheel(self, lines);
+                    return;
+                }
+                if crate::agents::runtime::on_wheel(self, delta) {
                     return;
                 }
                 if crate::ai::chat::on_wheel(self, delta) {
