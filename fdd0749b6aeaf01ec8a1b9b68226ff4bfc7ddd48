@@ -1,0 +1,93 @@
+packaging/homebrew/rift.rb
+  46dcc8959d90ad53 10-11
+README.md
+  46dcc8959d90ad53 103,109,288
+src/agents/autopilot.rs
+  46dcc8959d90ad53 599-602,1542-1545
+scripts/bundle_macos.sh
+  46dcc8959d90ad53 7
+docs/screenshots/README.md
+  46dcc8959d90ad53 27-30
+CHANGELOG.md
+  46dcc8959d90ad53 1-75
+docs/index.html
+  46dcc8959d90ad53 7,16,43,64,205-206,210-211,257-317,338,342,363-364,379,382,407,428,535-539
+Cargo.toml
+  46dcc8959d90ad53 3
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.8-ntes.9",
+  "base_commit_sha": "fdd0749b6aeaf01ec8a1b9b68226ff4bfc7ddd48",
+  "prompts": {
+    "46dcc8959d90ad53": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6fa63a6e-29eb-4ea1-9d68-d297cc1526ef",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "nongjiawu",
+      "messages": [],
+      "total_additions": 5727,
+      "total_deletions": 19,
+      "accepted_lines": 5727,
+      "overriden_lines": 0,
+      "per_file_stats": {
+        "docs/screenshots/README.md": {
+          "additions": 4,
+          "accepted_lines": 4
+        },
+        "README.md": {
+          "additions": 3,
+          "deletions": 3,
+          "accepted_lines": 3
+        },
+        "CHANGELOG.md": {
+          "additions": 75,
+          "accepted_lines": 75
+        },
+        "scripts/bundle_macos.sh": {
+          "additions": 1,
+          "deletions": 1,
+          "accepted_lines": 1
+        },
+        "docs/screenshots/workflow-queue.png": {
+          "additions": 1356,
+          "accepted_lines": 1356
+        },
+        "docs/screenshots/autopilot.png": {
+          "additions": 1571,
+          "accepted_lines": 1571
+        },
+        "Cargo.toml": {
+          "additions": 1,
+          "deletions": 1,
+          "accepted_lines": 1
+        },
+        "packaging/homebrew/rift.rb": {
+          "additions": 2,
+          "deletions": 2,
+          "accepted_lines": 2
+        },
+        "docs/screenshots/workflow-compare.png": {
+          "additions": 1105,
+          "accepted_lines": 1105
+        },
+        "docs/screenshots/mission-control.png": {
+          "additions": 1519,
+          "accepted_lines": 1519
+        },
+        "src/agents/autopilot.rs": {
+          "additions": 8,
+          "deletions": 2,
+          "accepted_lines": 8
+        },
+        "docs/index.html": {
+          "additions": 82,
+          "deletions": 10,
+          "accepted_lines": 82
+        }
+      }
+    }
+  }
+}
