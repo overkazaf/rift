@@ -1,0 +1,642 @@
+src/tools/secret_mask.rs
+  46dcc8959d90ad53 152-572
+src/terminal/grid.rs
+  46dcc8959d90ad53 8-19,28-31,34-45,50-52,57-64,74-76,83,85-115,118-171
+src/blocks_ui/mod.rs
+  46dcc8959d90ad53 433-434
+src/blocks_ui/view.rs
+  46dcc8959d90ad53 171
+src/tools/exec_preview/shell_parse.rs
+  46dcc8959d90ad53 1-812
+src/tools/url_detect.rs
+  46dcc8959d90ad53 1-44,46-47,51-67,69-84,86-94,97
+src/ui/confirm.rs
+  46dcc8959d90ad53 1-230,232-330,332,334,337-386
+src/audit/cfg.rs
+  46dcc8959d90ad53 1-128
+src/input.rs
+  46dcc8959d90ad53 1-156,159-558,560-568,570-580,582-583,585-591,593-598,603-619,622-631,633-661,664-676,678-747,749-768,770-1119
+src/network/ssh/known_hosts.rs
+  46dcc8959d90ad53 1-18,20-69,74-103,106-131
+scripts/bundle_macos.sh
+  46dcc8959d90ad53 7,10-15
+README.md
+  46dcc8959d90ad53 139,173,177-185
+src/shell_integration/bash/rift.bash
+  46dcc8959d90ad53 23,28-29,35-53,55-56,69,73-75,83-84,91-93,110-111,114,121
+src/audit/safety.rs
+  46dcc8959d90ad53 1-188
+src/terminal/images.rs
+  46dcc8959d90ad53 24,28-41,84-90,95-103,117-120,122-123,127-152,165,193-199,203-206,212-213,215,259-271,296-297,303,504-505,518-520,556-558,560-563,820-868
+src/audit/ai_net.rs
+  46dcc8959d90ad53 1-274
+src/audit/escapes.rs
+  46dcc8959d90ad53 1-162,164,170-284
+src/ai/advisor.rs
+  46dcc8959d90ad53 109,143-146,149-151,287-290
+src/wake.rs
+  46dcc8959d90ad53 1-24
+src/app/overlays.rs
+  46dcc8959d90ad53 31-34,137-153,431
+src/network/ssh/session.rs
+  46dcc8959d90ad53 2-3,6-7,65-75,77-79,103,110-111,117,120-141,148,173-182,189,191-212,214,216-254,266-267,269,283-284,293-302,304-310
+src/app/tabs.rs
+  46dcc8959d90ad53 292
+src/terminal/extras.rs
+  46dcc8959d90ad53 1-484
+tests/mock_llm.py
+  46dcc8959d90ad53 1-126,134-211
+src/ui/mod.rs
+  46dcc8959d90ad53 1
+src/main.rs
+  46dcc8959d90ad53 11,27-28,39-40,55-63,76,93
+src/audit/render.rs
+  46dcc8959d90ad53 1-199
+src/tools/teaching.rs
+  46dcc8959d90ad53 6-11,20,32-43,46-73,76-81,149-171
+src/terminal/ansi.rs
+  46dcc8959d90ad53 1-2,49-52,54-55,57-66,68-70,72-75,77,80,82-102,104-105,109,111-112,114,116-120,122-143,145-150,152-167,174-179,181-196,198-199,220-230,232,234-236,246,253,260-262,291,300-302,316,318-322,324-351,357-365,369-372,374-407,409-412,414-436,442,444-460,462,464-472
+src/ai/consent.rs
+  46dcc8959d90ad53 1-194
+src/window/manager.rs
+  46dcc8959d90ad53 1,7-11,30-32,48-49,64-65,263-266,268,270-290,293-298,301,303,307-310,313-323,359-360
+src/tools/compare.rs
+  46dcc8959d90ad53 134
+src/renderer/mod.rs
+  46dcc8959d90ad53 81-84,86-88,96-98,143-148,156-157,162-165,249-250,290,845,856-862,870,875-879,881-883,890,903,941-943,1003,1019-1030,1184,1203-1204,1216-1223,1297-1302,1304-1312,1735-1827
+src/app/mouse.rs
+  46dcc8959d90ad53 138-153
+src/terminal/fastpath.rs
+  46dcc8959d90ad53 1-23,30-36,41-42,46-47,51,54-69
+src/window/selection.rs
+  46dcc8959d90ad53 200-201,203-206,210,262-263,290-291,293,506-511
+src/audit/splits.rs
+  46dcc8959d90ad53 1-324
+src/app/shortcuts.rs
+  46dcc8959d90ad53 13,46-171,205-213,216-229,231,242,248,280-282,292-294,299-301,305,316,526,529,534
+src/tools/exec_preview/analysis.rs
+  46dcc8959d90ad53 1-138
+.github/workflows/release.yml
+  46dcc8959d90ad53 1-145
+packaging/homebrew/rift.rb
+  46dcc8959d90ad53 1-32
+src/audit/shell_real.rs
+  46dcc8959d90ad53 1-151,160-358,362,383-384,389-393,402-474
+src/app/mod.rs
+  46dcc8959d90ad53 2,58-59,78-83,151-152,167,173,191-193,372,454-463,654-655
+src/pty.rs
+  46dcc8959d90ad53 1-13,15-16,18,20,23-36,38-44,49-53,69-82,85-109,111-134,136,139-157,159-168,171-195,207-210
+src/ai/backend.rs
+  46dcc8959d90ad53 1-5,9-11,29,36-38,44,47-49,51-61,63,65-66,68-70,73-76,79-93,95,97-116,122,133,135-136,146,148-149,158-161,163-182,185-196,198-208,212-230,232-238
+src/ai/chat/render.rs
+  46dcc8959d90ad53 388-397,453-459,478,480-483
+src/ai/chat/stream.rs
+  46dcc8959d90ad53 15,17,153-192,194,211-212,237-241,246-253,255-258,263,267-269,271-273,275,279-282,326,339,341-342,345,349-351,355-359,361-479,483-484,486,491-492,496-563,566-576,578,666,668-673,710-763,765-780
+src/tools/exec_preview.rs
+  46dcc8959d90ad53 17-19,94-100,102,105-117,122-142,148
+src/terminal/reflow.rs
+  46dcc8959d90ad53 1-299
+src/ai/inline/nl.rs
+  46dcc8959d90ad53 12-21,23-26,28-31,33-37,39,41-45,47-50,54-57,59,99-117,122-128,151-152
+src/app/panes.rs
+  46dcc8959d90ad53 49
+src/ai/mod.rs
+  46dcc8959d90ad53 7,38-43,45,100
+src/ai/inline/json.rs
+  46dcc8959d90ad53 174-181,238-244
+src/window/pane.rs
+  46dcc8959d90ad53 5-6,9-16,33-78,83-85,87-88,93-108,129-133,162-163,167-168,180,183,196,199,212,215,229,232,241-243,245-248,269,284-290,292-293,326-425
+src/audit/perf.rs
+  46dcc8959d90ad53 1-192,194-196,199-206
+src/tools/hud.rs
+  46dcc8959d90ad53 7,57-59,77,79-80,97,105-106,108-156,558
+src/audit/mod.rs
+  46dcc8959d90ad53 1-127
+src/tools/exec_preview/rules.rs
+  46dcc8959d90ad53 1-606,608-1014,1016,1019-1067,1069-1084,1092-1247
+src/app/lifecycle.rs
+  46dcc8959d90ad53 92-96,544-551,618-621,638-647,672-685,709-711,734,742,767,792,796,817-820,854,887,945-949
+src/tools/search.rs
+  46dcc8959d90ad53 13-22,92-98,101-103,107-109,111-152
+src/ai/hub.rs
+  46dcc8959d90ad53 39-48,84-92,94,99-103,106-110,113-116,126-127,135-136,140-141,151-154,156
+src/ai/chat/session.rs
+  46dcc8959d90ad53 44-51,56,92-95,131-141,160-161,163-168,201-203,281-285,368-370,382-383,535-566
+src/ai/inline/fix.rs
+  46dcc8959d90ad53 124-125,127-130,141-142,145,219-227
+src/terminal/tests.rs
+  46dcc8959d90ad53 1-158,160-250,252-267,269-273,275-278,280-493,495
+src/app/ime.rs
+  46dcc8959d90ad53 46-49
+src/tools/exec_preview/tests.rs
+  46dcc8959d90ad53 1-394
+src/audit/robust.rs
+  46dcc8959d90ad53 1-183
+Cargo.toml
+  46dcc8959d90ad53 41
+src/terminal/semantic.rs
+  46dcc8959d90ad53 50-53,64-68,79-94,109-110,120-213,215-219,254-259,276-289,291,318-380
+src/audit/textops.rs
+  46dcc8959d90ad53 1-153
+src/tools/blocks.rs
+  46dcc8959d90ad53 35-40,175-176,180-184,187-204,206-208,217-236,240-245,249-250,256-260,262,293-294,296-308,324-326
+src/network/ssh/mod.rs
+  46dcc8959d90ad53 2
+src/audit/blocks.rs
+  46dcc8959d90ad53 1-118,124-159
+src/window/tab.rs
+  46dcc8959d90ad53 94-95,129-130,132,136,140,144,657-663
+src/shell_integration/zsh/rift-integration.zsh
+  46dcc8959d90ad53 52-75,78-80
+src/ai/chat/mod.rs
+  46dcc8959d90ad53 28
+src/ui/menubar.rs
+  46dcc8959d90ad53 71-73,158,384-389,415
+src/tools/session.rs
+  46dcc8959d90ad53 399,474-477,481,486,512-521,706-710,712
+.github/workflows/ci.yml
+  46dcc8959d90ad53 1-58,60-75
+src/ai/inline/mod.rs
+  46dcc8959d90ad53 356,685
+src/config/toml.rs
+  46dcc8959d90ad53 1-2,6,8-33,35-37,41-44,46-71,73-78,81-83,85-261,270-278,280,283,291,299-321,372,378-380,446-478,574-576,590-591,594-599,642-731
+src/config/mod.rs
+  46dcc8959d90ad53 26-85,106-107,112-117,132-133,138,141-143,338,342,356-365
+src/renderer/font.rs
+  46dcc8959d90ad53 21-22,186,188,194,252-260,265,274,285,303-341,343,346-349,396,402,407-418,421-422,424,428,432-434,437-439,441-443,445,450-458,460,466-738
+src/terminal/mod.rs
+  46dcc8959d90ad53 2-6,13-14,45-76,121,154-185,190-191,214,242-263,277-285,288-291,296-299,303-309,312,314-345,347-379,381-436,442,453-463,465-472,476-478,483-484,498,500-514,516-526,552-566,568-582,588-605,637-638,676-680,682-685,689-693,695-699,704-706,719-721,735,740-743,747,750-751,753-761,767,783,813-814,816-822,870-875,902-909
+src/ai/chat/guard.rs
+  46dcc8959d90ad53 1-309
+src/ai/chat/json.rs
+  46dcc8959d90ad53 77-79,270-285
+src/app/keymap.rs
+  46dcc8959d90ad53 1-467
+src/ui/preferences.rs
+  46dcc8959d90ad53 134
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.8-ntes.9",
+  "base_commit_sha": "2e8cbc46701315e7d623703e443421b60f0ae526",
+  "prompts": {
+    "46dcc8959d90ad53": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6fa63a6e-29eb-4ea1-9d68-d297cc1526ef",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "nongjiawu",
+      "messages": [],
+      "total_additions": 15988,
+      "total_deletions": 2713,
+      "accepted_lines": 15430,
+      "overriden_lines": 101,
+      "per_file_stats": {
+        "src/ai/chat/json.rs": {
+          "additions": 20,
+          "deletions": 1,
+          "accepted_lines": 20
+        },
+        "src/network/ssh/session.rs": {
+          "additions": 144,
+          "deletions": 12,
+          "accepted_lines": 142,
+          "overriden_lines": 2
+        },
+        "src/ai/inline/nl.rs": {
+          "additions": 66,
+          "deletions": 20,
+          "accepted_lines": 66
+        },
+        "src/tools/url_detect.rs": {
+          "additions": 89,
+          "deletions": 18,
+          "accepted_lines": 89
+        },
+        "src/app/panes.rs": {
+          "additions": 1,
+          "deletions": 1,
+          "accepted_lines": 1
+        },
+        "src/terminal/semantic.rs": {
+          "additions": 224,
+          "deletions": 18,
+          "accepted_lines": 218
+        },
+        ".github/workflows/ci.yml": {
+          "additions": 75,
+          "accepted_lines": 74,
+          "overriden_lines": 1
+        },
+        "src/config/mod.rs": {
+          "additions": 88,
+          "deletions": 3,
+          "accepted_lines": 88,
+          "overriden_lines": 4
+        },
+        "src/ai/chat/render.rs": {
+          "additions": 22,
+          "deletions": 3,
+          "accepted_lines": 22
+        },
+        "src/audit/ai_net.rs": {
+          "additions": 275,
+          "deletions": 1,
+          "accepted_lines": 274
+        },
+        "src/ai/inline/mod.rs": {
+          "additions": 2,
+          "deletions": 1,
+          "accepted_lines": 2
+        },
+        "src/app/tabs.rs": {
+          "additions": 1,
+          "deletions": 1,
+          "accepted_lines": 1
+        },
+        "src/blocks_ui/view.rs": {
+          "additions": 1,
+          "deletions": 1,
+          "accepted_lines": 1
+        },
+        "src/tools/exec_preview/shell_parse.rs": {
+          "additions": 812,
+          "accepted_lines": 812
+        },
+        "src/app/mod.rs": {
+          "additions": 29,
+          "accepted_lines": 29
+        },
+        "src/app/ime.rs": {
+          "additions": 4,
+          "accepted_lines": 4
+        },
+        "Cargo.toml": {
+          "additions": 1,
+          "accepted_lines": 1
+        },
+        "src/ai/backend.rs": {
+          "additions": 155,
+          "deletions": 93,
+          "accepted_lines": 155
+        },
+        "src/ai/chat/mod.rs": {
+          "additions": 1,
+          "accepted_lines": 1
+        },
+        ".github/workflows/release.yml": {
+          "additions": 145,
+          "accepted_lines": 145
+        },
+        "src/window/selection.rs": {
+          "additions": 18,
+          "deletions": 11,
+          "accepted_lines": 18
+        },
+        "src/audit/safety.rs": {
+          "additions": 208,
+          "deletions": 20,
+          "accepted_lines": 188
+        },
+        "src/main.rs": {
+          "additions": 16,
+          "deletions": 3,
+          "accepted_lines": 18
+        },
+        "src/tools/exec_preview.rs": {
+          "additions": 55,
+          "deletions": 486,
+          "accepted_lines": 55
+        },
+        "src/window/pane.rs": {
+          "additions": 264,
+          "deletions": 32,
+          "accepted_lines": 220,
+          "overriden_lines": 25
+        },
+        "src/app/mouse.rs": {
+          "additions": 17,
+          "deletions": 2,
+          "accepted_lines": 16
+        },
+        "src/terminal/ansi.rs": {
+          "additions": 317,
+          "deletions": 160,
+          "accepted_lines": 308
+        },
+        "src/shell_integration/zsh/rift-integration.zsh": {
+          "additions": 27,
+          "deletions": 2,
+          "accepted_lines": 27
+        },
+        "src/terminal/fastpath.rs": {
+          "additions": 72,
+          "accepted_lines": 51,
+          "overriden_lines": 14
+        },
+        "src/window/tab.rs": {
+          "additions": 15,
+          "deletions": 4,
+          "accepted_lines": 15
+        },
+        "src/tools/exec_preview/analysis.rs": {
+          "additions": 138,
+          "accepted_lines": 138
+        },
+        "src/renderer/font.rs": {
+          "additions": 378,
+          "deletions": 23,
+          "accepted_lines": 377,
+          "overriden_lines": 2
+        },
+        "src/renderer/mod.rs": {
+          "additions": 195,
+          "deletions": 19,
+          "accepted_lines": 189
+        },
+        "src/tools/compare.rs": {
+          "additions": 1,
+          "deletions": 1,
+          "accepted_lines": 1
+        },
+        "src/audit/escapes.rs": {
+          "additions": 281,
+          "deletions": 2,
+          "accepted_lines": 278,
+          "overriden_lines": 1
+        },
+        "src/app/shortcuts.rs": {
+          "additions": 167,
+          "deletions": 265,
+          "accepted_lines": 167,
+          "overriden_lines": 1
+        },
+        "src/audit/shell_real.rs": {
+          "additions": 493,
+          "deletions": 62,
+          "accepted_lines": 431,
+          "overriden_lines": 5
+        },
+        "src/tools/teaching.rs": {
+          "additions": 81,
+          "deletions": 6,
+          "accepted_lines": 81
+        },
+        "src/audit/robust.rs": {
+          "additions": 208,
+          "deletions": 25,
+          "accepted_lines": 183
+        },
+        "src/audit/splits.rs": {
+          "additions": 329,
+          "deletions": 5,
+          "accepted_lines": 324
+        },
+        "src/tools/exec_preview/tests.rs": {
+          "additions": 396,
+          "deletions": 2,
+          "accepted_lines": 394
+        },
+        "src/tools/blocks.rs": {
+          "additions": 106,
+          "deletions": 27,
+          "accepted_lines": 88
+        },
+        "src/shell_integration/bash/rift.bash": {
+          "additions": 46,
+          "deletions": 5,
+          "accepted_lines": 38,
+          "overriden_lines": 4
+        },
+        "src/ui/menubar.rs": {
+          "additions": 11,
+          "deletions": 3,
+          "accepted_lines": 11
+        },
+        "src/ai/chat/stream.rs": {
+          "additions": 381,
+          "deletions": 38,
+          "accepted_lines": 372,
+          "overriden_lines": 12
+        },
+        "src/ai/inline/fix.rs": {
+          "additions": 18,
+          "deletions": 3,
+          "accepted_lines": 18
+        },
+        "src/terminal/tests.rs": {
+          "additions": 495,
+          "accepted_lines": 489,
+          "overriden_lines": 6
+        },
+        "src/wake.rs": {
+          "additions": 24,
+          "accepted_lines": 24
+        },
+        "src/app/overlays.rs": {
+          "additions": 24,
+          "deletions": 1,
+          "accepted_lines": 24
+        },
+        "src/tools/session.rs": {
+          "additions": 24,
+          "deletions": 4,
+          "accepted_lines": 24
+        },
+        "packaging/homebrew/rift.rb": {
+          "additions": 32,
+          "accepted_lines": 32
+        },
+        "tests/mock_llm.py": {
+          "additions": 204,
+          "accepted_lines": 204
+        },
+        "src/input.rs": {
+          "additions": 1108,
+          "deletions": 68,
+          "accepted_lines": 1107
+        },
+        "src/ai/chat/session.rs": {
+          "additions": 80,
+          "deletions": 4,
+          "accepted_lines": 80
+        },
+        "src/terminal/extras.rs": {
+          "additions": 486,
+          "deletions": 2,
+          "accepted_lines": 484
+        },
+        "src/tools/hud.rs": {
+          "additions": 61,
+          "deletions": 3,
+          "accepted_lines": 60
+        },
+        "scripts/bundle_macos.sh": {
+          "additions": 7,
+          "deletions": 4,
+          "accepted_lines": 7
+        },
+        "src/audit/textops.rs": {
+          "additions": 157,
+          "deletions": 4,
+          "accepted_lines": 153
+        },
+        "src/ui/preferences.rs": {
+          "additions": 1,
+          "deletions": 1,
+          "accepted_lines": 1
+        },
+        "src/ui/confirm.rs": {
+          "additions": 384,
+          "accepted_lines": 381,
+          "overriden_lines": 3
+        },
+        "src/ai/hub.rs": {
+          "additions": 46,
+          "deletions": 11,
+          "accepted_lines": 46
+        },
+        "src/tools/exec_preview/rules.rs": {
+          "additions": 1243,
+          "deletions": 4,
+          "accepted_lines": 1235,
+          "overriden_lines": 5
+        },
+        "src/ui/mod.rs": {
+          "additions": 1,
+          "accepted_lines": 1
+        },
+        "src/audit/render.rs": {
+          "additions": 199,
+          "accepted_lines": 199
+        },
+        "docs/screenshots/blocks.png": {
+          "additions": 739,
+          "deletions": 728,
+          "accepted_lines": 739
+        },
+        "src/terminal/grid.rs": {
+          "additions": 132,
+          "deletions": 1,
+          "accepted_lines": 137,
+          "overriden_lines": 2
+        },
+        "src/audit/blocks.rs": {
+          "additions": 156,
+          "accepted_lines": 154,
+          "overriden_lines": 2
+        },
+        "src/audit/perf.rs": {
+          "additions": 362,
+          "deletions": 153,
+          "accepted_lines": 203,
+          "overriden_lines": 3
+        },
+        "src/blocks_ui/mod.rs": {
+          "additions": 2,
+          "deletions": 2,
+          "accepted_lines": 2
+        },
+        "README.md": {
+          "additions": 13,
+          "deletions": 2,
+          "accepted_lines": 13
+        },
+        "src/terminal/reflow.rs": {
+          "additions": 300,
+          "deletions": 1,
+          "accepted_lines": 299
+        },
+        "src/app/lifecycle.rs": {
+          "additions": 61,
+          "deletions": 6,
+          "accepted_lines": 61
+        },
+        "src/app/keymap.rs": {
+          "additions": 479,
+          "deletions": 12,
+          "accepted_lines": 467
+        },
+        "src/network/ssh/mod.rs": {
+          "additions": 1,
+          "accepted_lines": 1
+        },
+        "src/ai/advisor.rs": {
+          "additions": 12,
+          "deletions": 2,
+          "accepted_lines": 12
+        },
+        "src/terminal/images.rs": {
+          "additions": 158,
+          "deletions": 12,
+          "accepted_lines": 158
+        },
+        "src/window/manager.rs": {
+          "additions": 67,
+          "deletions": 7,
+          "accepted_lines": 66,
+          "overriden_lines": 5
+        },
+        "src/ai/chat/guard.rs": {
+          "additions": 309,
+          "accepted_lines": 309
+        },
+        "src/ai/inline/json.rs": {
+          "additions": 17,
+          "deletions": 2,
+          "accepted_lines": 17
+        },
+        "src/ai/mod.rs": {
+          "additions": 9,
+          "deletions": 4,
+          "accepted_lines": 9
+        },
+        "src/config/toml.rs": {
+          "additions": 522,
+          "deletions": 137,
+          "accepted_lines": 431
+        },
+        "src/terminal/mod.rs": {
+          "additions": 430,
+          "deletions": 92,
+          "accepted_lines": 421
+        },
+        "src/tools/search.rs": {
+          "additions": 65,
+          "deletions": 27,
+          "accepted_lines": 65
+        },
+        "src/audit/cfg.rs": {
+          "additions": 136,
+          "deletions": 8,
+          "accepted_lines": 128
+        },
+        "src/tools/secret_mask.rs": {
+          "additions": 423,
+          "deletions": 2,
+          "accepted_lines": 421
+        },
+        "src/ai/consent.rs": {
+          "additions": 194,
+          "accepted_lines": 194
+        },
+        "src/pty.rs": {
+          "additions": 170,
+          "deletions": 25,
+          "accepted_lines": 170
+        },
+        "src/audit/mod.rs": {
+          "additions": 132,
+          "deletions": 5,
+          "accepted_lines": 127
+        },
+        "src/network/ssh/known_hosts.rs": {
+          "additions": 130,
+          "accepted_lines": 124,
+          "overriden_lines": 4
+        }
+      }
+    }
+  }
+}
