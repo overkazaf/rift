@@ -202,7 +202,7 @@ impl Selection {
             }
             // A soft-wrapped row continues on the next one: join without a newline
             // (and keep its trailing spaces, they are real content of the line).
-            let joins_next = row < er && self.mode != SelMode::Block && cells.last().map_or(false, |c| c.wrap);
+            let joins_next = row < er && self.mode != SelMode::Block && cells.last().map_or(false, |c| c.wrap());
             if (row < er && !joins_next) || self.mode == SelMode::Block {
                 seg.truncate(seg.trim_end_matches(' ').len());
             }
@@ -290,7 +290,7 @@ pub fn word_range(cells: &[Cell], col: usize) -> (usize, usize) {
 /// Did this row soft-wrap into the next one? (`Cell::wrap` on its last cell,
 /// set by the terminal when auto-wrap moved the cursor to the next line.)
 pub fn row_is_wrapped(cells: &[Cell]) -> bool {
-    cells.last().map_or(false, |c| c.wrap)
+    cells.last().map_or(false, |c| c.wrap())
 }
 
 /// First and last absolute row of the logical (soft-wrap joined) line that
@@ -316,6 +316,17 @@ pub fn logical_line_span(n_rows: usize, wrapped: impl Fn(usize) -> bool, row: us
 pub fn word_at(term: &crate::terminal::Terminal, row: usize, col: usize) -> (Pos, Pos) {
     match term.abs_line(row) {
         Some(cells) => {
+            // Scrollback rows are stored trimmed: pad so a click in the blank
+            // tail selects the whitespace run, like on a live row.
+            let padded;
+            let cells = if cells.len() < term.cols {
+                let mut v = cells.to_vec();
+                v.resize(term.cols, Cell::default());
+                padded = v;
+                &padded[..]
+            } else {
+                cells
+            };
             let (s, e) = word_range(cells, col);
             ((row, s), (row, e))
         }
@@ -507,7 +518,7 @@ mod tests {
         // that ended in a real newline is not wrapped.
         let mut full = cells("abcd");
         assert!(!row_is_wrapped(&full));
-        full.last_mut().unwrap().wrap = true;
+        full.last_mut().unwrap().set_wrap(true);
         assert!(row_is_wrapped(&full));
         assert!(!row_is_wrapped(&cells("abc ")));
         assert!(!row_is_wrapped(&[]));

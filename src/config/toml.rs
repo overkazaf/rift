@@ -81,6 +81,7 @@ fn fmt_f(v: f32, decimals: usize) -> String {
 /// Full serialization of every managed setting (no comments, no `[llm]`:
 /// secrets and endpoint choices are never generated). `save_config` does not
 /// use this; it merges into the user's file instead.
+#[cfg_attr(not(test), allow(dead_code))] // used by the config audit and tests, not by the app
 pub fn config_to_toml(config: &Config) -> String {
     apply_edits("", &managed_edits(config, None))
 }
@@ -139,6 +140,24 @@ fn managed_edits(config: &Config, base: Option<&Config>) -> Vec<Edit> {
     push("ai", "nl_hash", config.ai_nl_hash != b.ai_nl_hash, config.ai_nl_hash.to_string());
     if config.ai_consent != Consent::Unset {
         push("ai", "consent", config.ai_consent != b.ai_consent, quote(config.ai_consent.as_str()));
+    }
+    for (key, cur, old) in [
+        ("fix_provider", config.ai_routing.fix, b.ai_routing.fix),
+        ("nl_provider", config.ai_routing.nl, b.ai_routing.nl),
+        ("chat_provider", config.ai_routing.chat, b.ai_routing.chat),
+    ] {
+        if let Some(r) = cur {
+            push("ai", key, cur != old, quote(r.as_str()));
+        }
+    }
+    if config.llm_persist {
+        // Endpoint choice only: `api_key` is never generated. Provider is
+        // always written with the section, since it is what makes `[llm]` an
+        // explicit opt-in on the next load.
+        let fresh = !b.llm_explicit;
+        push("llm", "provider", fresh || config.llm.provider != b.llm.provider, quote(&config.llm.provider));
+        push("llm", "model", fresh || config.llm.model != b.llm.model, quote(&config.llm.model));
+        push("llm", "api_url", fresh || config.llm.api_url != b.llm.api_url, quote(&config.llm.api_url));
     }
     push("security", "osc52", config.osc52 != b.osc52, quote(config.osc52.as_str()));
     edits
@@ -376,6 +395,9 @@ fn parse_toml_config(content: &str) -> Config {
     if let Some(v) = get_int(&map, "general", "scrollback_lines").or_else(|| get_int(&map, "", "scrollback_lines")) {
         config.scrollback_lines = (v.max(0) as usize).min(1_000_000);
     }
+    if let Some(v) = get_float(&map, "general", "notify_after_secs").or_else(|| get_float(&map, "", "notify_after_secs")) {
+        config.notify_after_secs = (v as f64).clamp(0.0, 86_400.0);
+    }
     if let Some(v) = get_int(&map, "general", "bold_is_bright").or_else(|| get_int(&map, "", "bold_is_bright")) {
         config.bold_is_bright = v != 0;
     }
@@ -397,6 +419,18 @@ fn parse_toml_config(content: &str) -> Config {
             None => log::warn!("Unknown [ai] consent '{v}' (valid: cloud, local, declined)"),
         }
     }
+    for (key, slot) in [
+        ("fix_provider", &mut config.ai_routing.fix),
+        ("nl_provider", &mut config.ai_routing.nl),
+        ("chat_provider", &mut config.ai_routing.chat),
+    ] {
+        if let Some(v) = get_str(&map, "ai", key) {
+            match crate::ai::local::Route::parse(&v) {
+                Some(r) => *slot = Some(r),
+                None => log::warn!("Unknown [ai] {key} '{v}' (valid: local, cloud, default)"),
+            }
+        }
+    }
     config.ai_auto_fix = matches!(config.ai_consent, Consent::Cloud | Consent::Local);
     if let Some(v) = get_int(&map, "ai", "auto_fix") {
         config.ai_auto_fix = v != 0;
@@ -409,6 +443,17 @@ fn parse_toml_config(content: &str) -> Config {
         match Osc52Policy::parse(&v) {
             Some(p) => config.osc52 = p,
             None => log::warn!("Unknown [security] osc52 '{v}' (valid: write-only, allow, deny)"),
+        }
+    }
+
+    // [mcp]: enabled (read tools) and allow_run = "ask" | "never".
+    if let Some(v) = get_int(&map, "mcp", "enabled") {
+        config.mcp.enabled = v != 0;
+    }
+    if let Some(v) = get_str(&map, "mcp", "allow_run") {
+        match crate::mcp::AllowRun::parse(&v) {
+            Some(a) => config.mcp.allow_run = a,
+            None => log::warn!("Unknown [mcp] allow_run '{v}' (valid: ask, never)"),
         }
     }
 
@@ -429,6 +474,8 @@ fn parse_toml_config(content: &str) -> Config {
     }
 
     finish_llm(&mut config);
+    config.cloud_opt_in = config.ai_consent == Consent::Cloud
+        || (config.llm_explicit && !crate::ai::local::routing::is_local(&config.llm));
 
     config
 }
@@ -582,7 +629,28 @@ fn get_rgb(map: &TomlMap, section: &str, key: &str) -> Option<Rgb> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn notify_after_secs_parses() {
+        assert_eq!(parse_toml_config("").notify_after_secs, 10.0);
+        assert_eq!(parse_toml_config("notify_after_secs = 30").notify_after_secs, 30.0);
+        assert_eq!(parse_toml_config("[general]\nnotify_after_secs = 2.5").notify_after_secs, 2.5);
+        assert_eq!(parse_toml_config("notify_after_secs = -4").notify_after_secs, 0.0);
+    }
+
     use super::*;
+
+    #[test]
+    fn mcp_section_defaults_and_parses() {
+        use crate::mcp::AllowRun;
+        let c = parse_toml_config("");
+        assert!(c.mcp.enabled);
+        assert_eq!(c.mcp.allow_run, AllowRun::Ask);
+        let c = parse_toml_config("[mcp]\nenabled = false\nallow_run = \"never\"\n");
+        assert!(!c.mcp.enabled);
+        assert_eq!(c.mcp.allow_run, AllowRun::Never);
+        let c = parse_toml_config("[mcp]\nallow_run = \"bogus\"\n");
+        assert_eq!(c.mcp.allow_run, AllowRun::Ask, "unknown values keep the safe default");
+    }
 
     #[test]
     fn ai_toggles_default_on_and_parse() {
@@ -721,6 +789,56 @@ mod tests {
         assert_eq!(c.font_size, 22.0);
         assert_eq!(c.theme_name, "nord");
         assert_eq!(c.font_path.as_deref(), Some("/tmp/a=b#c.ttf"));
+    }
+
+    #[test]
+    fn local_model_choice_persists_without_api_key() {
+        use crate::ai::local::Route;
+        let mut c = Config::default();
+        c.ai_consent = Consent::Local;
+        c.ai_auto_fix = true; // what consent=local implies on load
+        c.theme_name = crate::config::LEGACY_THEME.to_string(); // what a file without `theme` loads as
+        c.llm = crate::ai::LlmConfig {
+            provider: "openai-compatible-local".into(),
+            model: "qwen2.5-coder-7b".into(),
+            api_url: "http://127.0.0.1:1234".into(),
+            api_key: Some("sk-secret".into()),
+            enabled: true,
+        };
+        c.llm_persist = true;
+        c.ai_routing.fix = Some(Route::Local);
+        c.ai_routing.chat = Some(Route::Default);
+        let out = compute_saved(None, &c).unwrap();
+        assert!(out.contains("consent = \"local\"") && out.contains("fix_provider = \"local\"") && out.contains("chat_provider = \"default\""), "{out}");
+        assert!(out.contains("provider = \"openai-compatible-local\"") && out.contains("model = \"qwen2.5-coder-7b\"") && out.contains("api_url = \"http://127.0.0.1:1234\""), "{out}");
+        assert!(!out.contains("sk-secret") && !out.contains("api_key"), "the key is never written: {out}");
+
+        let back = parse_toml_config(&out);
+        assert!(back.llm_explicit && back.llm.enabled);
+        assert_eq!((back.llm.provider.as_str(), back.llm.model.as_str()), ("openai-compatible-local", "qwen2.5-coder-7b"));
+        assert_eq!((back.ai_consent, back.ai_routing.fix, back.ai_routing.nl, back.ai_routing.chat), (Consent::Local, Some(Route::Local), None, Some(Route::Default)));
+        assert!(!back.cloud_opt_in, "a local-only setup must not count as a cloud opt-in");
+        assert!(compute_saved(Some(&out), &c).is_none(), "second save is a no-op");
+    }
+
+    #[test]
+    fn switching_models_keeps_the_users_api_key_line() {
+        let existing = "[llm]\nprovider = \"openai\"\nmodel = \"gpt-4o\"\napi_url = \"https://api.openai.com\"\napi_key = \"sk-file\"\n";
+        let mut c = parse_toml_config(existing);
+        assert!(c.cloud_opt_in);
+        c.llm.provider = "ollama".into();
+        c.llm.model = "llama3.2".into();
+        c.llm.api_url = "http://localhost:11434".into();
+        c.llm_persist = true;
+        let out = compute_saved(Some(existing), &c).unwrap();
+        assert!(out.contains("provider = \"ollama\"") && out.contains("model = \"llama3.2\"") && out.contains("api_key = \"sk-file\""), "{out}");
+        assert!(!out.contains("gpt-4o"));
+    }
+
+    #[test]
+    fn unknown_provider_route_is_ignored() {
+        let c = parse_toml_config("[ai]\nfix_provider = \"banana\"\nnl_provider = \"CLOUD\"\n");
+        assert_eq!((c.ai_routing.fix, c.ai_routing.nl), (None, Some(crate::ai::local::Route::Cloud)));
     }
 
     #[test]

@@ -24,6 +24,17 @@ pub struct BlockManager {
     pub enabled: bool,
     /// Exact tracking driven by OSC 133 marks (per terminal).
     osc: OscState,
+    /// Blocks that finished since the last [`BlockManager::take_finished`]
+    /// (drives long-command completion notifications).
+    finished: Vec<FinishedCommand>,
+}
+
+/// A command that just completed (from OSC 133;D).
+#[derive(Clone, Debug, PartialEq)]
+pub struct FinishedCommand {
+    pub command: String,
+    pub exit_code: Option<i32>,
+    pub duration_ms: u64,
 }
 
 #[derive(Default)]
@@ -51,7 +62,7 @@ struct PendingBlock {
 
 impl BlockManager {
     pub fn new() -> Self {
-        Self { blocks: Vec::new(), current: None, enabled: true, osc: OscState::default() }
+        Self { blocks: Vec::new(), current: None, enabled: true, osc: OscState::default(), finished: Vec::new() }
     }
 
     /// Called when the user submits input to the PTY.
@@ -282,11 +293,24 @@ impl BlockManager {
             b.exit_code = exit_code;
             b.duration_ms = t.elapsed().as_millis() as u64;
             b.output_end = end_line.max(b.output_start.saturating_sub(1));
+            if self.finished.len() >= 32 {
+                self.finished.remove(0);
+            }
+            self.finished.push(FinishedCommand {
+                command: b.command.clone(),
+                exit_code,
+                duration_ms: b.duration_ms,
+            });
             self.blocks.push(b);
             if self.blocks.len() > MAX_BLOCKS {
                 self.blocks.remove(0);
             }
         }
+    }
+
+    /// Drain the commands that finished since the last call.
+    pub fn take_finished(&mut self) -> Vec<FinishedCommand> {
+        std::mem::take(&mut self.finished)
     }
 
     /// The terminal dropped `n` lines from the top of scrollback; keep all

@@ -6,6 +6,7 @@ mod app;
 mod blocks_ui;
 mod config;
 mod input;
+mod mcp;
 mod pty;
 mod shell_integration;
 mod wake;
@@ -32,6 +33,10 @@ use winit::event_loop::EventLoop;
 fn main() {
     // CLI argument parsing (no external crate)
     let args: Vec<String> = std::env::args().collect();
+    // `rift mcp`: stdio <-> running Rift's MCP socket (for `claude mcp add rift -- rift mcp`).
+    if args.get(1).map(String::as_str) == Some("mcp") {
+        std::process::exit(mcp::bridge::run());
+    }
     // Headless scene renderer: no window, no event loop, no shell.
     if args.iter().any(|a| a == "--screenshot") {
         std::process::exit(screenshot::run(&args[1..]));
@@ -94,6 +99,12 @@ fn main() {
     let mut wm = window::WindowManager::new(proxy, config.cols as usize, config.rows as usize);
     wm.set_scrollback_lines(config.scrollback_lines);
 
+    // Look for local model servers (Ollama, LM Studio, ...) in the background
+    // so the first-run prompt and the model picker already know the answer.
+    if config.ai_consent != ai::consent::Consent::Declined {
+        ai::local::discovery::start();
+    }
+
     let mut app = app::App::new(config, renderer, wm);
     event_loop.run_app(&mut app).unwrap();
 }
@@ -103,6 +114,7 @@ fn print_help() {
     println!("rift {} — A cyberpunk terminal emulator built in Rust", config::VERSION);
     println!();
     println!("USAGE: rift [OPTIONS]");
+    println!("       rift mcp          MCP stdio bridge to the running Rift (see README)");
     println!();
     println!("OPTIONS:");
     println!("  -h, --help       Print this help message");
@@ -111,6 +123,10 @@ fn print_help() {
     println!("  --config PATH    Use custom config file");
     println!("  --screenshot SCENE|all --out DIR [--width 1600 --height 1000 --theme NAME]");
     println!("                   Render product screenshots offscreen (no window)");
+    println!();
+    println!("MCP (let Claude Code / Codex read terminal state; commands need your approval):");
+    println!("  claude mcp add rift -- rift mcp");
+    println!("  config: [mcp] enabled = true, allow_run = \"ask\" | \"never\"");
     println!();
     println!("CONFIG: ~/.config/rift/config.toml");
     println!();

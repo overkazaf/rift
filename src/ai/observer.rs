@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 /// - Disabled by default, requires explicit opt-in
 /// - Sensitive commands (sudo/passwd/ssh-keygen/export) never recorded
 /// - Only command names and frequencies stored, never arguments
-/// - SecretMasker filters API keys/tokens/passwords from any recorded data
+/// - secret_mask::redact filters API keys/tokens/passwords from any recorded data
 /// - User can view collected data and delete it at any time
 /// - LLM analysis only on explicit user request, with sanitized summary
 pub struct Observer {
@@ -29,8 +29,6 @@ pub struct Observer {
     current_dir: String,
 
     total_output_bytes: u64,
-
-    secret_masker: crate::tools::secret_mask::SecretMasker,
 
     data_dir: PathBuf,
     last_save: Instant,
@@ -54,12 +52,10 @@ impl Observer {
             project_dirs: HashMap::new(),
             current_dir: String::new(),
             total_output_bytes: 0,
-            secret_masker: crate::tools::secret_mask::SecretMasker::new(),
             data_dir,
             last_save: Instant::now(),
             save_interval: Duration::from_secs(300),
         };
-        obs.secret_masker.enabled = true;
         obs.load();
         obs
     }
@@ -73,8 +69,7 @@ impl Observer {
     pub fn on_command(&mut self, raw_command: &str) {
         if !self.enabled { return; }
 
-        let command = self.secret_masker.mask(raw_command)
-            .unwrap_or_else(|| raw_command.to_string());
+        let command = sanitize_command(raw_command);
 
         let cmd_name = command.split_whitespace().next().unwrap_or("").to_string();
         if cmd_name.is_empty() || Self::is_sensitive_command(&cmd_name) {
@@ -306,5 +301,28 @@ impl Observer {
                 _ => {}
             }
         }
+    }
+}
+
+/// Redact secrets from a command line before it is analysed or stored.
+/// Char-boundary safe for any input (CJK paths, emoji, ...).
+fn sanitize_command(raw: &str) -> String {
+    crate::tools::secret_mask::redact(raw).0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_command;
+
+    #[test]
+    fn sanitize_handles_cjk_without_panicking() {
+        let raw = "echo 你好世界 --token=sk-abcdefghijklmnopqrstuvwxyz0123 目录/文件 密码=hunter2hunter2";
+        let out = sanitize_command(raw);
+        assert!(!out.contains("sk-abcdefghijklmnopqrstuvwxyz0123"), "{out}");
+        assert!(out.contains("你好世界") && out.contains("目录/文件"), "{out}");
+        // Secret preceded by multi-byte text (the old byte/char index mix panicked here).
+        let out = sanitize_command("部署 password=supersecretvalue 完成");
+        assert!(!out.contains("supersecretvalue"), "{out}");
+        assert_eq!(sanitize_command("ls 目录"), "ls 目录");
     }
 }

@@ -50,13 +50,22 @@ fn ansi_heavy(mb: usize, seed: u64) -> Vec<u8> {
     v
 }
 
+/// CPU time consumed by the calling thread (immune to a loaded machine, unlike wall time).
+fn thread_cpu_secs() -> f64 {
+    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    // SAFETY: `ts` is a valid out-pointer for the duration of the call.
+    unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) };
+    ts.tv_sec as f64 + ts.tv_nsec as f64 * 1e-9
+}
+
 fn time_feed(label: &str, s: &mut Soft, cols: usize, rows: usize, data: &[u8]) -> f64 {
     let mut p = pane(cols, rows);
-    let t0 = Instant::now();
+    let (t0, c0) = (Instant::now(), thread_cpu_secs());
     p.feed(data);
     let dt = t0.elapsed().as_secs_f64();
+    let cpu = thread_cpu_secs() - c0;
     let mb = data.len() as f64 / (1 << 20) as f64;
-    s.info(label, format!("{:.1} MB in {:.2}s = {:.1} MB/s ({:.1} ms/MB) grid={cols}x{rows} scrollback={}", mb, dt, mb / dt, dt * 1000.0 / mb, p.terminal.scrollback.len()));
+    s.info(label, format!("{:.1} MB in {:.2}s = {:.1} MB/s ({:.1} ms/MB), cpu-time {:.1} MB/s grid={cols}x{rows} scrollback={}", mb, dt, mb / dt, dt * 1000.0 / mb, mb / cpu.max(1e-9), p.terminal.scrollback.len()));
     mb / dt
 }
 
@@ -90,6 +99,41 @@ fn throughput() {
     s.finish();
 }
 
+/// Best-of-N CPU-time throughput on smaller inputs: a quick, load-tolerant A/B tool
+/// (`cargo test --release --bin rift audit::perf::throughput_quick -- --ignored --nocapture`).
+#[test]
+#[ignore]
+fn throughput_quick() {
+    let seq = std::process::Command::new("seq").args(["1", "500000"]).output().unwrap().stdout;
+    let seq: Vec<u8> = seq.iter().flat_map(|&b| if b == b'\n' { vec![b'\r', b'\n'] } else { vec![b] }).collect();
+    let rt = random_text(12, 1);
+    let an = ansi_heavy(8, 2);
+    let cases: [(&str, usize, usize, &[u8]); 5] = [
+        ("seq_80x24", 80, 24, &seq),
+        ("seq_200x60", 200, 60, &seq),
+        ("plain_80x24", 80, 24, &rt),
+        ("plain_200x60", 200, 60, &rt),
+        ("ansi_120x40", 120, 40, &an),
+    ];
+    let only = std::env::var("QUICK_CASE").ok();
+    let reps: usize = std::env::var("QUICK_REPS").ok().and_then(|v| v.parse().ok()).unwrap_or(6);
+    for (name, cols, rows, data) in cases {
+        if only.as_deref().map_or(false, |o| o != name) {
+            continue;
+        }
+        let mb = data.len() as f64 / (1 << 20) as f64;
+        let (mut best_cpu, mut best_wall) = (f64::MAX, f64::MAX);
+        for _ in 0..reps {
+            let mut p = pane(cols, rows);
+            let (t0, c0) = (Instant::now(), thread_cpu_secs());
+            p.feed(data);
+            best_cpu = best_cpu.min(thread_cpu_secs() - c0);
+            best_wall = best_wall.min(t0.elapsed().as_secs_f64());
+        }
+        println!("QUICK {name:14} best cpu {:7.1} MB/s   best wall {:7.1} MB/s", mb / best_cpu, mb / best_wall);
+    }
+}
+
 fn fill_colored(t: &mut Terminal, lines: usize) {
     let cols = t.cols;
     let mut p = pane(cols, t.rows);
@@ -121,7 +165,9 @@ fn memory_scrollback() {
         }
         let used = rss_kb().saturating_sub(base);
         s.info(&format!("10_panes_{cols}x{rows}_10k_scrollback"), format!("RSS +{} MB ({} MB/pane); scrollback lens {:?}", used / 1024, used / 1024 / 10, panes.iter().map(|t| t.scrollback.len()).take(2).collect::<Vec<_>>()));
-        s.check(&format!("mem_{cols}x{rows}_under_500MB"), used / 1024 < 500, format!("{} MB for 10 panes", used / 1024));
+        // Stage A targets: 200x60 <= 350 MB, 400x100 <= 700 MB (10 panes x 10k lines).
+        let limit = if cols >= 400 { 700 } else if cols >= 200 { 350 } else { 250 };
+        s.check(&format!("mem_{cols}x{rows}_under_{limit}MB"), (used / 1024) < limit, format!("{} MB for 10 panes", used / 1024));
         drop(panes);
     }
     s.finish();

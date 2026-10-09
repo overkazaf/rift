@@ -105,6 +105,7 @@ fn modal_open(app: &App) -> bool {
         || app.docker.visible
         || app.network_monitor.visible
         || app.process_tree.visible
+        || app.mcp.overlay.visible
         || app.system_info.visible
         || app.port_dashboard.visible
         || app.regex_playground.visible
@@ -431,7 +432,7 @@ pub fn output_text(t: &Terminal, first: usize, last: usize) -> String {
         let row = if line < sb { t.scrollback.get(line) } else { t.grid.get(line - sb) };
         let Some(row) = row else { break };
         let seg: String = crate::terminal::grid::cells_text(row);
-        let wrapped = row.last().map_or(false, |c| c.wrap) && line != last;
+        let wrapped = row.last().map_or(false, |c| c.wrap()) && line != last;
         if wrapped {
             out.push_str(&seg);
         } else {
@@ -458,7 +459,7 @@ mod tests {
             }
         };
         put(&mut t.grid[0], "abcd"); // full row that soft-wrapped into the next
-        t.grid[0][3].wrap = true;
+        t.grid[0][3].set_wrap(true);
         put(&mut t.grid[1], "ef");
         let txt = output_text(&t, 0, 2);
         assert_eq!(txt, "abcdef");

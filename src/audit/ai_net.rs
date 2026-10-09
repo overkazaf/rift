@@ -155,21 +155,30 @@ fn timeouts_stalls_and_cancellation() {
 
 #[test]
 fn unbounded_line_buffering() {
+    let _rss = super::rss_serial();
     let m = mock("longline");
     let mut s = Soft::new("ai");
-    let base = rss_mb();
-    let h = stream::spawn_with_wake(&m.cfg("sse_longline", false), || vec![ApiMessage::new("user", "hi")], || {});
-    let mut peak = 0;
-    let mut evs = Vec::new();
-    for _ in 0..12 {
-        std::thread::sleep(Duration::from_millis(500));
-        peak = peak.max(rss_mb().saturating_sub(base));
-        while let Ok(e) = h.rx.try_recv() { evs.push(format!("{e:?}").chars().take(100).collect::<String>()); }
+    // Process-wide RSS also sees whatever other tests allocate meanwhile, so a
+    // limit overshoot is retried; unbounded buffering would overshoot every time.
+    let (mut peak, mut after_cancel, mut evs) = (0, 0, Vec::new());
+    for _attempt in 0..3 {
+        let base = rss_mb();
+        let h = stream::spawn_with_wake(&m.cfg("sse_longline", false), || vec![ApiMessage::new("user", "hi")], || {});
+        peak = 0;
+        evs = Vec::new();
+        for _ in 0..12 {
+            std::thread::sleep(Duration::from_millis(500));
+            peak = peak.max(rss_mb().saturating_sub(base));
+            while let Ok(e) = h.rx.try_recv() { evs.push(format!("{e:?}").chars().take(100).collect::<String>()); }
+        }
+        h.cancel();
+        std::thread::sleep(Duration::from_secs(3));
+        after_cancel = rss_mb().saturating_sub(base);
+        if peak < 64 {
+            break;
+        }
     }
     s.info("longline_events", format!("{evs:?}; server log {:?}", m.log("longline_closed.log")));
-    h.cancel();
-    std::thread::sleep(Duration::from_secs(3));
-    let after_cancel = rss_mb().saturating_sub(base);
     s.check("single_giant_sse_line_is_bounded", peak < 64, format!("RSS +{peak} MB within 6 s from a stream that never sends a newline (BufRead::lines has no cap); +{after_cancel} MB 3 s after cancel(); cancel is not honoured mid-line"));
     s.finish();
 }

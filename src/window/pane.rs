@@ -82,7 +82,38 @@ fn feed_into(terminal: &mut Terminal, parser: &mut vte::Parser, data: &[u8]) {
     let mut h = FeedHandler { inner: AnsiHandler::new(terminal), ground: false };
     let n = data.len();
     let mut i = 0;
+    // True while the VT parser is known to be in its ground state (and the APC
+    // scanner idle), which is what makes the fast paths below equivalent to
+    // feeding the bytes one by one.
+    let mut ground = false;
     while i < n {
+        if ground {
+            let b = data[i];
+            if is_printable_ascii(b) {
+                // Bulk-print a run of printable ASCII straight into the row.
+                if h.inner.terminal.ascii_fast_ok() {
+                    let mut j = i + 1;
+                    while j < n && is_printable_ascii(data[j]) {
+                        j += 1;
+                    }
+                    h.inner.terminal.print_ascii_run(&data[i..j]);
+                    i = j;
+                    continue;
+                }
+            } else if (0x07..=0x0d).contains(&b) {
+                // BEL BS HT LF VT FF CR: the parser would just call `execute`
+                // and stay in ground; skip its state machine for them.
+                h.inner.execute(b);
+                i += 1;
+                continue;
+            } else if b == 0x1b {
+                // Plain SGR (`ESC [ ... m`): by far the most common escape.
+                if let Some(len) = h.inner.terminal.try_fast_sgr(&data[i..]) {
+                    i += len;
+                    continue;
+                }
+            }
+        }
         let byte = data[i];
         i += 1;
         h.ground = false;
@@ -94,17 +125,7 @@ fn feed_into(terminal: &mut Terminal, parser: &mut vte::Parser, data: &[u8]) {
             h.inner.feed_apc_byte(byte);
         }
         parser.advance(&mut h, byte);
-        // Fast path: parser is back in ground state, so a run of printable
-        // ASCII can be written into the row in bulk (the APC scanner ignores
-        // non-ESC bytes while idle, which it is in ground state).
-        if h.ground && i < n && is_printable_ascii(data[i]) && h.inner.terminal.ascii_fast_ok() {
-            let mut j = i + 1;
-            while j < n && is_printable_ascii(data[j]) {
-                j += 1;
-            }
-            h.inner.terminal.print_ascii_run(&data[i..j]);
-            i = j;
-        }
+        ground = h.ground;
     }
 }
 
@@ -373,6 +394,101 @@ mod tests {
                 feed_reference(&mut slow, chunk);
             }
             assert_eq!(snapshot(&fast), snapshot(&slow), "diverged at {cols}x{rows}");
+        }
+    }
+
+    /// Everything observable about a terminal: every cell (scrollback rows padded to
+    /// full width, since they are stored trimmed), pen, cursor, regions.
+    fn full_state(t: &Terminal) -> Vec<String> {
+        use crate::terminal::{Cell, Color};
+        let ck = |c: Color| match c {
+            Color::Default => "d".to_string(),
+            Color::Indexed(n) => format!("i{n}"),
+            Color::Rgb(r, g, b) => format!("r{r},{g},{b}"),
+        };
+        let cell = |c: &Cell| {
+            format!("{:?}|{}|{}|{:x}|{:?}|{}|{}|{}", c.c, ck(c.fg), ck(c.bg), c.attr_bits(), c.underline_color().map(ck), c.link(), c.wrap(), c.extra())
+        };
+        let mut out = Vec::new();
+        for r in t.scrollback.iter() {
+            assert!(r.len() <= t.cols, "scrollback row wider than the screen");
+            let mut v: Vec<String> = r.iter().map(cell).collect();
+            v.resize(t.cols, cell(&Cell::default()));
+            out.push(format!("sb {}", v.join(" ")));
+        }
+        for r in t.grid.iter() {
+            out.push(format!("gr {}", r.iter().map(cell).collect::<Vec<_>>().join(" ")));
+        }
+        let a = t.attrs;
+        out.push(format!(
+            "cur {} {} fg {} bg {} attrs {:x} ulc {:?} region {} {}",
+            t.cursor_row, t.cursor_col, ck(t.fg), ck(t.bg), a.bits(), a.underline_color.map(ck), t.scroll_top, t.scroll_bottom
+        ));
+        out
+    }
+
+    #[test]
+    fn sgr_and_scroll_fast_paths_match_per_byte_parse_exactly() {
+        let mut x = 0xD1B5_4A32_D192_ED03u64;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let fixed: [&str; 26] = [
+            "\x1b[m", "\x1b[0m", "\x1b[1m", "\x1b[1;31m", "\x1b[38;5;200m", "\x1b[38;2;10;20;30m", "\x1b[48:2::1:2:3m",
+            "\x1b[4:3m", "\x1b[58;2;9;8;7m", "\x1b[59m", "\x1b[1;;2m", "\x1b[;m", "\x1b[:m", "\x1b[1:m", "\x1b[99999m",
+            "\x1b[38;5m", "\x1b[38;2;1;2m", "\x1b[?25h", "\x1b[1;2;3;4;5;6;7;8;9;10;11;12;13;14;15;16;17;18;19;20;21;22;23;24;25;26;27;28;29;30;31;32m",
+            "\x1b[1;2;3;4;5;6;7;8;9;10;11;12;13;14;15;16;17;18;19;20;21;22;23;24;25;26;27;28;29;30;31;32;33m", "\x1b[7m", "\x1b[27m",
+            "\x1b[9m", "\x1b[0;1;4:5;38;5;1;48;5;2m", "\x1b[%m", "\x1b[1 m",
+        ];
+        let others: [&str; 22] = [
+            "\r\n", "\n", "\r", "\t", "\x08", "\x1b[H", "\x1b[2J", "\x1b[3A", "\x1b[2B", "\x1b[K", "\x1b[1K", "\x1b[2K", "\x1b7", "\x1b8",
+            "\x1b[3;5H", "\x1b[2;8r", "\x1b[r", "\x1b[2L", "\x1b[3M", "\x1b[2@", "\x1b[2P", "\x1b[1S",
+        ];
+        for (cols, rows) in [(1usize, 2usize), (5, 3), (13, 6), (40, 10), (80, 24)] {
+            for round in 0..120 {
+                let mut data: Vec<u8> = Vec::new();
+                for _ in 0..500 {
+                    match next() % 10 {
+                        0..=3 => {
+                            let n = (next() % 30) as usize + 1;
+                            for _ in 0..n {
+                                data.push(b' ' + (next() % 95) as u8);
+                            }
+                        }
+                        4..=6 => data.extend_from_slice(fixed[(next() % fixed.len() as u64) as usize].as_bytes()),
+                        7 => {
+                            // random SGR, any numbers of params
+                            data.extend_from_slice(b"\x1b[");
+                            for k in 0..(next() % 6) {
+                                if k > 0 {
+                                    data.push(if next() % 5 == 0 { b':' } else { b';' });
+                                }
+                                data.extend_from_slice((next() % 300).to_string().as_bytes());
+                            }
+                            data.push(b'm');
+                        }
+                        8 => data.extend_from_slice("中é\u{301}".as_bytes()),
+                        _ => data.extend_from_slice(others[(next() % others.len() as u64) as usize].as_bytes()),
+                    }
+                }
+                let mut fast = Pane::scripted(0, cols, rows);
+                let mut slow = Pane::scripted(1, cols, rows);
+                let mut at = 0;
+                while at < data.len() {
+                    let n = ((next() % 61) as usize + 1).min(data.len() - at);
+                    fast.feed(&data[at..at + n]);
+                    feed_reference(&mut slow, &data[at..at + n]);
+                    at += n;
+                }
+                let (a, b) = (full_state(&fast.terminal), full_state(&slow.terminal));
+                if a != b {
+                    let i = a.iter().zip(&b).position(|(x, y)| x != y).unwrap_or(0);
+                    panic!("diverged at {cols}x{rows} round {round}, line {i}:\nfast: {}\nslow: {}", a[i], b[i]);
+                }
+            }
         }
     }
 

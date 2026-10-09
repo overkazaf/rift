@@ -21,7 +21,7 @@ important content stays inside the central 1200 x 630 area.
 | `splits.png` | Four split panes (2x2), one focused (tinted divider), the rest dimmed, three tabs |
 | `palette.png` | Command palette (Cmd+P) with a fuzzy query (`nt`): highlighted matches, category icons, shortcuts |
 | `browser.png` | Built-in browser docked beside the terminal: toolbar, address field, and a placeholder docs page (see note) |
-| `preview-accept.png` | Preview-Then-Accept modal for `rm -rf ./build` (CRITICAL, impact list computed from a real fixture directory) |
+| `preview-accept.png` | Preview-Then-Accept modal for `curl -fsSL … | sh` (CRITICAL, classified by the real exec-preview rules; routine `rm -rf ./build` is Info and shows no modal) |
 | `effects-crt.png` | CRT effect: the real GPU shader (curvature, scanlines, vignette, chromatic aberration) |
 | `hud.png` | HUD strip (CPU / MEM sparklines, disk, git, load) |
 

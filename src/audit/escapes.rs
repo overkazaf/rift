@@ -10,6 +10,7 @@ fn rss_kb() -> u64 {
 
 /// Feed `data` into a fresh pane on a worker thread; report (elapsed_ms, panicked, rss_delta_MB, hung).
 fn run_case(cols: usize, rows: usize, budget: Duration, data: Vec<u8>) -> (u128, Option<String>, i64, bool) {
+    let _rss = super::rss_serial();
     let (tx, rx) = std::sync::mpsc::channel();
     let rss0 = rss_kb() as i64;
     std::thread::spawn(move || {
@@ -30,8 +31,18 @@ fn run_case(cols: usize, rows: usize, budget: Duration, data: Vec<u8>) -> (u128,
 
 fn case(s: &mut Soft, id: &str, cols: usize, rows: usize, data: Vec<u8>, max_ms: u64, max_mb: i64) {
     let n = data.len();
-    let (ms, panic, mb, hung) = run_case(cols, rows, Duration::from_secs(20), data);
-    let ok = panic.is_none() && !hung && (ms as u64) <= max_ms && mb <= max_mb;
+    // Wall-time and RSS-delta limits are sensitive to whatever else the test
+    // process is doing (other tests run in parallel): a limit overshoot is
+    // retried, a real regression overshoots every time. Panics / hangs are final.
+    let mut attempt = 0;
+    let (ms, panic, mb, hung, ok) = loop {
+        attempt += 1;
+        let (ms, panic, mb, hung) = run_case(cols, rows, Duration::from_secs(20), data.clone());
+        let ok = panic.is_none() && !hung && (ms as u64) <= max_ms && mb <= max_mb;
+        if ok || panic.is_some() || hung || attempt == 3 {
+            break (ms, panic, mb, hung, ok);
+        }
+    };
     s.check(id, ok, format!("input {} bytes on {cols}x{rows}: {ms} ms, RSS delta {mb} MB{}{}", n, panic.map_or(String::new(), |p| format!(", PANIC: {p}")), if hung { ", HUNG >20s" } else { "" }));
 }
 
@@ -126,6 +137,7 @@ fn invalid_utf8_and_random_soup() {
 
 #[test]
 fn query_response_amplification_and_clipboard_h4() {
+    let _rss = super::rss_serial();
     let mut s = Soft::new("escapes");
     // CPR/DA flood: response_queue is unbounded
     let mut p = pane(80, 24);

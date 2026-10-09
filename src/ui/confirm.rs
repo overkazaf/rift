@@ -10,12 +10,15 @@ use crate::app::App;
 use crate::ui::kit::{ButtonKind, ButtonState, Ctx, PanelSpec, Rect, Tokens, Tone};
 
 pub enum ConfirmAction {
-    /// Buttons: Enable / Local only / Not now. Esc leaves the decision open.
-    AiConsent(crate::ai::consent::EnvCandidate),
+    /// One answer per button (see `PromptPlan::options`). Esc leaves the decision open.
+    AiConsent(Vec<crate::ai::consent::ConsentOption>),
     /// Buttons: Paste / Cancel.
     Paste { text: String, bracketed: bool },
     /// Buttons: Trust & connect / Cancel. Dropping the sender refuses.
     SshHostKey { reply: Option<tokio::sync::oneshot::Sender<bool>> },
+    /// An MCP client asked to run a command; buttons are laid out by
+    /// `mcp::host::modal_spec` (`run_index` says which one runs it).
+    McpRun(Box<crate::mcp::host::PendingRun>),
 }
 
 pub struct ConfirmRequest {
@@ -202,26 +205,89 @@ pub fn wrap(s: &str, max: usize) -> Vec<String> {
 
 // ---- request builders ------------------------------------------------------
 
-pub fn show_ai_consent(app: &mut App, c: crate::ai::consent::EnvCandidate) {
-    let lines = vec![
-        format!("Rift found ${}.", c.var),
-        format!(
-            "Enable cloud AI with provider {}? Terminal output you send (and, with auto-fix, the output of failed commands) will go to {}.",
+pub fn show_ai_consent(app: &mut App, plan: crate::ai::consent::PromptPlan) {
+    let (opts, default_sel) = plan.options();
+    let mut lines = Vec::new();
+    if let Some(l) = &plan.local {
+        lines.push(format!("Use local model ({}) \u{2014} nothing leaves this machine", l.model));
+        lines.push(format!("Rift found {} serving it on this computer ({}).", l.server, l.api_url));
+    }
+    if let Some(c) = &plan.env {
+        lines.push(format!("Rift found ${}.", c.var));
+        lines.push(format!(
+            "\"Enable\"/\"Enable cloud\" uses provider {}: terminal output you send (and, with auto-fix, the output of failed commands) will go to {}.",
             c.provider,
             c.host()
-        ),
-        "\"Local only\" uses Ollama on this machine and sends nothing off-device. \"Not now\" disables AI; change it later in config.toml ([ai] consent).".into(),
-    ];
+        ));
+    }
+    if plan.local.is_none() {
+        lines.push("\"Local only\" uses Ollama on this machine and sends nothing off-device.".into());
+    }
+    lines.push("\"Not now\" disables AI; change it later in config.toml ([ai] consent).".into());
+    let private = plan.local.is_some();
     app.confirm.push(ConfirmRequest {
         title: "Enable AI features?".into(),
-        badge: Some(("PRIVACY".into(), Tone::Warning)),
+        badge: Some(if private { ("LOCAL FIRST".into(), Tone::Success) } else { ("PRIVACY".into(), Tone::Warning) }),
         lines,
-        buttons: vec!["Enable".into(), "Local only".into(), "Not now".into()],
-        default_sel: 2,
+        buttons: opts.iter().map(|(label, _)| label.to_string()).collect(),
+        default_sel,
         esc_choice: None,
-        tone: Tone::Warning,
-        action: ConfirmAction::AiConsent(c),
+        tone: if private { Tone::Accent } else { Tone::Warning },
+        action: ConfirmAction::AiConsent(opts.into_iter().map(|(_, o)| o).collect()),
     });
+}
+
+/// Privacy Report: today's outbound total and the latest requests (time,
+/// feature, provider, bytes, redactions). Never shows prompt or answer text.
+pub fn show_privacy_report(app: &mut App) {
+    use crate::ai::local::usage;
+    let day = usage::today();
+    let mut lines = vec![
+        usage::footer_text(day),
+        format!(
+            "Local: {} request{} ({}) stayed on this machine.",
+            day.local_reqs,
+            if day.local_reqs == 1 { "" } else { "s" },
+            usage::format_bytes(day.local_bytes)
+        ),
+        String::new(),
+    ];
+    lines.extend(privacy_rows(&usage::recent(12)));
+    app.confirm.push(ConfirmRequest {
+        title: "AI Privacy Report".into(),
+        badge: Some((if day.cloud_reqs == 0 { "0 B SENT" } else { "CLOUD USED" }.into(), if day.cloud_reqs == 0 { Tone::Success } else { Tone::Warning })),
+        lines,
+        buttons: vec!["Close".into()],
+        default_sel: 0,
+        esc_choice: Some(0),
+        tone: Tone::Neutral,
+        action: ConfirmAction::SshHostKey { reply: None }, // no-op on close
+    });
+}
+
+/// One line per request, newest first: `14:02:11 auto-fix  ollama/llama3.2  local 1.2 KB  0 redacted`.
+pub fn privacy_rows(entries: &[crate::ai::local::usage::Entry]) -> Vec<String> {
+    use crate::ai::local::usage;
+    if entries.is_empty() {
+        return vec!["No AI requests yet this session.".into()];
+    }
+    entries
+        .iter()
+        .map(|e| {
+            let model: String = e.model.chars().take(14).collect();
+            let provider = if e.provider == "openai-compatible-local" { "oai-local" } else { e.provider.as_str() };
+            format!(
+                "{} {} {}/{} {} {} {} redacted",
+                usage::clock(e.ts),
+                e.feature.label(),
+                provider,
+                model,
+                if e.cloud { "CLOUD" } else { "local" },
+                usage::format_bytes(e.bytes),
+                e.redactions
+            )
+        })
+        .collect()
 }
 
 pub fn show_paste_confirm(app: &mut App, text: String, bracketed: bool) {
@@ -282,17 +348,18 @@ pub fn show_ssh_host_key(app: &mut App, p: crate::network::ssh::session::HostKey
 pub fn resolve(app: &mut App, req: ConfirmRequest, choice: Option<usize>) {
     use crate::ai::consent::{self, Consent};
     match req.action {
-        ConfirmAction::AiConsent(env) => match choice {
-            Some(0) => consent::apply(app, Consent::Cloud, Some(&env)),
-            Some(1) => consent::apply(app, Consent::Local, None),
-            Some(2) => consent::apply(app, Consent::Declined, None),
-            _ => {}
+        ConfirmAction::AiConsent(opts) => match choice.and_then(|i| opts.get(i)) {
+            Some(consent::ConsentOption::Cloud(env)) => consent::apply(app, Consent::Cloud, Some(env), None),
+            Some(consent::ConsentOption::Local(l)) => consent::apply(app, Consent::Local, None, l.as_ref()),
+            Some(consent::ConsentOption::Declined) => consent::apply(app, Consent::Declined, None, None),
+            None => {}
         },
         ConfirmAction::Paste { text, bracketed } => {
             if choice == Some(0) {
                 crate::app::mouse::write_paste(app, &text, bracketed);
             }
         }
+        ConfirmAction::McpRun(run) => crate::mcp::host::finish_run(app, run, choice),
         ConfirmAction::SshHostKey { mut reply } => {
             if let Some(tx) = reply.take() {
                 let _ = tx.send(choice == Some(0));
@@ -305,6 +372,19 @@ pub fn resolve(app: &mut App, req: ConfirmRequest, choice: Option<usize>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn privacy_rows_list_metadata_only() {
+        use crate::ai::local::{usage::Entry, Feature};
+        assert_eq!(privacy_rows(&[]), vec!["No AI requests yet this session."]);
+        let rows = privacy_rows(&[
+            Entry { ts: 1_800_000_000, feature: Feature::Fix, provider: "ollama".into(), model: "llama3.2".into(), host: "127.0.0.1:11434".into(), bytes: 1536, redactions: 2, cloud: false },
+            Entry { ts: 1_800_000_060, feature: Feature::Chat, provider: "openai".into(), model: "gpt-4o-mini".into(), host: "api.openai.com".into(), bytes: 90, redactions: 0, cloud: true },
+        ]);
+        assert!(rows[0].contains("auto-fix") && rows[0].contains("ollama/llama3.2") && rows[0].contains("local") && rows[0].contains("1.5 KB") && rows[0].contains("2 redacted"), "{}", rows[0]);
+        assert!(rows[1].contains("chat") && rows[1].contains("CLOUD") && rows[1].contains("90 B"), "{}", rows[1]);
+        assert!(rows.iter().all(|r| r.chars().count() < 74), "rows must fit the modal without wrapping");
+    }
 
     fn req(n: usize, def: usize, esc: Option<usize>) -> ConfirmRequest {
         ConfirmRequest {

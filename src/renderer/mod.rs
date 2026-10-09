@@ -70,23 +70,17 @@ fn rgb_bits(c: Rgb) -> u64 {
 /// Hash of everything that determines a cell's pixels (apart from cursor /
 /// selection-like per-frame state, which is mixed in separately).
 #[inline]
-fn hash_cells(mut h: u64, cells: &[Cell]) -> u64 {
+fn hash_cells(mut h: u64, cells: &[Cell], hover_link: u16) -> u64 {
     for cell in cells {
-        let a = cell.attrs;
-        let attrs = a.bold as u64
-            | (a.dim as u64) << 1
-            | (a.italic as u64) << 2
-            | (a.underline as u64) << 3
-            | (a.reverse as u64) << 4
-            | (a.hidden as u64) << 5
-            | (a.strikethrough as u64) << 6
-            | (a.overline as u64) << 7
-            | (a.ul_style() as u64) << 8;
-        h = mix(h, cell.c as u64 | attrs << 32);
-        if let Some(uc) = a.underline_color {
-            h = mix(h, 1 << 40 | color_bits(uc));
-        }
+        h = mix(h, cell.c as u64 | (cell.attr_bits() as u64) << 32);
         h = mix(h, color_bits(cell.fg) << 32 | color_bits(cell.bg));
+        // Interned (hyperlink, cluster extras, underline colour) id, and
+        // whether this cell's link is the hovered one (draws an underline).
+        let x = cell.extra_id();
+        if x != 0 {
+            let hov = (hover_link != 0 && cell.link() == hover_link) as u64;
+            h = mix(h, 1 << 48 | (x as u64) << 24 | hov);
+        }
     }
     h
 }
@@ -162,7 +156,7 @@ fn build_tile(
 /// Decorations (underline shape, strikethrough, overline) of a cell.
 #[inline]
 fn cell_deco(cell: &Cell) -> Deco {
-    Deco { ul: cell.attrs.ul_style(), strike: cell.attrs.strikethrough, over: cell.attrs.overline }
+    Deco { ul: cell.ul_style(), strike: cell.strikethrough(), over: cell.overline() }
 }
 
 #[inline]
@@ -248,6 +242,14 @@ pub struct Renderer {
     tiles: TileCache,
     /// Draw bold text with the bright palette variant (config `bold_is_bright`).
     bold_is_bright: bool,
+    /// DECSCNM state of the pane being rendered (swaps default fg/bg).
+    scr_reverse: bool,
+    /// Link id hovered in the pane being rendered (0 = none).
+    cur_hover_link: u16,
+    /// OSC 4 palette overrides of the pane being rendered (empty = none).
+    pal_over: Vec<Option<Rgb>>,
+    /// Hovered cell for OSC 8 link underlines: (pane index, view row, col).
+    pub link_hover: Option<(usize, usize, usize)>,
     /// Hover / drag / scrollbar state for the software-drawn chrome; set by
     /// the app right before each frame.
     pub chrome: crate::ui::tabbar::ChromeUi,
@@ -288,6 +290,10 @@ impl Renderer {
             dirty_rows: Vec::new(),
             tiles: TileCache::default(),
             bold_is_bright: false,
+            scr_reverse: false,
+            cur_hover_link: 0,
+            pal_over: Vec::new(),
+            link_hover: None,
             chrome: Default::default(),
             prof: if std::env::var("RIFT_PROFILE").map_or(false, |v| v == "1") {
                 Some(Profiler::default())
@@ -563,6 +569,20 @@ impl Renderer {
             tabbar::draw_text(buffer, buf_width, buf_height, &mut self.font, "+", gx, text_y, p1, color);
         }
 
+        // MCP indicator: only while an agent is connected, and only if it fits
+        // to the right of the "+" button (never covers a tab).
+        if self.chrome.mcp_clients > 0 {
+            let label = crate::mcp::overlay::indicator(self.chrome.mcp_clients as usize);
+            let w = (tabbar::text_cols(&label) + 2) * cw;
+            let x0 = buf_width.saturating_sub(w + cw / 2);
+            if x0 > layout.plus.1 + cw {
+                let h = (ch + 2).min(bar_height);
+                let y0 = bar_height.saturating_sub(h) / 2;
+                crate::ui::fill_rect(buffer, buf_width, x0, y0, w, h, pack_rgb(lighten(bar_bg, 14)));
+                tabbar::draw_text(buffer, buf_width, buf_height, &mut self.font, &label, x0 + cw, text_y, x0 + w, self.theme.accent());
+            }
+        }
+
         // Bottom border: 1px line under inactive regions only
         let sep_px = pack_rgb(darken(self.theme.bg, 10));
         let sep_y = bar_height.saturating_sub(1);
@@ -662,6 +682,7 @@ impl Renderer {
     ) {
         let cw = self.font.cell_width;
         let ch = self.font.cell_height;
+        self.set_screen_state(terminal);
 
         // Collapsed command blocks change which lines are shown (see
         // blocks_ui::view); otherwise this is the plain screen / scrollback view.
@@ -700,6 +721,21 @@ impl Renderer {
             t.bytes().fold(0x9e37u64, |h, b| mix(h, b as u64))
         });
 
+        // OSC 8 link under the pointer (underlined while hovered).
+        let hover_link: u16 = match self.link_hover {
+            Some((pane, r, c)) if pane == self.cur_pane => visible.get(r).map_or(0, |cells| {
+                match cells.get(c) {
+                    Some(cell) if cell.c == '\0' && c > 0 => cells[c - 1].link(),
+                    Some(cell) => cell.link(),
+                    None => 0,
+                }
+            }),
+            _ => 0,
+        };
+        self.cur_hover_link = hover_link;
+        // Screen-wide state that recolors every cell: DECSCNM + palette overrides.
+        let screen_sig = terminal.reverse_screen as u64 | (terminal.palette_gen as u64) << 1;
+
         // ── Damage detection: hash every visible row ──
         let key = self.cur_pane;
         let use_cache = key != NO_CACHE && !self.full_frame;
@@ -709,7 +745,7 @@ impl Renderer {
         let mut dirty = std::mem::take(&mut self.dirty_rows);
         dirty.clear();
         for (row, cells) in visible.iter().enumerate() {
-            let mut h = hash_cells(mix(0, cells.len() as u64), cells);
+            let mut h = hash_cells(mix(mix(0, cells.len() as u64), screen_sig), cells, hover_link);
             if show_cursor && row == view_cursor_row {
                 h = mix(h, 1 << 40 | (terminal.cursor_col as u64) << 8 | terminal.cursor_style as u64);
             }
@@ -749,14 +785,15 @@ impl Renderer {
             };
             self.render_row(
                 terminal, row, cells, buffer, buf_width, buf_height, rect,
-                show_cursor, images_visible, &url_ranges,
+                show_cursor, images_visible, &url_ranges, cmd_held,
             );
         }
 
         // Rows that existed last frame but are gone now (short scrollback view):
         // clear their bands, as the old whole-frame fill did.
         if old_hashes.len() > nrows {
-            let bg_px = pack(self.theme.bg.0, self.theme.bg.1, self.theme.bg.2);
+            let dbg = self.def_bg();
+            let bg_px = pack(dbg.0, dbg.1, dbg.2);
             let x1 = (rect.x + rect.width).min(buf_width);
             for row in nrows..old_hashes.len() {
                 let y0 = rect.y + row * ch;
@@ -790,6 +827,7 @@ impl Renderer {
             self.pane_rows.insert(key, new_hashes);
         }
         self.dirty_rows = dirty;
+        self.clear_screen_state();
     }
 
     /// Repaint a single terminal row: clear its band to the theme bg, then
@@ -806,6 +844,7 @@ impl Renderer {
         show_cursor: bool,
         images_visible: bool,
         url_ranges: &[(usize, usize)],
+        url_cmd: bool,
     ) {
         let cw = self.font.cell_width;
         let ch = self.font.cell_height;
@@ -813,8 +852,11 @@ impl Renderer {
         if y0 + ch > rect.y + rect.height || y0 + ch > buf_height { return; }
 
         // Row band background (replaces the old whole-frame buffer.fill).
-        let theme_bg_px = pack(self.theme.bg.0, self.theme.bg.1, self.theme.bg.2);
-        let bx1 = (rect.x + cells.len() * cw).min(rect.x + rect.width).min(buf_width);
+        let dbg = self.def_bg();
+        let theme_bg_px = pack(dbg.0, dbg.1, dbg.2);
+        // Under DECSCNM the whole pane is inverted, margins included.
+        let band_end = if self.scr_reverse { rect.x + rect.width } else { rect.x + cells.len().max(terminal.cols) * cw };
+        let bx1 = band_end.min(rect.x + rect.width).min(buf_width);
         if bx1 > rect.x {
             for cy in 0..ch {
                 let o = (y0 + cy) * buf_width;
@@ -845,17 +887,17 @@ impl Renderer {
                 self.resolve_fg(cell),
                 self.resolve(cell.bg, false),
             );
-            if cell.attrs.reverse { std::mem::swap(&mut fg, &mut bg); }
-            if cell.attrs.dim {
+            if cell.reverse() { std::mem::swap(&mut fg, &mut bg); }
+            if cell.dim() {
                 fg = (fg.0 / 2, fg.1 / 2, fg.2 / 2);
             }
 
             // Skip wide-char continuation placeholder
             if cell.c == '\0' { continue; }
 
-            let style = font::style_bits(cell.attrs.bold, cell.attrs.italic);
-            let deco = if cell.attrs.hidden { Deco::default() } else { cell_deco(cell) };
-            let ul_rgb = match cell.attrs.underline_color {
+            let style = font::style_bits(cell.bold(), cell.italic());
+            let deco = if cell.hidden() { Deco::default() } else { cell_deco(cell) };
+            let ul_rgb = match cell.underline_color() {
                 Some(c) if deco.ul != UnderlineStyle::None => self.resolve(c, true),
                 _ => fg,
             };
@@ -864,12 +906,12 @@ impl Renderer {
                 && row == self.view_cursor_row
                 && col == terminal.cursor_col;
 
-            let has_glyph = cell.c != ' ' && !cell.attrs.hidden;
+            let has_glyph = cell.c != ' ' && !cell.hidden();
             let wide = has_glyph && font::is_wide(cell.c);
 
             if (has_glyph || deco.any()) && !wide && !is_cursor {
                 // Fast path: one pre-blended (glyph, fg, bg) tile, copied row-wise.
-                let under = if cell.bg != Color::Default || cell.attrs.reverse { bg } else { self.theme.bg };
+                let under = if cell.bg != Color::Default || cell.reverse() { bg } else { dbg };
                 let fg_px = pack(fg.0, fg.1, fg.2);
                 let bg_px = pack(under.0, under.1, under.2);
                 let ul_px = pack(ul_rgb.0, ul_rgb.1, ul_rgb.2);
@@ -891,13 +933,28 @@ impl Renderer {
                 );
             }
 
+            // Combining marks from the cluster extras, overlaid on the base glyph.
+            if cell.extra_id() != 0 && !cell.hidden() {
+                let extra = cell.extra();
+                let on_block = is_cursor && terminal.cursor_style == crate::terminal::CursorStyle::Block;
+                let color = if on_block { self.theme.bg } else { fg };
+                self.overlay_marks(&extra, color, font::is_wide(cell.c), buffer, buf_width, x0, y0);
+            }
+
+            // OSC 8 hyperlinks: dotted accent underline while Cmd is held
+            // (all links) or when the pointer hovers the link.
+            let link = cell.link();
+            if link != 0 && (url_cmd || link == self.cur_hover_link) {
+                self.draw_link_underline(buffer, buf_width, buf_height, x0, y0, if font::is_wide(cell.c) { cw * 2 } else { cw });
+            }
+
             // URL: underline + accent color (only when Cmd held)
             if !url_ranges.is_empty() {
                 let is_url = url_ranges.iter().any(|&(s, e)| col >= s && col < e);
                 if is_url {
                     // Recolor text to accent/cursor color
                     let accent = self.theme.cursor;
-                    if cell.c != ' ' && !cell.attrs.hidden {
+                    if cell.c != ' ' && !cell.hidden() {
                         let wide = font::is_wide(cell.c);
                         let gw = if wide { cw * 2 } else { cw };
                         let bitmap = if wide { self.font.rasterize_wide_styled(cell.c, style) } else { self.font.rasterize_styled(cell.c, style) };
@@ -924,6 +981,45 @@ impl Renderer {
                     }
                 }
             }
+        }
+    }
+
+    /// Rasterize each combining mark in `extra` and blend it over the base
+    /// glyph's cell box at (`x0`, `y0`).
+    fn overlay_marks(
+        &mut self, extra: &str, color: Rgb, wide: bool,
+        buffer: &mut [u32], buf_width: usize, x0: usize, y0: usize,
+    ) {
+        let cw = self.font.cell_width;
+        let ch = self.font.cell_height;
+        let w = if wide { cw * 2 } else { cw };
+        for m in extra.chars().filter(|&c| font::is_overlay_mark(c)) {
+            let bmp = self.font.rasterize_mark(m, wide);
+            for cy in 0..ch {
+                for cx in 0..w.min(buf_width.saturating_sub(x0)) {
+                    let cov = bmp[cy * w + cx] as u32;
+                    if cov == 0 { continue; }
+                    let idx = (y0 + cy) * buf_width + x0 + cx;
+                    if idx < buffer.len() {
+                        buffer[idx] = blend(color, buffer[idx], cov);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Dotted underline in the accent color (hyperlink affordance).
+    fn draw_link_underline(
+        &self, buffer: &mut [u32], buf_width: usize, buf_height: usize,
+        x0: usize, y0: usize, w: usize,
+    ) {
+        let uy = y0 + self.font.cell_height.saturating_sub(2);
+        if uy >= buf_height { return; }
+        let a = self.theme.cursor;
+        let px = pack(a.0, a.1, a.2);
+        for cx in (0..w).filter(|cx| cx % 2 == 0) {
+            let idx = uy * buf_width + x0 + cx;
+            if x0 + cx < buf_width && idx < buffer.len() { buffer[idx] = px; }
         }
     }
 
@@ -956,7 +1052,7 @@ impl Renderer {
         } else { cw };
 
         // Background fill
-        if cell.bg != Color::Default || cell.attrs.reverse || (is_cursor && cursor_style == crate::terminal::CursorStyle::Block) {
+        if cell.bg != Color::Default || cell.reverse() || (is_cursor && cursor_style == crate::terminal::CursorStyle::Block) {
             let fill = if is_cursor && cursor_style == crate::terminal::CursorStyle::Block {
                 self.theme.cursor
             } else { bg };
@@ -1021,7 +1117,7 @@ impl Renderer {
             let text_color = if is_cursor && cursor_style == crate::terminal::CursorStyle::Block {
                 self.theme.bg
             } else { fg };
-            let ul_c = if cell.attrs.underline_color.is_some() && !(is_cursor && cursor_style == crate::terminal::CursorStyle::Block) { ul_rgb } else { text_color };
+            let ul_c = if cell.underline_color().is_some() && !(is_cursor && cursor_style == crate::terminal::CursorStyle::Block) { ul_rgb } else { text_color };
             let w = (if wide { cw * 2 } else { cursor_w.max(cw) }).min(buf_width.saturating_sub(x0));
             let dm = self.font.deco;
             font::paint_decor(
@@ -1182,13 +1278,13 @@ impl Renderer {
 
                 let cell = &grid[row][col];
                 let (mut fg, mut bg) = (self.resolve_fg(cell), self.resolve(cell.bg, false));
-                if cell.attrs.reverse { std::mem::swap(&mut fg, &mut bg); }
-                if cell.attrs.dim { fg = (fg.0 / 2, fg.1 / 2, fg.2 / 2); }
+                if cell.reverse() { std::mem::swap(&mut fg, &mut bg); }
+                if cell.dim() { fg = (fg.0 / 2, fg.1 / 2, fg.2 / 2); }
 
                 let is_cursor = row == cursor_row && col == cursor_col;
 
                 let fill = if is_cursor { self.theme.cursor } else { bg };
-                if is_cursor || cell.bg != Color::Default || cell.attrs.reverse {
+                if is_cursor || cell.bg != Color::Default || cell.reverse() {
                     let px = pack(fill.0, fill.1, fill.2);
                     for cy in 0..ch {
                         let offset = (y0 + cy) * buf_width + x0;
@@ -1198,9 +1294,9 @@ impl Renderer {
                     }
                 }
 
-                if cell.c != ' ' && !cell.attrs.hidden {
+                if cell.c != ' ' && !cell.hidden() {
                     let text_color = if is_cursor { self.theme.bg } else { fg };
-                    let style = font::style_bits(cell.attrs.bold, cell.attrs.italic);
+                    let style = font::style_bits(cell.bold(), cell.italic());
                     let bitmap = self.font.rasterize_styled(cell.c, style);
                     for cy in 0..ch {
                         for cx in 0..cw {
@@ -1213,10 +1309,10 @@ impl Renderer {
                         }
                     }
                 }
-                if !cell.attrs.hidden {
+                if !cell.hidden() {
                     let deco = cell_deco(cell);
                     if deco.any() {
-                        let ul_c = cell.attrs.underline_color.map_or(if is_cursor { self.theme.bg } else { fg }, |c| self.resolve(c, true));
+                        let ul_c = cell.underline_color().map_or(if is_cursor { self.theme.bg } else { fg }, |c| self.resolve(c, true));
                         let tc = if is_cursor { self.theme.bg } else { fg };
                         let dm = self.font.deco;
                         font::paint_decor(buffer, buf_width, x0, y0, cw, ch, &deco, &dm,
@@ -1297,9 +1393,9 @@ impl Renderer {
     /// Foreground of `cell`, honoring "bold is bright" for palette 0-7.
     #[inline]
     fn resolve_fg(&self, cell: &Cell) -> Rgb {
-        if self.bold_is_bright && cell.attrs.bold {
+        if self.bold_is_bright && cell.bold() {
             if let Color::Indexed(i @ 0..=7) = cell.fg {
-                return self.theme.resolve_indexed(i + 8);
+                return self.indexed(i + 8);
             }
         }
         self.resolve(cell.fg, true)
@@ -1313,10 +1409,41 @@ impl Renderer {
         }
     }
 
+    /// Default foreground, honoring DECSCNM.
+    #[inline]
+    fn def_fg(&self) -> Rgb { if self.scr_reverse { self.theme.bg } else { self.theme.fg } }
+
+    /// Default background, honoring DECSCNM.
+    #[inline]
+    fn def_bg(&self) -> Rgb { if self.scr_reverse { self.theme.fg } else { self.theme.bg } }
+
+    /// Indexed color: OSC 4 override of the current pane, else the theme.
+    #[inline]
+    fn indexed(&self, idx: u8) -> Rgb {
+        match self.pal_over.get(idx as usize) {
+            Some(Some(c)) => *c,
+            _ => self.theme.resolve_indexed(idx),
+        }
+    }
+
+    /// Latch per-pane screen state (DECSCNM, OSC 4 overrides) for `resolve`.
+    fn set_screen_state(&mut self, terminal: &Terminal) {
+        self.scr_reverse = terminal.reverse_screen;
+        self.pal_over.clear();
+        if terminal.palette_gen != 0 {
+            self.pal_over.extend((0..=255u8).map(|i| terminal.palette_override(i)));
+        }
+    }
+
+    fn clear_screen_state(&mut self) {
+        self.scr_reverse = false;
+        self.pal_over.clear();
+    }
+
     fn resolve(&self, color: Color, is_fg: bool) -> Rgb {
         match color {
-            Color::Default => if is_fg { self.theme.fg } else { self.theme.bg },
-            Color::Indexed(idx) => self.theme.resolve_indexed(idx),
+            Color::Default => if is_fg { self.def_fg() } else { self.def_bg() },
+            Color::Indexed(idx) => self.indexed(idx),
             Color::Rgb(r, g, b) => (r, g, b),
         }
     }
@@ -1466,7 +1593,7 @@ mod tests {
                 _ => Color::Indexed(2),
             };
             cell.bg = if r % 23 == 0 { Color::Indexed(4) } else { Color::Default };
-            cell.attrs = Attrs { bold: r % 7 == 0, reverse: r % 31 == 0, ..Attrs::default() };
+            cell.set_attrs(&Attrs { bold: r % 7 == 0, reverse: r % 31 == 0, ..Attrs::default() });
         }
     }
 
@@ -1583,6 +1710,82 @@ mod tests {
         step(&mut r, &mut back, &t, false, false);
     }
 
+    /// Scrollback rows are stored without their trailing default blanks; a view
+    /// that includes them must be pixel-identical to one whose rows are padded.
+    #[test]
+    fn trimmed_scrollback_rows_render_like_padded_rows() {
+        let build = || {
+            let mut t = Terminal::new(COLS, ROWS);
+            let mut p = vte::Parser::new();
+            let mut h = crate::terminal::AnsiHandler::new(&mut t);
+            for i in 0..(ROWS * 2) {
+                // Short lines, some with colored/reversed text and a colored blank tail.
+                let line = match i % 4 {
+                    0 => format!("\x1b[3{}mline {i}\x1b[0m\r\n", 1 + i % 6),
+                    1 => format!("plain text {i}\r\n"),
+                    2 => format!("\x1b[44m   bg {i}   \x1b[0m\r\n"),
+                    _ => "\r\n".to_string(),
+                };
+                for b in line.bytes() {
+                    p.advance(&mut h, b);
+                }
+            }
+            t
+        };
+        let t = build();
+        let mut padded = build();
+        assert!(t.scrollback.iter().any(|r| r.len() < COLS / 2), "scrollback rows should be stored trimmed");
+        for row in padded.scrollback.iter_mut() {
+            row.resize(COLS, Cell::default());
+        }
+        let start = Instant::now();
+        let mut ra = test_renderer();
+        let mut rb = test_renderer();
+        for offset in [0, 3, 40, t.scrollback.len()] {
+            let (mut a, mut b) = (build(), build());
+            for row in b.scrollback.iter_mut() {
+                row.resize(COLS, Cell::default());
+            }
+            a.scroll_offset = offset;
+            b.scroll_offset = offset;
+            let fa = render_fresh(&mut ra, &a, false, start);
+            let fb = render_fresh(&mut rb, &b, false, start);
+            assert!(fa == fb, "trimmed vs padded scrollback differ at offset {offset}");
+        }
+        // Incremental (damage-tracked) rendering while scrolling through trimmed rows.
+        let (rc, w, h) = rect(&ra);
+        let bg = pack(ra.theme.bg.0, ra.theme.bg.1, ra.theme.bg.2);
+        let mut back = vec![bg; w * h];
+        let mut fr = test_renderer();
+        let mut tt = build();
+        for (i, offset) in [0usize, 5, 6, 30, 2, 0].into_iter().enumerate() {
+            tt.scroll_offset = offset;
+            ra.cur_pane = 0;
+            ra.full_frame = i == 0;
+            if i == 0 { ra.pane_rows.clear(); }
+            ra.render_pane_inner(&tt, &mut back, w, h, rc, true, false);
+            let fresh = render_fresh(&mut fr, &padded_copy(&tt), false, ra.start_time);
+            assert!(back == fresh, "damage-tracked render of trimmed rows diverged at step {i}");
+        }
+    }
+
+    /// Clone of the visible state with scrollback rows padded to full width.
+    fn padded_copy(t: &Terminal) -> Terminal {
+        let mut c = Terminal::new(t.cols, t.rows);
+        c.scrollback = t.scrollback.iter().map(|r| {
+            let mut v = r.clone();
+            v.resize(COLS, Cell::default());
+            v
+        }).collect();
+        for (dst, src) in c.grid.iter_mut().zip(t.grid.iter()) {
+            dst.clone_from(src);
+        }
+        c.cursor_row = t.cursor_row;
+        c.cursor_col = t.cursor_col;
+        c.scroll_offset = t.scroll_offset;
+        c
+    }
+
     #[test]
     fn collapsed_block_view_matches_full_render() {
         let mut r = test_renderer();
@@ -1638,8 +1841,8 @@ mod tests {
             for (col, cell) in cells.iter().enumerate() {
                 let (x0, y0) = (col * cw, row * ch);
                 let (mut fg, mut cbg) = (r.resolve(cell.fg, true), r.resolve(cell.bg, false));
-                if cell.attrs.reverse { std::mem::swap(&mut fg, &mut cbg); }
-                if cell.bg != Color::Default || cell.attrs.reverse {
+                if cell.reverse() { std::mem::swap(&mut fg, &mut cbg); }
+                if cell.bg != Color::Default || cell.reverse() {
                     let px = pack(cbg.0, cbg.1, cbg.2);
                     for cy in 0..ch {
                         let o = (y0 + cy) * w + x0;
@@ -1771,7 +1974,7 @@ mod tests {
         for (ri, (_, f)) in variants.iter().enumerate() {
             for (ci, c) in "Hello gjpq 中".chars().enumerate().take(cols) {
                 t.grid[ri][ci].c = c;
-                f(&mut t.grid[ri][ci].attrs);
+                t.grid[ri][ci].update_attrs(|a| f(a));
             }
         }
         let buf = render(&mut r, &t);
@@ -1784,12 +1987,12 @@ mod tests {
         }
         // A blank cell with an underline still draws it; hidden suppresses it.
         let mut t2 = Terminal::new(4, 1);
-        t2.grid[0][1].attrs.underline_style = U::Double;
+        t2.grid[0][1].update_attrs(|a| a.underline_style = U::Double);
         let b = render(&mut r, &t2);
         let refpx = b[3 * cw];
         let cell1 = |b: &[u32]| -> Vec<u32> { (0..ch).flat_map(|y| b[y * w + cw..y * w + 2 * cw].to_vec()).collect() };
         assert!(cell1(&b).iter().any(|p| *p != refpx), "underlined space");
-        t2.grid[0][1].attrs.hidden = true;
+        t2.grid[0][1].update_attrs(|a| a.hidden = true);
         let b = render(&mut r, &t2);
         assert!(cell1(&b).iter().all(|p| *p == refpx), "hidden hides decorations");
     }
@@ -1816,7 +2019,7 @@ mod tests {
         let mut r = Renderer::new(&path, 16.0, Theme::rift_neon());
         let mut c = Cell::default();
         c.fg = Color::Indexed(1);
-        c.attrs.bold = true;
+        c.update_attrs(|a| a.bold = true);
         let plain = r.resolve_fg(&c);
         r.set_bold_is_bright(true);
         assert_eq!(r.resolve_fg(&c), r.theme.resolve_indexed(9));
@@ -1838,8 +2041,8 @@ mod tests {
         let (cw, ch) = (r.cell_width(), r.cell_height());
         let mut t = Terminal::new(4, 1);
         t.grid[0][0].c = 'X';
-        t.grid[0][0].attrs.reverse = true;
-        t.grid[0][1].attrs.reverse = true; // reversed blank
+        t.grid[0][0].update_attrs(|a| a.reverse = true);
+        t.grid[0][1].update_attrs(|a| a.reverse = true); // reversed blank
         let (w, h) = (cw * 4, ch);
         let mut buf = vec![0u32; w * h];
         let rect = PaneRect { x: 0, y: 0, width: w, height: h };
@@ -1852,4 +2055,115 @@ mod tests {
         assert!((0..ch).any(|y| (0..cw).any(|x| buf[y * w + x] == fg_px)));
     }
 
+
+    // ── terminal-core follow-ups: hash inputs, DECSCNM, OSC 4, marks, links ──
+
+    fn feed_bytes(t: &mut Terminal, bytes: &[u8]) {
+        let mut p = vte::Parser::new();
+        let mut h = crate::terminal::AnsiHandler::new(t);
+        for &b in bytes { p.advance(&mut h, b); }
+    }
+
+    /// Renders a `cols x 1` terminal; None when no font is installed.
+    fn render_small(r: &mut Renderer, t: &Terminal, cols: usize, cmd_held: bool) -> Vec<u32> {
+        let (w, h) = (cols * r.cell_width(), r.cell_height());
+        let mut buf = vec![0u32; w * h];
+        r.cur_pane = NO_CACHE;
+        r.full_frame = true;
+        r.render_pane_inner(t, &mut buf, w, h, PaneRect { x: 0, y: 0, width: w, height: h }, false, cmd_held);
+        buf
+    }
+
+    fn small_renderer() -> Option<Renderer> {
+        let path = crate::config::resolve_font_path(&crate::config::Config::default());
+        if !std::path::Path::new(&path).exists() { return None; }
+        Some(Renderer::new(&path, 16.0, crate::config::Theme::catppuccin_mocha()))
+    }
+
+    #[test]
+    fn row_hash_covers_cluster_and_link() {
+        let mut a = vec![Cell::default(); 3];
+        a[1].c = 'e';
+        let base = hash_cells(0, &a, 0);
+        let mut b = a.clone();
+        b[1].set_cluster("\u{301}");
+        assert_ne!(hash_cells(0, &b, 0), base, "cluster extras change the hash");
+        let mut c = a.clone();
+        c[1].set_link(2);
+        assert_ne!(hash_cells(0, &c, 0), base, "link id changes the hash");
+        assert_ne!(hash_cells(0, &c, 2), hash_cells(0, &c, 0), "hover on the link changes the hash");
+        assert_eq!(hash_cells(0, &a, 2), base, "hover elsewhere does not");
+    }
+
+    #[test]
+    fn decscnm_swaps_default_colors() {
+        let Some(mut r) = small_renderer() else { return };
+        let mut t = Terminal::new(4, 1);
+        let normal = render_small(&mut r, &t, 4, false);
+        let bg = pack(r.theme.bg.0, r.theme.bg.1, r.theme.bg.2);
+        let fg = pack(r.theme.fg.0, r.theme.fg.1, r.theme.fg.2);
+        assert_eq!(normal[1], bg);
+        feed_bytes(&mut t, b"\x1b[?5h");
+        let rev = render_small(&mut r, &t, 4, false);
+        assert_eq!(rev[1], fg, "screen background becomes the theme foreground");
+        // Hash differs so cached rows repaint.
+        let screen_sig = |t: &Terminal| t.reverse_screen as u64 | (t.palette_gen as u64) << 1;
+        assert_ne!(screen_sig(&t), 0);
+        // State does not leak into later non-pane drawing.
+        assert_eq!(r.def_bg(), r.theme.bg);
+    }
+
+    #[test]
+    fn osc4_override_recolors_indexed_cells() {
+        let Some(mut r) = small_renderer() else { return };
+        let mut t = Terminal::new(3, 1);
+        t.grid[0][0].bg = Color::Indexed(1);
+        let before = render_small(&mut r, &t, 3, false);
+        feed_bytes(&mut t, b"\x1b]4;1;rgb:12/34/56\x07");
+        let after = render_small(&mut r, &t, 3, false);
+        let want = pack(0x12, 0x34, 0x56);
+        let mid = r.cell_height() / 2 * (3 * r.cell_width()) + 2;
+        assert_ne!(before[mid], want);
+        assert_eq!(after[mid], want);
+        feed_bytes(&mut t, b"\x1b]104;1\x07");
+        assert_eq!(render_small(&mut r, &t, 3, false), before);
+    }
+
+    #[test]
+    fn combining_mark_is_overlaid_on_base() {
+        let Some(mut r) = small_renderer() else { return };
+        let mut t = Terminal::new(3, 1);
+        t.grid[0][0].c = 'e';
+        let plain = render_small(&mut r, &t, 3, false);
+        feed_bytes(&mut t, b"\x1b[H");
+        let mut t2 = Terminal::new(3, 1);
+        feed_bytes(&mut t2, "e\u{301}".as_bytes());
+        assert!(t2.grid[0][0].has_cluster(), "terminal stores the combining mark");
+        let marked = render_small(&mut r, &t2, 3, false);
+        assert_ne!(plain, marked, "mark adds ink");
+        // Ink stays inside the base cell.
+        let cw = r.cell_width();
+        let w = 3 * cw;
+        let ch = r.cell_height();
+        for y in 0..ch { for x in cw..w { assert_eq!(plain[y * w + x], marked[y * w + x]); } }
+    }
+
+    #[test]
+    fn osc8_link_underlines_on_cmd_and_hover() {
+        let Some(mut r) = small_renderer() else { return };
+        let mut t = Terminal::new(4, 1);
+        feed_bytes(&mut t, b"\x1b]8;;http://x.test\x07ab\x1b]8;;\x07cd");
+        assert!(t.grid[0][0].link() != 0);
+        let idle = render_small(&mut r, &t, 4, false);
+        r.cur_pane = NO_CACHE;
+        let cmd = render_small(&mut r, &t, 4, true);
+        assert_ne!(idle, cmd, "Cmd-held underlines links");
+        // Hover (no Cmd): only the linked cells change.
+        r.link_hover = Some((NO_CACHE, 0, 1));
+        let hov = render_small(&mut r, &t, 4, false);
+        assert_ne!(hov, idle);
+        let (cw, ch) = (r.cell_width(), r.cell_height());
+        let w = 4 * cw;
+        for y in 0..ch { for x in 2 * cw..w { assert_eq!(hov[y * w + x], idle[y * w + x]); } }
+    }
 }

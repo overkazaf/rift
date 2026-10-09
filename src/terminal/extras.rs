@@ -101,6 +101,7 @@ impl Terminal {
     }
 
     /// Depth of the current screen's kitty flag stack.
+    #[allow(dead_code)] // introspection helper exercised by tests; no runtime consumer yet
     pub fn kitty_keyboard_stack_depth(&self) -> usize {
         if self.using_alt_screen { self.kitty_alt.len() } else { self.kitty_main.len() }
     }
@@ -180,10 +181,10 @@ impl Terminal {
         if n >= u16::MAX as usize {
             // Table full: forget every stored link and start over.
             for row in self.grid.iter_mut().chain(self.alt_grid.iter_mut()) {
-                row.iter_mut().for_each(|c| c.link = 0);
+                row.iter_mut().for_each(|c| c.set_link(0));
             }
             for row in self.scrollback.iter_mut() {
-                row.iter_mut().for_each(|c| c.link = 0);
+                row.iter_mut().for_each(|c| c.set_link(0));
             }
             self.hyperlinks.truncate(1);
         }
@@ -212,7 +213,7 @@ impl Terminal {
         if cell.c == '\0' && col > 0 {
             cell = &line[col - 1];
         }
-        self.hyperlink_uri(cell.link)
+        self.hyperlink_uri(cell.link())
     }
 
     // ── Notifications (OSC 9 / OSC 777) ──
@@ -439,6 +440,7 @@ impl Terminal {
     }
 
     /// Cell-level helper for tests and consumers: text of a viewport row.
+    #[allow(dead_code)] // test/consumer helper; the renderer reads cells directly
     pub fn row_text(&self, row: usize) -> String {
         self.grid.get(row).map(|r| super::grid::cells_text(r)).unwrap_or_default()
     }

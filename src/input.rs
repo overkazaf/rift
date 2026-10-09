@@ -98,6 +98,7 @@ impl Mods {
     fn bits(self) -> u32 {
         (self.shift as u32) | ((self.alt as u32) << 1) | ((self.ctrl as u32) << 2) | ((self.sup as u32) << 3)
     }
+    #[allow(dead_code)] // kept for symmetry with `bits`; callers compare bits() directly
     fn any(self) -> bool {
         self.shift || self.ctrl || self.alt || self.sup
     }

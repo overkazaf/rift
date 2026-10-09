@@ -46,13 +46,13 @@ Each command and its output form one block. This works through OSC 133 hooks tha
 | **Inline fixes**: when a command fails, a corrected command appears at the prompt. `Tab` accepts it, `Esc` dismisses it. | <img src="docs/screenshots/fix-suggestion.png" alt="Failed cargo build with an inline fix suggestion bar" width="420"> |
 | **`# natural language`**: type `# find the 10 largest files` and press Enter. Rift types the generated command back into your prompt so you can review it. It is never executed for you. | <img src="docs/screenshots/nl-command.png" alt="A # comment at the prompt turned into a du and sort command" width="420"> |
 
-Also available: **Advisor** gives a second-opinion risk review of suggested commands. **Teaching mode** explains each command before it runs. **Observer** offers opt-in workflow insights that stay on your machine.
+Also available: **Advisor** gives a second-opinion risk review of suggested commands. **Teaching mode** explains a command on demand: with it on, type a command at the prompt and press `Cmd+Shift+L` again to get a line-by-line explanation before you run it. **Observer** offers opt-in workflow insights that stay on your machine.
 
 ### Preview-Then-Accept
 
-Rift intercepts dangerous commands such as `rm -rf`, `git reset --hard` and force pushes before they run, and shows a real impact analysis. Critical commands need a typed "yes".
+Rift intercepts dangerous commands such as `rm -rf` on important paths, `curl … | sh`, `git reset --hard` and force pushes before they run, and shows a real impact analysis. Routine cleanups like `rm -rf ./build` are not interrupted. Critical commands need a typed "yes".
 
-<img src="docs/screenshots/preview-accept.png" alt="Preview-Then-Accept modal listing what rm -rf would delete" width="800">
+<img src="docs/screenshots/preview-accept.png" alt="Preview-Then-Accept modal flagging curl piped into sh as critical, requiring a typed yes" width="800">
 
 ### Splits, tabs and sessions
 
@@ -77,7 +77,7 @@ Six screen effects (**CRT, Neon Glow, Matrix Rain, Hologram, Glitch, Amber**) on
 
 ### Power tools
 
-SSH manager · Time Warp (rewind the screen) · HUD · Git / Docker / CI panels · Port dashboard · Regex playground · History search (`Ctrl+R`) · asciinema recording · Secret masking · Inline images (Kitty graphics protocol) · Broadcast input · Compare pane output · File manager · Command heatmap · Audit log
+SSH manager · Time Warp (rewind the screen) · HUD · Git / Docker / CI panels · Port dashboard · Regex playground · History search (`Cmd+Y`) · asciinema recording · Secret masking · Inline images (Kitty graphics protocol) · Broadcast input · Compare pane output · File manager · Command heatmap · Audit log
 
 ### Core
 
@@ -193,6 +193,58 @@ Other `[general]` keys: `theme` (default `"rift-neon"`), `font_family`, `font_pa
 - AI requests go directly from your machine to the endpoint you configure. With Ollama they never leave your machine.
 - Screen or block text is sent only for an AI action you trigger, or for auto-fix on failed commands, which you can turn off with `auto_fix = false`.
 - Observer is opt-in and stores data locally under `~/.config/rift/observer/`. It skips sensitive commands and never records arguments.
+- Cloud AI needs your consent. Nothing is sent until you answer the one-time prompt (or configure `[llm]` yourself), and a key in the environment alone does not turn it on. Secrets are redacted from text before it is sent.
+- Programs cannot read your clipboard: OSC 52 reads are blocked by default (`[security] osc52`), and writes are size-capped and announced with a toast.
+- SSH checks host keys against `~/.ssh/known_hosts`. An unknown host asks before it is trusted, and a changed key is flagged as a possible man-in-the-middle.
+
+## Use Rift with Claude Code / Codex
+
+Rift has a built-in [MCP](https://modelcontextprotocol.io) server, so coding agents can see what is in your terminal panes and, only with your approval, run commands in them. Rift must be running; `rift mcp` is a small stdio bridge to it.
+
+**Claude Code**
+
+```sh
+claude mcp add rift -- rift mcp
+```
+
+**Codex** (`~/.codex/config.toml`)
+
+```toml
+[mcp_servers.rift]
+command = "rift"
+args = ["mcp"]
+```
+
+Any other MCP client works with `{"command": "rift", "args": ["mcp"]}`. If Rift is not running, `rift mcp` answers every request with a JSON-RPC error that says so.
+
+**Tools**
+
+| Tool | What it does |
+| --- | --- |
+| `list_panes` | Tabs and panes: id, title, cwd, running command, size, focus (`agent` is reserved, currently `null`) |
+| `read_pane` | Last N rows of a pane (optionally with scrollback), ANSI stripped, secrets redacted |
+| `list_blocks` / `read_block` | Recent OSC 133 command blocks and one block's command and output (64 KB cap, keeps the end) |
+| `search_scrollback` | Case-insensitive search with surrounding lines, most recent first |
+| `run_command` | Asks you to approve a command in a pane. Dangerous commands get a critical warning. Never auto-approved |
+
+Resources: `rift://pane/{id}/screen` and `rift://pane/{id}/blocks`.
+
+**Config** (`~/.config/rift/config.toml`)
+
+```toml
+[mcp]
+enabled = true       # false: no socket at all
+allow_run = "ask"    # "never": run_command is not offered
+```
+
+**Security**
+
+- The server listens on a Unix socket, `~/.config/rift/mcp.sock` (override with `RIFT_MCP_SOCK`), mode `0600`, and rejects any peer whose UID is not yours.
+- Everything an agent reads is stripped of escape codes, passed through the same secret redaction as AI requests, and size-capped. Search runs on the redacted text.
+- At most 20 requests per second per client.
+- `run_command` shows "Agent wants to run `cmd` in pane N" with Run and Deny; the default is Deny. Commands that `Preview-Then-Accept` classifies as risky or critical show their impact, and critical ones put Deny first. Multi-line commands and invisible or control characters are refused, and so is a pane that is busy, in a full-screen program, or has text typed at the prompt.
+- The tab bar shows **MCP · 1 client** while an agent is connected. **Command Palette > MCP Activity** lists every call, including denied ones.
+- Terminal output is untrusted input to the agent. Treat anything an agent reads from a pane the way you would treat a pasted web page.
 
 ## Keyboard shortcuts
 
@@ -207,9 +259,9 @@ macOS bindings. On Linux, the `Cmd+Shift+…` shortcuts use `Ctrl+Shift+…`. Yo
 | `Cmd+Shift+A` | AI chat sidebar |
 | `Tab` / `Esc` | Accept / dismiss an inline fix suggestion |
 | `# …` + `Enter` | Natural language → command |
-| `Ctrl+R` | History search |
+| `Cmd+Y` | History search |
 | `Cmd+F` | Find in scrollback |
-| `Ctrl+Space` | Autocomplete |
+| `Cmd+.` | Autocomplete (`Ctrl+Space` also works, but only at a shell prompt) |
 | `Cmd+,` | Preferences |
 | `Cmd+C` / `Cmd+V` / `Cmd+A` | Copy / paste / select all |
 | `Cmd+=` / `Ctrl+-` / `Cmd+0` | Font size up / down / reset |
@@ -268,7 +320,7 @@ macOS bindings. On Linux, the `Cmd+Shift+…` shortcuts use `Ctrl+Shift+…`. Yo
 | `Cmd+Shift+M` | Secret masking |
 | `Cmd+Shift+U` | Audit log |
 | `Cmd+Shift+L` | Teaching mode |
-| `Ctrl+Shift+V` | Observer summary |
+| `Cmd+Shift+N` | Observer summary |
 | `Cmd+Shift+P` | Broadcast input to all panes |
 | `Cmd+Shift+K` | Compare pane output |
 | `Cmd+Alt+K` | Clear buffer |
@@ -290,6 +342,7 @@ src/
 ├── window/              WindowManager, tabs, recursive split tree, panes, selection
 ├── shell_integration/   Embedded zsh/bash/fish hooks + auto-injection (never touches rc files)
 ├── blocks_ui/           Warp-style command blocks: gutter, chips, hover toolbar, folding, navigation
+├── mcp/                 Built-in MCP server: Unix socket, `rift mcp` stdio bridge, tools, approval flow
 ├── ai/                  LLM backends, chat sidebar (streaming), inline Cmd+K / fix / # NL, advisor, observer
 ├── network/             SSH (russh), built-in browser chrome + WebView (wry)
 ├── tools/               Command palette, exec preview, time warp, HUD, git/docker/CI panels, history, recording…

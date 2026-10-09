@@ -76,6 +76,9 @@ pub fn parse_nl_response(raw: &str) -> Option<NlCommand> {
         let explanation = obj.get_str("explanation").map(clean_explanation).unwrap_or_default();
         return Some(NlCommand { command, explanation });
     }
+    if let Some((command, explanation)) = json::lenient_reply(raw) {
+        return Some(NlCommand { command: sanitize_command(&command)?, explanation: clean_explanation(&explanation) });
+    }
     if raw.contains('{') {
         return None;
     }

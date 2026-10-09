@@ -1,5 +1,5 @@
 // Smart History Search — an fzf/atuin-style full-width bottom panel for
-// browsing and fuzzy-filtering shell command history (Ctrl+R).
+// browsing and fuzzy-filtering shell command history (Cmd+Y).
 //
 // Shell history files (~/.zsh_history, ~/.bash_history) don't record a
 // per-command working directory or exit status, so `directory` and

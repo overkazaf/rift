@@ -107,6 +107,9 @@ pub struct Config {
     pub bold_is_bright: bool,
     /// Scrollback history per pane in lines (`scrollback_lines`, default 10000).
     pub scrollback_lines: usize,
+    /// Notify when a command (OSC 133 block) ran at least this many seconds and
+    /// its pane is not in view (`notify_after_secs`, default 10; 0 disables).
+    pub notify_after_secs: f64,
     /// Keyboard settings: `shift_enter`, `option_as_meta`, `[keybindings]` (read-only here).
     pub input: crate::input::InputConfig,
     /// `[ai] consent`: the user's answer to the one-time cloud-AI prompt.
@@ -115,6 +118,17 @@ pub struct Config {
     pub llm_explicit: bool,
     /// `[security] osc52`.
     pub osc52: Osc52Policy,
+    /// `[mcp]`: built-in MCP server for coding agents.
+    pub mcp: crate::mcp::McpConfig,
+    /// `[ai] fix_provider / nl_provider / chat_provider`.
+    pub ai_routing: crate::ai::local::Routing,
+    /// Write `[llm] provider/model/api_url` on save (set once the user picked a
+    /// model; never includes `api_key`).
+    pub llm_persist: bool,
+    /// The user opted into sending data to a remote endpoint (cloud consent,
+    /// or an explicit non-local `[llm]`). A local-only setup never has this,
+    /// so a stray API key in the environment cannot be switched to.
+    pub cloud_opt_in: bool,
 }
 
 impl Default for Config {
@@ -137,10 +151,15 @@ impl Default for Config {
             startup_animation: true,
             bold_is_bright: false,
             scrollback_lines: 10_000,
+            notify_after_secs: 10.0,
             input: crate::input::InputConfig::default(),
             ai_consent: crate::ai::consent::Consent::Unset,
             llm_explicit: false,
             osc52: Osc52Policy::WriteOnly,
+            mcp: crate::mcp::McpConfig::default(),
+            ai_routing: crate::ai::local::Routing::default(),
+            llm_persist: false,
+            cloud_opt_in: false,
         }
     }
 }

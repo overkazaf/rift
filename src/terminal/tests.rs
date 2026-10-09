@@ -42,26 +42,26 @@ fn sgr_colon_truecolor_with_and_without_colorspace() {
 fn sgr_semicolon_forms_still_work() {
     let t = term(20, 2, "\x1b[38;2;10;20;30;1mA\x1b[48;5;99;4mB");
     assert!(t.grid[0][0].fg == Color::Rgb(10, 20, 30));
-    assert!(t.grid[0][0].attrs.bold);
+    assert!(t.grid[0][0].bold());
     assert!(t.grid[0][1].bg == Color::Indexed(99));
-    assert!(t.grid[0][1].attrs.underline);
+    assert!(t.grid[0][1].underline());
 }
 
 #[test]
 fn sgr_underline_styles_and_color() {
     let mut t = term(20, 2, "\x1b[4:3mA\x1b[4:0mB\x1b[4:2mC\x1b[4:4mD\x1b[4:5mE\x1b[0m\x1b[21mF");
-    let ul = |t: &Terminal, c: usize| t.grid[0][c].attrs.ul_style();
+    let ul = |t: &Terminal, c: usize| t.grid[0][c].ul_style();
     assert_eq!(ul(&t, 0), UnderlineStyle::Curly);
     assert_eq!(ul(&t, 1), UnderlineStyle::None);
-    assert!(!t.grid[0][1].attrs.underline);
+    assert!(!t.grid[0][1].underline());
     assert_eq!(ul(&t, 2), UnderlineStyle::Double);
     assert_eq!(ul(&t, 3), UnderlineStyle::Dotted);
     assert_eq!(ul(&t, 4), UnderlineStyle::Dashed);
     assert_eq!(ul(&t, 5), UnderlineStyle::Double);
     feed(&mut t, b"\x1b[0m\x1b[4m\x1b[58:2::1:2:3mG\x1b[58;5;7mH\x1b[59mI");
-    assert!(t.grid[0][6].attrs.underline_color == Some(Color::Rgb(1, 2, 3)));
-    assert!(t.grid[0][7].attrs.underline_color == Some(Color::Indexed(7)));
-    assert!(t.grid[0][8].attrs.underline_color.is_none());
+    assert!(t.grid[0][6].underline_color() == Some(Color::Rgb(1, 2, 3)));
+    assert!(t.grid[0][7].underline_color() == Some(Color::Indexed(7)));
+    assert!(t.grid[0][8].underline_color().is_none());
 }
 
 #[test]
@@ -71,7 +71,7 @@ fn sgr_flags_pair_correctly() {
         2,
         "\x1b[9mA\x1b[29mB\x1b[53mC\x1b[55mD\x1b[5mE\x1b[25mF\x1b[8mG\x1b[28mH\x1b[1;2mI\x1b[22mJ\x1b[1m\x1b[21mK",
     );
-    let a = |c: usize| t.grid[0][c].attrs;
+    let a = |c: usize| t.grid[0][c].attrs();
     assert!(a(0).strikethrough && !a(1).strikethrough);
     assert!(a(2).overline && !a(3).overline);
     assert!(a(4).blink && !a(5).blink);
@@ -85,7 +85,7 @@ fn sgr_flags_pair_correctly() {
 #[test]
 fn xtmodkeys_is_not_sgr() {
     let t = term(10, 2, "\x1b[>4;2mA");
-    assert!(!t.grid[0][0].attrs.underline);
+    assert!(!t.grid[0][0].underline());
 }
 
 // ── Graphemes ──
@@ -136,7 +136,7 @@ fn wide_char_at_last_column_wraps_with_spacer() {
     let t = term(4, 3, "abc你");
     assert_eq!(t.cursor_row, 1);
     assert_eq!(t.cursor_col, 2);
-    assert!(t.grid[0][3].wrap);
+    assert!(t.grid[0][3].wrap());
     assert_eq!(t.grid[1][0].c, '你');
 }
 
@@ -148,7 +148,7 @@ fn reflow_narrow_then_wide_roundtrips_and_tracks_cursor() {
     let before: Vec<String> = (0..6).map(|r| row(&t, r)).collect();
     t.resize(15, 6);
     assert_eq!(row(&t, 0), "0123456789 abcd");
-    assert!(t.grid[0][14].wrap);
+    assert!(t.grid[0][14].wrap());
     // cursor stays right after the prompt
     let (cr, cc) = (t.cursor_row, t.cursor_col);
     assert_eq!(row(&t, cr).trim_end(), "$");
@@ -492,4 +492,125 @@ fn huge_repeat_counts_are_cheap() {
     }
     assert!(start.elapsed() < std::time::Duration::from_millis(200), "{:?}", start.elapsed());
     assert!(t.scrollback.len() <= 2100, "{}", t.scrollback.len());
+}
+
+// ── Compact scrollback / extent hints ──
+
+/// Padded text of scrollback row `i` (rows are stored without their blank tail).
+fn sb_text(t: &Terminal, i: usize) -> String {
+    let mut r = t.scrollback[i].clone();
+    r.resize(t.cols, Cell::default());
+    cells_text(&r).trim_end().to_string()
+}
+
+#[test]
+fn scrollback_rows_are_stored_trimmed_with_content_intact() {
+    let mut t = Terminal::new(40, 3);
+    for i in 0..10 {
+        feed(&mut t, format!("line {i}\r\n").as_bytes());
+    }
+    assert_eq!(t.scrollback.len(), 8);
+    for i in 0..8 {
+        assert_eq!(sb_text(&t, i), format!("line {i}"));
+        assert_eq!(t.scrollback[i].len(), format!("line {i}").len(), "row {i} keeps only its used cells");
+    }
+    // An empty line is an empty row.
+    feed(&mut t, b"\r\n\r\n\r\n\r\n\r\n");
+    assert!(t.scrollback.iter().rev().take(2).all(|r| r.is_empty()));
+    // The recycled screen rows are fully blank again (no stale text from hints).
+    feed(&mut t, b"\r\n\r\n\r\n");
+    assert!(t.grid.iter().all(|r| r.iter().all(|c| c.is_default_blank())));
+}
+
+#[test]
+fn scrollback_keeps_styled_blanks_wraps_and_wide_cells() {
+    let mut t = Terminal::new(10, 2);
+    // Colored blank tail (BCE-style) must survive trimming; trailing default blanks must not.
+    feed(&mut t, b"\x1b[44mab\x1b[K\x1b[0m\r\n");
+    // Soft-wrapped line: the wrap flag lives on the (full-width) row's last cell.
+    feed(&mut t, b"0123456789wrapped\r\n");
+    // Wide char + combining mark + link-ish extras.
+    feed(&mut t, "\u{4e2d}e\u{301}\r\n".as_bytes());
+    feed(&mut t, b"\r\n\r\n");
+    let r0 = &t.scrollback[0];
+    assert_eq!(r0.len(), 10, "colored blanks are content");
+    assert!(r0[5].bg == Color::Indexed(4) && r0[9].bg == Color::Indexed(4));
+    let r1 = &t.scrollback[1];
+    assert_eq!(r1.len(), 10);
+    assert!(r1.last().unwrap().wrap());
+    assert_eq!(sb_text(&t, 2), "wrapped");
+    assert_eq!(sb_text(&t, 3), "\u{4e2d}e\u{301}");
+    assert_eq!(t.scrollback[3][0].c, '\u{4e2d}');
+    assert_eq!(t.scrollback[3][1].c, '\0');
+    assert_eq!(t.scrollback[3][2].extra(), "\u{301}");
+}
+
+#[test]
+fn scroll_region_and_alt_screen_keep_hints_consistent() {
+    let mut t = Terminal::new(12, 5);
+    feed(&mut t, b"top\r\nmid\r\nbot\x1b[2;4r");
+    // Scroll inside a region (rows 2..4): content leaving the region is not lost or duplicated.
+    feed(&mut t, b"\x1b[4;1Hx\n\ny\n");
+    let rows: Vec<String> = (0..5).map(|r| row(&t, r)).collect();
+    assert_eq!(rows[0], "top");
+    // Alt screen: scrolling there never feeds scrollback and leaves no residue.
+    let before = t.scrollback.len();
+    feed(&mut t, b"\x1b[?1049h\x1b[2J\x1b[Halt\r\n1\r\n2\r\n3\r\n4\r\n5\r\n6\r\n");
+    assert_eq!(t.scrollback.len(), before);
+    feed(&mut t, b"\x1b[?1049l");
+    assert_eq!(row(&t, 0), "top");
+    feed(&mut t, b"\x1b[?1049h");
+    assert!(t.grid.iter().all(|r| r.iter().all(|c| c.is_default_blank())), "alt screen re-entered clean");
+}
+
+#[test]
+fn direct_grid_writes_are_never_lost_by_extent_hints() {
+    // Code that pokes `grid` directly (tests, tools) bypasses the tracked fast paths;
+    // the hints must notice and the cell must still reach scrollback.
+    let mut t = Terminal::new(20, 3);
+    t.grid[0][17].c = 'Z';
+    t.grid[0][17].fg = Color::Indexed(3);
+    feed(&mut t, b"\x1b[3;1H\n");
+    assert_eq!(t.scrollback.len(), 1);
+    assert_eq!(t.scrollback[0].len(), 18);
+    assert_eq!(t.scrollback[0][17].c, 'Z');
+    // And again after the hints were rebuilt and tracked writes happened in between.
+    feed(&mut t, b"abc");
+    t.grid[0][15].c = 'Q';
+    feed(&mut t, b"\n");
+    assert_eq!(t.scrollback[1].len(), 16);
+    assert_eq!(t.scrollback[1][15].c, 'Q');
+}
+
+#[test]
+fn readers_handle_trimmed_scrollback_rows() {
+    use crate::tools::search::SearchOverlay;
+    use crate::window::Selection;
+    let mut t = Terminal::new(30, 3);
+    feed(&mut t, b"alpha beta  \r\nsecond line\r\nthird\r\n\r\nfifth\r\nsixth\r\n");
+    assert!(t.scrollback.len() >= 4);
+    assert!(t.scrollback.iter().all(|r| r.len() < 30));
+    // Selection across trimmed rows (including a click far past the end of text).
+    let mut sel = Selection::new();
+    sel.start_at(0, 6);
+    sel.extend_to(1, 29);
+    assert_eq!(sel.extract_text(|r| t.abs_line(r)), "beta\nsecond line");
+    let (a, b) = crate::window::selection::word_at(&t, 0, 25);
+    assert_eq!((a.0, b.0), (0, 0));
+    assert_eq!((a.1, b.1), (10, 29), "blank tail selects the whitespace run to the right edge");
+    let (la, lb) = crate::window::selection::line_at(&t, 1);
+    assert_eq!((la, lb), ((1, 0), (1, 29)));
+    // Search sees trailing blanks of a trimmed row, and text on both kinds of rows.
+    let mut so = SearchOverlay::new();
+    so.query = "beta  ".to_string();
+    so.search(&t.scrollback, &t.grid);
+    assert_eq!(so.matches.len(), 1);
+    so.query = "sixth".to_string();
+    so.search(&t.scrollback, &t.grid);
+    assert_eq!(so.matches.len(), 1);
+    // Output text (copy output) and session scrollback extraction.
+    let out = crate::blocks_ui::output_text(&t, 0, 2);
+    assert_eq!(out, "alpha beta\nsecond line\nthird");
+    // Hyperlink / cwd lookups on a short row do not index out of range.
+    assert!(t.hyperlink_at_abs(0, 28).is_none());
 }

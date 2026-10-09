@@ -184,9 +184,9 @@
         <p>Type <code># what you want</code> and press Enter. The line becomes a real command, typed back into your prompt for review.</p>
       </article>
       <article class="card">
-        <img class="shot" src="screenshots/preview-accept.png" width="1600" height="1000" loading="lazy" alt="Preview-Then-Accept modal for rm -rf listing the directories and file counts that would be deleted">
+        <img class="shot" src="screenshots/preview-accept.png" width="1600" height="1000" loading="lazy" alt="Preview-Then-Accept modal flagging curl piped into sh as critical, requiring a typed yes">
         <h3>Preview-Then-Accept</h3>
-        <p><code>rm -rf</code>, <code>git reset --hard</code>, force pushes and friends are intercepted before they run, with a real impact analysis. Critical ones need a typed “yes”.</p>
+        <p><code>rm -rf</code> on important paths, <code>curl | sh</code>, <code>git reset --hard</code>, force pushes and friends are intercepted before they run, with a real impact analysis. Critical ones need a typed “yes”.</p>
       </article>
     </div>
 
@@ -194,7 +194,7 @@
       <h3>More AI, all optional</h3>
       <ul class="pill-list">
         <li><strong>Advisor</strong> — a second-opinion risk review of suggested commands</li>
-        <li><strong>Teaching mode</strong> — explains each command before it runs</li>
+        <li><strong>Teaching mode</strong> — explains a command on demand, before you run it</li>
         <li><strong>Observer</strong> — local-only workflow insights, opt-in, never records arguments</li>
       </ul>
     </div>
@@ -239,7 +239,7 @@
       <h3>The toolbox</h3>
       <ul class="tags">
         <li>SSH manager</li><li>Time Warp (rewind the screen)</li><li>Git panel</li><li>Docker panel</li>
-        <li>CI/CD panel</li><li>Port dashboard</li><li>Regex playground</li><li>History search <kbd>⌃R</kbd></li>
+        <li>CI/CD panel</li><li>Port dashboard</li><li>Regex playground</li><li>History search <kbd>⌘Y</kbd></li>
         <li>asciinema recording</li><li>Secret masking</li><li>Inline images (Kitty protocol)</li><li>Broadcast input</li>
         <li>Compare pane output</li><li>File manager</li><li>Command heatmap</li><li>Audit log</li>
       </ul>
@@ -297,9 +297,9 @@
           <dt><kbd>⌘K</kbd></dt><dd>Ask AI about this</dd>
           <dt><kbd>⌘⇧A</kbd></dt><dd>AI chat sidebar</dd>
           <dt><kbd>Tab</kbd></dt><dd>Accept fix suggestion</dd>
-          <dt><kbd>⌃R</kbd></dt><dd>History search</dd>
+          <dt><kbd>⌘Y</kbd></dt><dd>History search</dd>
           <dt><kbd>⌘F</kbd></dt><dd>Find in scrollback</dd>
-          <dt><kbd>⌃Space</kbd></dt><dd>Autocomplete</dd>
+          <dt><kbd>⌘.</kbd></dt><dd>Autocomplete (<kbd>⌃Space</kbd> at a shell prompt)</dd>
           <dt><kbd>⌘,</kbd></dt><dd>Preferences</dd>
         </dl>
       </div>
@@ -440,6 +440,9 @@ api_url  = "http://localhost:11434"</code></pre>
       <li><strong>Your key, your provider.</strong> AI requests go straight from your machine to the endpoint you configure — or nowhere, with Ollama.</li>
       <li><strong>Context only when you ask.</strong> Screen or block text is sent only for the AI action you trigger (and for auto-fix on failed commands, which you can turn off).</li>
       <li><strong>Observer stays home.</strong> Opt-in, stored under <code>~/.config/rift/observer/</code>, skips sensitive commands and never records arguments.</li>
+      <li><strong>Consent first.</strong> Cloud AI stays off until you answer a one-time prompt; a key in your environment alone never enables it, and secrets are redacted before anything is sent.</li>
+      <li><strong>Clipboard is yours.</strong> Programs can't read it: OSC 52 reads are blocked by default, and writes are size-capped and announced.</li>
+      <li><strong>SSH host keys are checked.</strong> Hosts are verified against <code>~/.ssh/known_hosts</code>; unknown hosts ask first and changed keys are flagged.</li>
       <li><strong>Secret masking.</strong> API keys and tokens on screen can be masked with <kbd>⌘⇧M</kbd>.</li>
     </ul>
   </div>

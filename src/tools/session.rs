@@ -294,9 +294,11 @@ fn extract_scrollback(terminal: &Terminal, max_lines: usize) -> Vec<String> {
 }
 
 fn text_to_row(line: &str, cols: usize) -> Vec<Cell> {
-    let mut row: Vec<Cell> = line.chars().take(cols).map(|c| Cell { c, ..Cell::default() }).collect();
-    let width = cols.max(row.len());
-    row.resize(width, Cell::default());
+    // Scrollback rows are stored trimmed (no trailing default cells).
+    let mut row: Vec<Cell> = line.chars().take(cols).map(Cell::plain).collect();
+    while row.last().map_or(false, Cell::is_default_blank) {
+        row.pop();
+    }
     row
 }
 
@@ -635,6 +637,27 @@ mod tests {
 
     fn leaf(c: Option<&str>) -> Box<PaneNode<Option<String>>> {
         Box::new(PaneNode::Leaf(c.map(str::to_string)))
+    }
+
+    #[test]
+    fn scrollback_extract_and_restore_handle_trimmed_rows() {
+        let mut t = Terminal::new(20, 3);
+        let mut p = vte::Parser::new();
+        let mut h = crate::terminal::AnsiHandler::new(&mut t);
+        for b in b"one\r\ntwo  \r\n\r\nfour\r\nfive\r\nsix\r\n" {
+            p.advance(&mut h, *b);
+        }
+        assert!(t.scrollback.iter().all(|r| r.len() < 20));
+        let lines = extract_scrollback(&t, 100);
+        assert_eq!(&lines[..4], ["one", "two", "", "four"]);
+        // Restoring produces trimmed rows that read back identically.
+        for l in &lines {
+            let row = text_to_row(l, 20);
+            assert_eq!(row_to_string(&row), *l);
+            assert!(row.last().map_or(true, |c| !c.is_default_blank()));
+        }
+        assert!(text_to_row("", 20).is_empty());
+        assert_eq!(text_to_row("abcdefghijklmnopqrstuvwxyz", 20).len(), 20);
     }
 
     #[test]

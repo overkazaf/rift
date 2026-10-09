@@ -43,6 +43,15 @@ impl Soft {
     }
 }
 
+/// Audit checks that compare process-wide RSS before/after (escapes, robust,
+/// ai_net) take this lock so concurrent tests' allocations cannot be mistaken
+/// for the code under test.
+static RSS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+pub fn rss_serial() -> std::sync::MutexGuard<'static, ()> {
+    RSS_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Scripted pane fed through the real VT parser (+ kitty APC scanner).
 pub fn pane(cols: usize, rows: usize) -> Pane {
     Pane::scripted(0, cols, rows)

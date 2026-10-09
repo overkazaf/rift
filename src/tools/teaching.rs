@@ -65,7 +65,7 @@ impl TeachingMode {
         let config = config.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(crate::ai::backend::complete_simple(&config, &prompt));
+            let _ = tx.send(crate::ai::backend::complete_with(&config, &prompt, crate::ai::local::Feature::Teaching, false));
             crate::wake::wake();
         });
         self.last_explanation = Some("explaining...".into());

@@ -48,6 +48,64 @@ pub fn parse_first_object(text: &str) -> Option<Object> {
     None
 }
 
+/// Keys small models use for the command when they ignore the schema.
+const COMMAND_KEYS: &[&str] = &["command", "cmd", "fix", "suggestion"];
+
+/// Last-resort reader for replies where no object parses: truncated or
+/// trailing-comma JSON, single-quoted pseudo-JSON, `command: ls` lines or a
+/// single fenced command, all possibly wrapped in prose. Returns
+/// `(command, explanation)`; unsanitized, callers run `sanitize_command`.
+///
+/// Only call this when [`parse_first_object`] found nothing: a well-formed
+/// `{"command": null}` is an answer ("no fix"), not garbage to dig in.
+pub fn lenient_reply(raw: &str) -> Option<(String, String)> {
+    let command = COMMAND_KEYS.iter().find_map(|k| quoted_value(raw, k).or_else(|| line_value(raw, k)))?;
+    let explanation = quoted_value(raw, "explanation").or_else(|| line_value(raw, "explanation")).unwrap_or_default();
+    Some((command, explanation))
+}
+
+fn quoted_value(raw: &str, key: &str) -> Option<String> {
+    crate::ai::backend::extract_json_string(raw, key).or_else(|| single_quoted_value(raw, key))
+}
+
+/// `'key': 'value'` (Python-dict style).
+fn single_quoted_value(raw: &str, key: &str) -> Option<String> {
+    let pat = format!("'{key}'");
+    let at = raw.find(&pat)?;
+    let rest = raw[at + pat.len()..].trim_start().strip_prefix(':')?.trim_start().strip_prefix('\'')?;
+    let mut out = String::new();
+    let mut it = rest.chars();
+    while let Some(c) = it.next() {
+        match c {
+            '\\' => match it.next()? {
+                'n' => out.push('\n'),
+                other => out.push(other),
+            },
+            '\'' => return Some(out),
+            c => out.push(c),
+        }
+    }
+    None
+}
+
+/// `key: value` / `key = value` at the start of a line (bullets and fences
+/// ignored); surrounding quotes, backticks and a trailing comma are dropped.
+fn line_value(raw: &str, key: &str) -> Option<String> {
+    for line in raw.lines() {
+        let l = line.trim().trim_start_matches(['-', '*', '`']).trim_start();
+        let Some(head) = l.get(..key.len()) else { continue };
+        if !head.eq_ignore_ascii_case(key) {
+            continue;
+        }
+        let Some(v) = l[key.len()..].trim_start().strip_prefix([':', '=']) else { continue };
+        let v = v.trim().trim_end_matches(',').trim().trim_matches(['"', '\'', '`']).trim();
+        if !v.is_empty() && v != "null" {
+            return Some(v.to_string());
+        }
+    }
+    None
+}
+
 struct Parser<'a> {
     c: &'a [char],
     i: usize,
@@ -255,6 +313,30 @@ mod tests {
     fn skips_malformed_prefix_object() {
         let o = parse_first_object(r#"use {braces} then {"command": "pwd"}"#).unwrap();
         assert_eq!(o.get_str("command"), Some("pwd"));
+    }
+
+    #[test]
+    fn lenient_reads_what_strict_parsing_cannot() {
+        let cases: &[(&str, &str, &str)] = &[
+            // truncated by the token limit
+            ("Here is the fix:\n{\"command\": \"git push -u origin main\", \"explanation\": \"set upstr", "git push -u origin main", ""),
+            // trailing comma + prose
+            ("Sure! {\"command\": \"ls -la\", \"explanation\": \"list\",}", "ls -la", "list"),
+            // python-dict quoting
+            ("{'command': 'echo it\\'s', 'explanation': 'greet'}", "echo it's", "greet"),
+            // key: value lines
+            ("The answer:\ncommand: `brew install jq`\nexplanation: missing tool", "brew install jq", "missing tool"),
+            ("- Command = \"cargo build\"", "cargo build", ""),
+            // alternative key
+            ("{\"cmd\": \"pwd\", }", "pwd", ""),
+        ];
+        for (raw, cmd, expl) in cases {
+            assert!(parse_first_object(raw).is_none(), "strict parser should fail on {raw:?}");
+            assert_eq!(lenient_reply(raw), Some((cmd.to_string(), expl.to_string())), "{raw:?}");
+        }
+        for raw in ["", "I cannot help with that.", "the command is not available", "command:", "{\"explanation\": \"x\"}"] {
+            assert_eq!(lenient_reply(raw), None, "{raw:?}");
+        }
     }
 
     #[test]

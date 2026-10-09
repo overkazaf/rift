@@ -112,13 +112,17 @@ pub fn clean_explanation(raw: &str) -> String {
 /// Parse the model's reply. `None` = no usable fix (null command, garbage,
 /// or just the same command again).
 pub fn parse_fix_response(raw: &str, original: &str) -> Option<FixSuggestion> {
-    let obj = json::parse_first_object(raw)?;
-    let command = sanitize_command(obj.get_str("command")?)?;
+    // Well-formed JSON is authoritative (`{"command": null}` = no fix); only a
+    // reply with no parseable object (small local models) gets the lenient reader.
+    let (command, explanation) = match json::parse_first_object(raw) {
+        Some(obj) => (obj.get_str("command")?.to_string(), obj.get_str("explanation").unwrap_or("").to_string()),
+        None => json::lenient_reply(raw)?,
+    };
+    let command = sanitize_command(&command)?;
     if command == original.trim() {
         return None;
     }
-    let explanation = obj.get_str("explanation").map(clean_explanation).unwrap_or_default();
-    Some(FixSuggestion { command, explanation })
+    Some(FixSuggestion { command, explanation: clean_explanation(&explanation) })
 }
 
 /// Strict-JSON prompt for `complete_simple`. The failed output is terminal

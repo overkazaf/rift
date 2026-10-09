@@ -22,13 +22,12 @@ fn blank_row(cols: usize) -> Vec<Cell> {
 
 fn cell_is_blank(c: &Cell) -> bool {
     c.c == ' '
-        && c.ext == 0
-        && c.link == 0
+        && c.extra_id() == 0
         && c.bg == Color::Default
-        && !c.attrs.reverse
-        && c.attrs.ul_style() == super::grid::UnderlineStyle::None
-        && !c.attrs.strikethrough
-        && !c.attrs.overline
+        && !c.reverse()
+        && c.ul_style() == super::grid::UnderlineStyle::None
+        && !c.strikethrough()
+        && !c.overline()
 }
 
 fn simple_resize(grid: &mut Vec<Vec<Cell>>, cols: usize, rows: usize) {
@@ -41,7 +40,7 @@ fn simple_resize(grid: &mut Vec<Vec<Cell>>, cols: usize, rows: usize) {
         r.resize(cols, Cell::default());
         if let Some(l) = r.last_mut() {
             // A wide cluster cut in half at the edge.
-            if l.c == '\0' && l.ext != u16::MAX {
+            if l.c == '\0' && !l.is_spacer() {
                 *l = Cell::default();
             }
         }
@@ -66,11 +65,11 @@ fn wrap_units(
                 // A wide cluster did not fit: leave a spacer.
                 let mut sp = Cell::default();
                 sp.c = '\0';
-                sp.ext = u16::MAX;
+                sp.set_spacer(true);
                 cur.push(sp);
             }
             if let Some(l) = cur.last_mut() {
-                l.wrap = true;
+                l.set_wrap(true);
             }
             cur.resize(cols, Cell::default());
             rows.push(std::mem::replace(&mut cur, Vec::with_capacity(cols)));
@@ -80,12 +79,12 @@ fn wrap_units(
             pos = Some((rows.len(), cur_w));
         }
         let mut cell = *u;
-        cell.wrap = false;
+        cell.set_wrap(false);
         cur.push(cell);
         if w == 2 {
             let mut c2 = cell;
             c2.c = '\0';
-            c2.ext = 0;
+            c2.clear_cluster();
             cur.push(c2);
         }
         cur_w += w;
@@ -108,18 +107,18 @@ impl Terminal {
         let old_cols = self.cols;
 
         if self.using_alt_screen {
-            let main = std::mem::take(&mut self.alt_grid);
+            let main = std::mem::take(&mut self.alt_grid).into_rows();
             let (g, cur) = self.reflow_main(main, self.alt_cursor, false, cols, rows);
-            self.alt_grid = g;
+            self.alt_grid = g.into();
             self.alt_cursor = cur;
             simple_resize(&mut self.grid, cols, rows);
             self.cursor_row = self.cursor_row.min(rows - 1);
             self.cursor_col = self.cursor_col.min(cols - 1);
         } else {
-            let main = std::mem::take(&mut self.grid);
+            let main = std::mem::take(&mut self.grid).into_rows();
             let wrap_next = self.wrap_next;
             let (g, cur) = self.reflow_main(main, (self.cursor_row, self.cursor_col), wrap_next, cols, rows);
-            self.grid = g;
+            self.grid = g.into();
             self.cursor_row = cur.0.min(rows - 1);
             self.cursor_col = cur.1.min(cols - 1);
             simple_resize(&mut self.alt_grid, cols, rows);
@@ -142,7 +141,8 @@ impl Terminal {
         self.scroll_offset = self.scroll_offset.min(self.scrollback.len());
     }
 
-    fn push_scrollback(&mut self, row: Vec<Cell>) {
+    fn push_scrollback(&mut self, mut row: Vec<Cell>) {
+        super::grid::trim_row(&mut row);
         self.scrollback.push_back(row);
         if self.scrollback.len() > self.max_scrollback {
             self.scrollback.pop_front();
@@ -217,7 +217,7 @@ impl Terminal {
         while i < all.len() {
             let start = i;
             let mut end = i;
-            while end + 1 < all.len() && all[end].last().map_or(false, |c| c.wrap) {
+            while end + 1 < all.len() && all[end].last().map_or(false, |c| c.wrap()) {
                 end += 1;
             }
             let has_cursor = cursor_abs >= start && cursor_abs <= end;
@@ -239,14 +239,14 @@ impl Terminal {
                     if c.is_continuation() {
                         continue;
                     }
-                    let wide = j + 1 < row.len() && row[j + 1].c == '\0' && row[j + 1].ext != u16::MAX;
+                    let wide = j + 1 < row.len() && row[j + 1].c == '\0' && !row[j + 1].is_spacer();
                     let w = if wide {
                         2
                     } else {
                         1
                     };
                     let mut u = c;
-                    u.wrap = false;
+                    u.set_wrap(false);
                     units.push((u, w));
                 }
             }
@@ -282,6 +282,7 @@ impl Terminal {
             dropped = sb.len() - self.max_scrollback;
             sb.drain(..dropped);
         }
+        sb.iter_mut().for_each(super::grid::trim_row);
         self.scrollback = sb;
 
         let map_line = move |l: usize| -> usize {

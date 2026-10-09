@@ -7,6 +7,7 @@ pub mod chat;
 pub mod consent;
 pub mod context;
 pub mod knowledge;
+pub mod local;
 pub mod observer;
 pub mod profile;
 
@@ -71,13 +72,21 @@ pub struct Message {
 
 pub struct LlmManager {
     pub config: LlmConfig,
+    /// Configured cloud model (from `[llm]` at startup), kept when the user
+    /// switches to a local one so it can be switched back to.
+    pub cloud: Option<LlmConfig>,
+    /// The local model the user selected last.
+    pub last_local: Option<LlmConfig>,
     pub profile: profile::UserProfile,
     pub knowledge: knowledge::KnowledgeBase,
 }
 
 impl LlmManager {
     pub fn new(config: LlmConfig) -> Self {
+        let local = local::routing::is_local(&config);
         Self {
+            cloud: (config.enabled && !local).then(|| config.clone()),
+            last_local: (config.enabled && local).then(|| config.clone()),
             config,
             profile: profile::UserProfile::new(),
             knowledge: knowledge::KnowledgeBase::new(),
@@ -100,6 +109,23 @@ impl LlmManager {
             crate::wake::wake();
         });
         rx
+    }
+
+    /// The cloud model the picker may offer: the configured one, else a
+    /// provider whose API key sits in the environment (selecting that one
+    /// still goes through the consent prompt).
+    pub fn cloud_candidate(&self) -> Option<LlmConfig> {
+        if let Some(c) = &self.cloud {
+            return Some(c.clone());
+        }
+        let e = consent::env_candidate()?;
+        Some(LlmConfig {
+            provider: e.provider.into(),
+            model: e.model.into(),
+            api_url: e.api_url.into(),
+            api_key: Some(e.key),
+            enabled: true,
+        })
     }
 
     pub fn track_command(&mut self, cmd: &str) {

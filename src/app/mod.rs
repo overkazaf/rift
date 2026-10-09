@@ -95,6 +95,8 @@ pub struct App {
     pub mouse_pressed: bool,
     pub window_focused: bool,
     pub hover_pane: Option<usize>,
+    /// (pane, view row, col) under the pointer when it sits on an OSC 8 link.
+    pub link_hover: Option<(usize, usize, usize)>,
     pub dragging_border: Option<usize>,
     /// Divider currently under the mouse (pre-order index), for highlight.
     pub hover_border: Option<usize>,
@@ -131,6 +133,8 @@ pub struct App {
     pub port_dashboard: PortDashboard,
     pub regex_playground: RegexPlayground,
     pub history: HistorySearch,
+    /// Built-in MCP server (socket, approval queue, activity overlay).
+    pub mcp: crate::mcp::host::UiState,
 
     pub needs_render: bool,
     pub startup_time: std::time::Instant,
@@ -165,6 +169,8 @@ impl App {
         crate::tools::session::restore_session(&mut wm);
 
         let keymap = keymap::Keymap::build(&config.input.keybindings);
+        let notify_after_secs = config.notify_after_secs;
+        let config_mcp = config.mcp.clone();
         Self {
             config,
             wm,
@@ -204,6 +210,7 @@ impl App {
             mouse_pressed: false,
             window_focused: true,
             hover_pane: None,
+            link_hover: None,
             dragging_border: None,
             hover_border: None,
             last_border_click: None,
@@ -225,7 +232,7 @@ impl App {
             heatmap: Heatmap::new(),
             docker: DockerPanel::new(),
             audit: AuditLog::new(),
-            notifier: Notifier::new(),
+            notifier: Notifier::new(notify_after_secs),
             observer: Observer::new(),
             observer_summary: None,
             needs_render: true,
@@ -235,6 +242,7 @@ impl App {
             port_dashboard: PortDashboard::new(),
             regex_playground: RegexPlayground::new(),
             history: HistorySearch::new(),
+            mcp: crate::mcp::host::start(&config_mcp),
 
             startup_time: std::time::Instant::now(),
             startup_skipped: false,
@@ -303,6 +311,18 @@ impl App {
         let hud_h = if self.hud_visible { ch * 3 + 20 } else { 0 };
         let width = self.terminal_width(w);
         crate::window::PaneRect { x: 0, y: tbh, width, height: h.saturating_sub(tbh + hud_h) }
+    }
+
+    /// Cell under the pointer when it lies on an OSC 8 hyperlink.
+    pub fn link_cell_under_pointer(&self) -> Option<(usize, usize, usize)> {
+        let pane = self.hover_pane?;
+        let (_, rect, _) = self.wm.pane_layouts(self.content_area()).into_iter().find(|(i, _, _)| *i == pane)?;
+        let (cw, ch) = (self.renderer.cell_width().max(1), self.renderer.cell_height().max(1));
+        if self.cursor_x < rect.x || self.cursor_y < rect.y { return None; }
+        let (col, row) = ((self.cursor_x - rect.x) / cw, (self.cursor_y - rect.y) / ch);
+        let t = &self.wm.active_tab().pane(pane)?.terminal;
+        t.hyperlink_at(row, col)?;
+        Some((pane, row, col))
     }
 
     /// Map a window pixel to (row, col) inside the active pane.
@@ -428,6 +448,11 @@ impl ApplicationHandler for App {
                         self.request_redraw();
                     }
                     self.update_resize_cursor();
+                    let link = self.link_cell_under_pointer();
+                    if link != self.link_hover {
+                        self.link_hover = link;
+                        self.request_redraw();
+                    }
                     // Command blocks: hover toolbar / gutter (sets pointer cursor)
                     if !self.mouse_pressed && crate::blocks_ui::on_mouse_move(self) {
                         return;

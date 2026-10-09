@@ -216,7 +216,12 @@ pub fn build_request(config: &LlmConfig, messages: &[ApiMessage]) -> StreamReque
     if config.provider == "ollama" {
         StreamRequest {
             url: format!("{base}/api/chat"),
-            body: format!(r#"{{"model":{},"messages":[{}],"stream":true}}"#, quote(&config.model), msgs),
+            body: format!(
+                r#"{{"model":{},"messages":[{}],"stream":true,"options":{{"num_ctx":{}}}}}"#,
+                quote(&config.model),
+                msgs,
+                crate::ai::local::ollama_num_ctx()
+            ),
             bearer: None,
             ndjson: true,
         }
@@ -314,6 +319,7 @@ pub fn spawn_with_wake(
         if flag.load(Ordering::Relaxed) {
             return;
         }
+        crate::ai::local::usage::record(crate::ai::local::Feature::Chat, &config, &req.body);
         if let Err(e) = run(&req, &flag, &emit, Timeouts::from_env(req.ndjson)) {
             if !flag.load(Ordering::Relaxed) {
                 emit(StreamEvent::Error(e));
@@ -333,13 +339,18 @@ fn run(req: &StreamRequest, cancel: &AtomicBool, emit: &dyn Fn(StreamEvent) -> b
     if let Some(key) = &req.bearer {
         builder = builder.header("Authorization", &format!("Bearer {key}"));
     }
-    let resp = builder
+    let mut cfg = builder
         .config()
         .http_status_as_error(false)
         .timeout_connect(Some(Duration::from_secs(10)))
         .timeout_recv_response(Some(to.response))
         // Upper bound for one whole answer; the idle timer handles stalls.
-        .timeout_global(Some(Duration::from_secs(900)))
+        .timeout_global(Some(Duration::from_secs(900)));
+    if crate::ai::local::usage::is_loopback_url(&req.url) {
+        // A proxy from the environment must never see (or relay) local traffic.
+        cfg = cfg.proxy(None);
+    }
+    let resp = cfg
         .build()
         .send(req.body.as_bytes())
         .map_err(|e| request_error(&e.to_string(), to))?;
@@ -691,6 +702,7 @@ data: [DONE]
         assert!(r.ndjson && r.bearer.is_none());
         let j = Json::parse(&r.body).unwrap();
         assert_eq!(j.get("stream").and_then(Json::as_bool), Some(true));
+        assert!(j.get("options").and_then(|o| o.get("num_ctx")).and_then(Json::as_f64).unwrap() >= 4096.0);
         assert_eq!(j.get("messages").unwrap().idx(1).unwrap().get("content").unwrap().as_str(), Some("hi\n中"));
 
         cfg.provider = "openai".into();

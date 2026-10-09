@@ -220,7 +220,9 @@ pub fn redraw(app: &mut App) {
         dragging_border: app.dragging_border,
         zoomed: app.wm.active_tab().is_zoomed(),
     };
+    app.renderer.link_hover = app.link_hover;
     app.renderer.chrome = app.mui.chrome(std::time::Instant::now());
+    app.renderer.chrome.mcp_clients = app.mcp.clients().min(u16::MAX as usize) as u16;
     app.renderer.render_tabbed_with_cmd(&app.wm, content_area, &mut buffer, width, height, cmd_held, &app.blocks, split_ui);
     // Command-block chrome (gutter bars, chips, toolbar) on the output buffer
     crate::blocks_ui::draw::draw(&app.wm, &mut app.renderer, &app.blocks_ui, &mut buffer, width, height, content_area);
@@ -404,6 +406,13 @@ pub fn redraw(app: &mut App) {
         app.process_tree.render(
             &mut buffer, width as usize, height as usize,
             &mut app.renderer.font, &app.renderer.theme,
+        );
+    }
+    if app.mcp.overlay.visible {
+        app.mcp.overlay.render(
+            &mut buffer, width as usize, height as usize,
+            &mut app.renderer.font, &app.renderer.theme,
+            app.mcp.shared.as_deref(), &app.mcp.status,
         );
     }
     if app.system_info.visible {
@@ -666,6 +675,9 @@ fn about_to_wait_inner(app: &mut App, event_loop: &ActiveEventLoop) {
         shortcuts::handle_menu_action(app, action, event_loop);
     }
 
+    // MCP: answer queued requests from connected coding agents (never blocks).
+    crate::mcp::host::poll(app);
+
     // Browser: drain webview events (title/url/loading/focus)
     crate::network::browser::poll(app);
 
@@ -819,6 +831,25 @@ fn about_to_wait_inner(app: &mut App, event_loop: &ActiveEventLoop) {
             app.needs_render = true;
         }
 
+        // Long-command completion (OSC 133;D): notify when the user can't see the pane.
+        {
+            let focused = app.window_focused;
+            let active_tab = app.wm.active_tab;
+            let mut posted = 0;
+            for (ti, tab) in app.wm.tabs.iter_mut().enumerate() {
+                let (zoomed, active_leaf) = (tab.is_zoomed(), tab.active);
+                for (pi, pane) in tab.panes_mut().into_iter().enumerate() {
+                    let visible = focused && ti == active_tab && (!zoomed || pi == active_leaf);
+                    for done in pane.terminal.blocks.take_finished() {
+                        if posted < 3 && app.notifier.should_notify(&done, visible) {
+                            posted += 1;
+                            crate::tools::notify::Notifier::send("rift", &crate::tools::notify::Notifier::message(&done));
+                        }
+                    }
+                }
+            }
+        }
+
         // OSC 9 / OSC 777 desktop notifications (AI agents' "needs you" signal):
         // always drained; posted only when the user can't already see the pane.
         {
@@ -868,11 +899,6 @@ fn about_to_wait_inner(app: &mut App, event_loop: &ActiveEventLoop) {
     // Teaching mode poll LLM response
     app.teaching.poll();
 
-    // Notifier: desktop notification when long command finishes
-    if app.notifier.check(app.window_focused) {
-        crate::tools::notify::Notifier::send("rift", "Command completed");
-    }
-
     // Command blocks: running-block animation + toast expiry
     crate::blocks_ui::tick(app, &mut wake_at);
 
@@ -898,6 +924,7 @@ fn about_to_wait_inner(app: &mut App, event_loop: &ActiveEventLoop) {
         || app.docker.visible
         || app.network_monitor.visible
         || app.process_tree.visible
+        || app.mcp.overlay.visible
         || app.system_info.visible
         || app.port_dashboard.visible
         || app.regex_playground.visible

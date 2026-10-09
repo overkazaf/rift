@@ -4,10 +4,14 @@ use super::chat::guard;
 use super::chat::json::{quote, Json};
 use super::chat::stream::{http_error, snippet};
 use super::context::TermContext;
+use super::local::usage::{self, is_loopback_url};
+use super::local::{self, Feature};
 use super::{LlmConfig, Message};
 
 /// Whole-request budget for the non-streaming calls (advisor, fix, `#`, teaching).
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+/// Local servers may need to load the model into memory first.
+const LOCAL_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub fn complete(
     config: &LlmConfig,
@@ -26,7 +30,7 @@ pub fn complete(
             content: question.to_string(),
         },
     ];
-    call(config, &messages)
+    call(config, &messages, Feature::Other, false)
 }
 
 /// Single-turn completion with a caller-supplied prompt and no terminal
@@ -37,16 +41,31 @@ pub fn complete(
 /// The prompt is scrubbed here as the last line of defence: ANSI/control
 /// bytes are stripped and secrets redacted, whatever the caller did.
 pub fn complete_simple(config: &LlmConfig, prompt: &str) -> Result<String, String> {
+    complete_with(config, prompt, Feature::Other, false)
+}
+
+/// [`complete_simple`] for a prompt that asks for a JSON object (fix, `#`,
+/// advisor): Ollama is told to emit JSON only and sampling is made
+/// conservative, which small local models need to keep the format.
+pub fn complete_structured(config: &LlmConfig, prompt: &str, feature: Feature) -> Result<String, String> {
+    complete_with(config, prompt, feature, true)
+}
+
+/// Single-turn completion attributed to `feature` in the privacy ledger.
+pub fn complete_with(config: &LlmConfig, prompt: &str, feature: Feature, structured: bool) -> Result<String, String> {
     let messages = vec![Message {
         role: "user",
         content: prompt.to_string(),
     }];
-    call(config, &messages)
+    call(config, &messages, feature, structured)
 }
 
-fn call(config: &LlmConfig, messages: &[Message]) -> Result<String, String> {
+fn call(config: &LlmConfig, messages: &[Message], feature: Feature, structured: bool) -> Result<String, String> {
     let ollama = config.provider == "ollama";
-    let (url, body) = build_body(config, messages);
+    let loopback = is_loopback_url(&config.api_url);
+    let (url, body) = build_body(config, messages, structured);
+    // Count the bytes before they leave (cloud) or stay (loopback).
+    usage::record(feature, config, &body);
 
     let mut req = ureq::post(&url).header("Content-Type", "application/json");
     if !ollama {
@@ -54,10 +73,15 @@ fn call(config: &LlmConfig, messages: &[Message]) -> Result<String, String> {
             req = req.header("Authorization", &format!("Bearer {key}"));
         }
     }
-    let mut resp = req
+    let mut cfg = req
         .config()
         .http_status_as_error(false)
-        .timeout_global(Some(REQUEST_TIMEOUT))
+        .timeout_global(Some(if loopback { LOCAL_REQUEST_TIMEOUT } else { REQUEST_TIMEOUT }));
+    if loopback {
+        // A proxy from the environment must never see (or relay) local traffic.
+        cfg = cfg.proxy(None);
+    }
+    let mut resp = cfg
         .build()
         .send(body.as_bytes())
         .map_err(|e| format!("{} request failed: {e}", if ollama { "Ollama" } else { "API" }))?;
@@ -78,18 +102,28 @@ fn call(config: &LlmConfig, messages: &[Message]) -> Result<String, String> {
 
 /// Request URL and JSON body. Every string goes through [`quote`] (RFC 8259
 /// escaping of all control characters) after ANSI/secret scrubbing.
-fn build_body(config: &LlmConfig, messages: &[Message]) -> (String, String) {
+fn build_body(config: &LlmConfig, messages: &[Message], structured: bool) -> (String, String) {
     let base = config.api_url.trim_end_matches('/');
     let msgs = messages_to_json(messages);
     if config.provider == "ollama" {
+        // `format:"json"` constrains the output to valid JSON; `num_ctx` keeps
+        // Ollama from silently truncating the prompt to its small default window.
+        let format = if structured { r#""format":"json","# } else { "" };
+        let temp = if structured { r#","temperature":0.2"# } else { "" };
         (
             format!("{base}/api/chat"),
-            format!(r#"{{"model":{},"messages":[{}],"stream":false}}"#, quote(&config.model), msgs),
+            format!(
+                r#"{{"model":{},"messages":[{}],"stream":false,{format}"options":{{"num_ctx":{}{temp}}}}}"#,
+                quote(&config.model),
+                msgs,
+                local::ollama_num_ctx()
+            ),
         )
     } else {
+        let temp = if structured { "0.2" } else { "0.7" };
         (
             format!("{base}/v1/chat/completions"),
-            format!(r#"{{"model":{},"messages":[{}],"temperature":0.7}}"#, quote(&config.model), msgs),
+            format!(r#"{{"model":{},"messages":[{}],"temperature":{temp}}}"#, quote(&config.model), msgs),
         )
     }
 }
@@ -200,13 +234,81 @@ mod tests {
     fn body_is_valid_json_with_controls_and_scrubbed() {
         let msgs = vec![Message { role: "user", content: "a\x1b[31mred\x1b[0m\x07\u{8}\u{c}\0 \u{2028} token=abcdef123456 中😀".into() }];
         for p in ["openai", "ollama"] {
-            let (_, body) = build_body(&cfg(p), &msgs);
+            let (_, body) = build_body(&cfg(p), &msgs, false);
             let j = Json::parse(&body).unwrap_or_else(|| panic!("invalid json: {body}"));
             let c = j.get("messages").unwrap().idx(0).unwrap().get("content").unwrap().as_str().unwrap().to_string();
             assert!(!c.contains('\x1b') && !c.contains("abcdef123456"), "{c}");
             assert!(c.starts_with("ared") && c.contains("中😀"), "{c}");
             assert!(body.chars().all(|ch| (ch as u32) >= 0x20 && ch != '\u{2028}'));
         }
+    }
+
+    #[test]
+    fn ollama_bodies_set_context_and_json_format_for_structured_prompts() {
+        let msgs = vec![Message { role: "user", content: "hi".into() }];
+        let (url, plain) = build_body(&cfg("ollama"), &msgs, false);
+        assert!(url.ends_with("/api/chat"));
+        let j = Json::parse(&plain).unwrap();
+        assert_eq!(j.get("options").and_then(|o| o.get("num_ctx")).and_then(Json::as_f64), Some(local::ollama_num_ctx() as f64));
+        assert!(j.get("format").is_none(), "free text must not be forced into JSON");
+        let (_, st) = build_body(&cfg("ollama"), &msgs, true);
+        let j = Json::parse(&st).unwrap();
+        assert_eq!(j.get("format").and_then(Json::as_str), Some("json"));
+        assert_eq!(j.get("stream").and_then(Json::as_bool), Some(false));
+        assert!(j.get("options").and_then(|o| o.get("temperature")).and_then(Json::as_f64).unwrap() <= 0.3);
+        // OpenAI-compatible servers get no Ollama-only fields.
+        let (_, oa) = build_body(&cfg("openai-compatible-local"), &msgs, true);
+        let j = Json::parse(&oa).unwrap();
+        assert!(j.get("format").is_none() && j.get("options").is_none());
+    }
+
+    /// In-process mock: answers one request, returns the raw request text.
+    fn mock_server(reply_body: &'static str) -> (String, std::thread::JoinHandle<String>) {
+        use std::io::{Read, Write};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://127.0.0.1:{}", l.local_addr().unwrap().port());
+        let h = std::thread::spawn(move || {
+            let (mut s, _) = l.accept().unwrap();
+            let mut req = Vec::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                let n = s.read(&mut buf).unwrap();
+                req.extend_from_slice(&buf[..n]);
+                let text = String::from_utf8_lossy(&req).to_string();
+                if let Some(hdr_end) = text.find("\r\n\r\n") {
+                    let len = text[..hdr_end].lines().find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").and_then(|v| v.trim().parse::<usize>().ok())).unwrap_or(0);
+                    if req.len() >= hdr_end + 4 + len {
+                        break;
+                    }
+                }
+            }
+            let _ = write!(s, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply_body}", reply_body.len());
+            String::from_utf8_lossy(&req).to_string()
+        });
+        (url, h)
+    }
+
+    #[test]
+    fn structured_call_to_local_ollama_sets_json_format_and_counts_local_bytes() {
+        let (url, h) = mock_server(r#"{"message":{"content":"{\"command\":\"ls\"}"},"done":true}"#);
+        let mut c = cfg("ollama");
+        c.api_url = url;
+        c.model = "tiny".into();
+        let before = usage::today();
+        let out = complete_structured(&c, "list files token=abcdef123456", Feature::Fix).unwrap();
+        assert_eq!(out, r#"{"command":"ls"}"#);
+        let req = h.join().unwrap();
+        assert!(req.starts_with("POST /api/chat"), "{req}");
+        let body = &req[req.find("\r\n\r\n").unwrap() + 4..];
+        let j = Json::parse(body).unwrap();
+        assert_eq!(j.get("format").and_then(Json::as_str), Some("json"));
+        assert!(j.get("options").and_then(|o| o.get("num_ctx")).is_some());
+        assert!(!body.contains("abcdef123456"), "secrets are redacted before the wire");
+        let after = usage::today();
+        assert_eq!(after.cloud_bytes, before.cloud_bytes, "loopback traffic is never counted as sent to cloud");
+        assert!(after.local_reqs > before.local_reqs);
+        let e = usage::recent(200).into_iter().find(|e| e.model == "tiny" && e.feature == Feature::Fix).expect("ledger entry");
+        assert!(!e.cloud && e.bytes == body.len() as u64 && e.redactions >= 1, "{e:?}");
     }
 
     #[test]

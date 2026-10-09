@@ -49,6 +49,7 @@ impl MouseUi {
             tab_hover: self.tabs.hover,
             dragging_tab: self.tabs.dragging(),
             scrollbar: self.scrollbar.bar(now),
+            mcp_clients: 0, // set by lifecycle::redraw from the MCP server
         }
     }
 }
@@ -140,7 +141,7 @@ pub fn url_at_cursor(app: &App) -> Option<String> {
         if cell.c == '\0' && col > 0 {
             cell = &cells[col - 1];
         }
-        if let Some(uri) = t.hyperlink_uri(cell.link) {
+        if let Some(uri) = t.hyperlink_uri(cell.link()) {
             let scheme_ok = ["http://", "https://", "mailto:", "file://", "ftp://"]
                 .iter()
                 .any(|p| uri.as_bytes().len() >= p.len() && uri.as_bytes()[..p.len()].eq_ignore_ascii_case(p.as_bytes()));

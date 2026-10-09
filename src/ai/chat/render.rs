@@ -243,7 +243,17 @@ impl ChatUi {
         let by = hdr.y + (hdr_h - ms.btn_h) / 2;
         let close_r = Rect::new(area.right() - pad - btn_w("x"), by, btn_w("x"), ms.btn_h);
         let new_r = Rect::new(close_r.x - ms.xs - btn_w("New"), by, btn_w("New"), ms.btn_h);
-        put(&mut cx, &sub, tw + ms.md, ty as isize, new_r.x.saturating_sub(ms.sm), sub_col);
+        let sub_end = put(&mut cx, &sub, tw + ms.md, ty as isize, new_r.x.saturating_sub(ms.sm), sub_col);
+        // LOCAL (green) / CLOUD (amber): where the answer is computed. Click: Privacy Report.
+        if let Some(local) = self.local {
+            let (label, tone) = if local { ("LOCAL", Tone::Success) } else { ("CLOUD", Tone::Warning) };
+            let bx = sub_end + ms.sm;
+            let bw = cx.badge_w(label);
+            if bx + bw <= new_r.x.saturating_sub(ms.xs) {
+                cx.badge(bx, hdr.y, label, tone, hdr_h);
+                hits.push((Rect::new(bx, hdr.y, bw, hdr_h), Target::Privacy));
+            }
+        }
         for (r, label, t) in [(new_r, "New", Target::NewChat), (close_r, "x", Target::Close)] {
             let hv = hover == Some(t);
             cx.button(r, label, if hv { ButtonKind::Primary } else { ButtonKind::Secondary }, ButtonState::Normal);
@@ -260,6 +270,15 @@ impl ChatUi {
             let hv = hover == Some(Target::ScrollBottom);
             cx.button(r, label, if hv { ButtonKind::Primary } else { ButtonKind::Secondary }, ButtonState::Normal);
             hits.push((r, Target::ScrollBottom));
+        }
+        // Badge tooltip: the day's outbound total (loopback traffic is not counted).
+        if hover == Some(Target::Privacy) {
+            let msg = format!(
+                "{} - click for the Privacy Report",
+                crate::ai::local::usage::footer_text(crate::ai::local::usage::today())
+            );
+            let tw_ = (cx.tw(&msg) + 2 * tk.sp.lg + 3 * tk.sp.sm).min(area.w.saturating_sub(2 * pad));
+            cx.toast_at(area.x + pad, hdr.bottom() + ms.xs, tw_, Tone::Neutral, &msg);
         }
         if let Some((msg, _)) = &self.toast {
             let th = tk.row_h + tk.sp.md;
@@ -739,6 +758,11 @@ impl ChatUi {
             }
             put(cx, &l, x0, y as isize, x0 + inner_w, tk.text_faint);
             y += ms.lh;
+        }
+        // Privacy footer: what has left the machine today.
+        if y + ms.lh <= area.bottom() {
+            let note = crate::ai::local::usage::footer_text(crate::ai::local::usage::today());
+            put(cx, &note, x0, (area.bottom() - ms.lh) as isize, x0 + inner_w, tk.text_faint);
         }
     }
 }

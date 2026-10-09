@@ -670,6 +670,7 @@ fn palette(s: &mut Stage) {
             SshHostInfo { alias: "staging".into(), detail: "maya@stg.aurora.dev:22".into() },
         ],
         font_size: 12.0,
+        ..Default::default()
     });
     for c in "nt".chars() {
         pal.handle_key(PaletteKey::Char(c));
@@ -707,26 +708,19 @@ fn preview_accept(s: &mut Stage) {
     let mut sc = Script::new();
     sc.run(&p, "ls", LS_OUT, 0);
     sc.run(&p, "git status -sb", GIT_STATUS, 0);
-    sc.run(&p, "du -sh build target", "1.4M\tbuild\n2.1G\ttarget", 0);
-    sc.prompt(&p).typed("rm -rf ./build");
+    sc.run(&p, "cargo --version", "cargo 1.82.0 (8f40fc59f 2024-08-21)", 0);
+    // Piping a download into a shell is a genuinely critical command (a
+    // routine `rm -rf ./build` is only Info and shows no preview).
+    let cmd = "curl -fsSL https://get.example.dev/install.sh | sh";
+    sc.prompt(&p).typed(cmd);
     s.feed(0, &sc);
     s.retime(0, &[12, 58, 240]);
 
-    // Real classification of the real command, against a real fixture dir so
-    // the "N file(s) inside" detail is computed, not invented.
-    let fixture = std::env::temp_dir().join(format!("rift-shot-{}", std::process::id())).join("aurora");
-    let build = fixture.join("build");
-    let subs = ["assets", "static/js", "static/css", "static/media"];
-    for d in subs {
-        let _ = std::fs::create_dir_all(build.join(d));
-    }
-    for i in 0..86 {
-        let _ = std::fs::write(build.join(subs[i % 4]).join(format!("chunk-{i:03}.dat")), b"x");
-    }
-    let mut prev = ExecPreview::check_command_in("rm -rf ./build", Some(&fixture.to_string_lossy()));
-    let _ = std::fs::remove_dir_all(fixture.parent().unwrap_or(&fixture));
+    // Real classification of the real command (nothing is executed).
+    let mut prev = ExecPreview::check_command_in(cmd, Some(&format!("{HOME}/aurora")));
     if let Some(p) = prev.as_mut() {
         p.visible = true;
+        assert!(p.severity == crate::tools::exec_preview::Severity::Critical, "scene must show a critical preview");
     }
     s.exec_preview = prev;
 }

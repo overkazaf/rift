@@ -19,8 +19,31 @@ impl<'a> AnsiHandler<'a> {
     }
 }
 
-fn collect(params: &Params) -> Vec<u16> {
-    params.iter().map(|p| p.first().copied().unwrap_or(0)).collect()
+/// First value of each parameter group, in a fixed stack buffer (vte caps a
+/// sequence at 32 values), so CSI dispatch never allocates.
+struct ParamBuf {
+    v: [u16; 32],
+    n: usize,
+}
+
+impl ParamBuf {
+    #[inline]
+    fn collect(params: &Params) -> Self {
+        let mut b = ParamBuf { v: [0; 32], n: 0 };
+        for p in params.iter() {
+            if b.n == 32 {
+                break;
+            }
+            b.v[b.n] = p.first().copied().unwrap_or(0);
+            b.n += 1;
+        }
+        b
+    }
+
+    #[inline]
+    fn as_slice(&self) -> &[u16] {
+        &self.v[..self.n]
+    }
 }
 
 fn arg(ps: &[u16], idx: usize, default: u16) -> u16 {
@@ -50,64 +73,69 @@ impl Perform for AnsiHandler<'_> {
         if ignore {
             return;
         }
-        let ps = collect(params);
+        // SGR is by far the most frequent CSI: handle it before collecting.
+        if action == 'm' && intermediates.is_empty() {
+            return self.apply_sgr(params);
+        }
+        let pb = ParamBuf::collect(params);
+        let ps = pb.as_slice();
         let n1 = |ps: &[u16]| arg(ps, 0, 1) as usize;
         let t = &mut *self.terminal;
 
         match (intermediates, action) {
             // ── Cursor movement ──
-            ([], 'A') => t.cursor_up(n1(&ps)),
-            ([], 'B') => t.cursor_down(n1(&ps)),
-            ([], 'C') | ([], 'a') => t.cursor_forward(n1(&ps)),
-            ([], 'D') => t.cursor_back(n1(&ps)),
-            ([], 'e') => t.cursor_down(n1(&ps)), // VPR
+            ([], 'A') => t.cursor_up(n1(ps)),
+            ([], 'B') => t.cursor_down(n1(ps)),
+            ([], 'C') | ([], 'a') => t.cursor_forward(n1(ps)),
+            ([], 'D') => t.cursor_back(n1(ps)),
+            ([], 'e') => t.cursor_down(n1(ps)), // VPR
             ([], 'E') => {
-                t.cursor_down(n1(&ps));
+                t.cursor_down(n1(ps));
                 t.carriage_return();
             }
             ([], 'F') => {
-                t.cursor_up(n1(&ps));
+                t.cursor_up(n1(ps));
                 t.carriage_return();
             }
             ([], 'G') | ([], '`') => {
                 // CHA / HPA
                 let row = t.cursor_row;
-                t.set_cursor(row, n1(&ps).saturating_sub(1));
+                t.set_cursor(row, n1(ps).saturating_sub(1));
             }
             ([], 'H') | ([], 'f') => {
-                let row = arg(&ps, 0, 1) as usize;
-                let col = arg(&ps, 1, 1) as usize;
+                let row = arg(ps, 0, 1) as usize;
+                let col = arg(ps, 1, 1) as usize;
                 t.set_cursor_addressed(row.saturating_sub(1), col.saturating_sub(1));
             }
-            ([], 'd') => t.set_row_addressed(n1(&ps).saturating_sub(1)),
-            ([], 'I') => t.tab_forward(n1(&ps)),
-            ([], 'Z') => t.tab_backward(n1(&ps)),
-            ([], 'g') => t.clear_tab_stops(arg(&ps, 0, 0)),
+            ([], 'd') => t.set_row_addressed(n1(ps).saturating_sub(1)),
+            ([], 'I') => t.tab_forward(n1(ps)),
+            ([], 'Z') => t.tab_backward(n1(ps)),
+            ([], 'g') => t.clear_tab_stops(arg(ps, 0, 0)),
 
             // ── Erase / insert / delete ──
-            ([], 'J') | ([b'?'], 'J') => t.erase_display(arg(&ps, 0, 0)),
-            ([], 'K') | ([b'?'], 'K') => t.erase_line(arg(&ps, 0, 0)),
-            ([], 'L') => t.insert_lines(n1(&ps)),
-            ([], 'M') => t.delete_lines(n1(&ps)),
-            ([], 'P') => t.delete_chars(n1(&ps)),
-            ([], 'S') => t.scroll_up(n1(&ps)),
-            ([], 'T') => t.scroll_down(n1(&ps)),
-            ([], 'X') => t.erase_chars(n1(&ps)),
-            ([], '@') => t.insert_chars(n1(&ps)),
-            ([], 'b') => t.repeat_last(n1(&ps)),
+            ([], 'J') | ([b'?'], 'J') => t.erase_display(arg(ps, 0, 0)),
+            ([], 'K') | ([b'?'], 'K') => t.erase_line(arg(ps, 0, 0)),
+            ([], 'L') => t.insert_lines(n1(ps)),
+            ([], 'M') => t.delete_lines(n1(ps)),
+            ([], 'P') => t.delete_chars(n1(ps)),
+            ([], 'S') => t.scroll_up(n1(ps)),
+            ([], 'T') => t.scroll_down(n1(ps)),
+            ([], 'X') => t.erase_chars(n1(ps)),
+            ([], '@') => t.insert_chars(n1(ps)),
+            ([], 'b') => t.repeat_last(n1(ps)),
 
             // ── Modes ──
-            ([b'?'], 'h') => self.set_dec_modes(&ps, true),
-            ([b'?'], 'l') => self.set_dec_modes(&ps, false),
+            ([b'?'], 'h') => self.set_dec_modes(ps, true),
+            ([b'?'], 'l') => self.set_dec_modes(ps, false),
             ([], 'h') => {
-                for &mode in &ps {
+                for &mode in ps {
                     if mode == 4 {
                         t.insert_mode = true;
                     }
                 }
             }
             ([], 'l') => {
-                for &mode in &ps {
+                for &mode in ps {
                     if mode == 4 {
                         t.insert_mode = false;
                     }
@@ -115,12 +143,12 @@ impl Perform for AnsiHandler<'_> {
             }
             // DECRQM
             ([b'?', b'$'], 'p') => {
-                let mode = arg(&ps, 0, 0);
+                let mode = arg(ps, 0, 0);
                 let st = t.dec_mode_status(mode);
                 t.queue_response(format!("\x1b[?{mode};{st}$y").into_bytes());
             }
             ([b'$'], 'p') => {
-                let mode = arg(&ps, 0, 0);
+                let mode = arg(ps, 0, 0);
                 let st = t.ansi_mode_status(mode);
                 t.queue_response(format!("\x1b[{mode};{st}$y").into_bytes());
             }
@@ -128,10 +156,10 @@ impl Perform for AnsiHandler<'_> {
             ([b'!'], 'p') => t.soft_reset(),
 
             // ── SGR ──
-            ([], 'm') => self.apply_sgr(params),
+            ([], 'm') => {} // handled above
 
             // ── Reports ──
-            ([], 'n') => match arg(&ps, 0, 0) {
+            ([], 'n') => match arg(ps, 0, 0) {
                 5 => t.queue_response(b"\x1b[0n".to_vec()),
                 6 => {
                     let row = if t.origin_mode {
@@ -144,17 +172,17 @@ impl Perform for AnsiHandler<'_> {
                 }
                 _ => {}
             },
-            ([b'?'], 'n') if arg(&ps, 0, 0) == 6 => {
+            ([b'?'], 'n') if arg(ps, 0, 0) == 6 => {
                 let row = if t.origin_mode { t.cursor_row.saturating_sub(t.scroll_top) } else { t.cursor_row };
                 let r = format!("\x1b[?{};{}R", row + 1, t.cursor_col + 1);
                 t.queue_response(r.into_bytes());
             }
             // Primary / Secondary Device Attributes
-            ([], 'c') if arg(&ps, 0, 0) == 0 => {
+            ([], 'c') if arg(ps, 0, 0) == 0 => {
                 // VT220 with ANSI colour
                 t.queue_response(b"\x1b[?62;22c".to_vec());
             }
-            ([b'>'], 'c') if arg(&ps, 0, 0) == 0 => {
+            ([b'>'], 'c') if arg(ps, 0, 0) == 0 => {
                 t.queue_response(b"\x1b[>0;0;0c".to_vec());
             }
             // XTVERSION
@@ -164,7 +192,7 @@ impl Perform for AnsiHandler<'_> {
             }
             // DECSCUSR
             ([b' '], 'q') => {
-                t.cursor_style = match arg(&ps, 0, 0) {
+                t.cursor_style = match arg(ps, 0, 0) {
                     0 | 1 | 2 => CursorStyle::Block,
                     3 | 4 => CursorStyle::Underline,
                     5 | 6 => CursorStyle::Bar,
@@ -174,23 +202,23 @@ impl Perform for AnsiHandler<'_> {
 
             // ── Scroll region / save-restore ──
             ([], 'r') => {
-                let top = arg(&ps, 0, 1) as usize;
-                let bot = arg(&ps, 1, t.rows as u16) as usize;
+                let top = arg(ps, 0, 1) as usize;
+                let bot = arg(ps, 1, t.rows as u16) as usize;
                 t.set_scroll_region(top.saturating_sub(1), bot.saturating_sub(1));
             }
             ([], 's') if ps.is_empty() || ps == [0] => t.save_cursor(),
             ([], 'u') => t.restore_cursor(),
 
             // ── Kitty keyboard protocol ──
-            ([b'>'], 'u') => t.kitty_push(arg(&ps, 0, 0) as u32),
-            ([b'<'], 'u') => t.kitty_pop(n1(&ps)),
-            ([b'='], 'u') => t.kitty_set(arg(&ps, 0, 0) as u32, arg(&ps, 1, 1) as u32),
+            ([b'>'], 'u') => t.kitty_push(arg(ps, 0, 0) as u32),
+            ([b'<'], 'u') => t.kitty_pop(n1(ps)),
+            ([b'='], 'u') => t.kitty_set(arg(ps, 0, 0) as u32, arg(ps, 1, 1) as u32),
             ([b'?'], 'u') => t.kitty_query(),
 
             // ── Window ops (title stack, size report) ──
-            ([], 't') => match arg(&ps, 0, 0) {
-                22 => t.push_title(arg(&ps, 1, 0)),
-                23 => t.pop_title(arg(&ps, 1, 0)),
+            ([], 't') => match arg(ps, 0, 0) {
+                22 => t.push_title(arg(ps, 1, 0)),
+                23 => t.pop_title(arg(ps, 1, 0)),
                 18 => {
                     let r = format!("\x1b[8;{};{}t", t.rows, t.cols);
                     t.queue_response(r.into_bytes());
@@ -357,87 +385,99 @@ impl AnsiHandler<'_> {
     /// SGR. Works on the raw `Params` so colon sub-parameters
     /// (`38:2::r:g:b`, `4:3`, ...) can be told apart from `;`-separated ones.
     fn apply_sgr(&mut self, params: &Params) {
-        let groups: Vec<&[u16]> = params.iter().collect();
-        let t = &mut *self.terminal;
-        if groups.is_empty() {
-            t.fg = Color::Default;
-            t.bg = Color::Default;
-            t.attrs = Attrs::default();
-            return;
-        }
-        let mut i = 0;
-        while i < groups.len() {
-            let g = groups[i];
-            let code = g.first().copied().unwrap_or(0);
-            match code {
-                0 => {
-                    t.fg = Color::Default;
-                    t.bg = Color::Default;
-                    t.attrs = Attrs::default();
-                }
-                1 => t.attrs.bold = true,
-                2 => t.attrs.dim = true,
-                3 => t.attrs.italic = true,
-                4 => {
-                    let style = if g.len() > 1 {
-                        match g[1] {
-                            0 => UnderlineStyle::None,
-                            2 => UnderlineStyle::Double,
-                            3 => UnderlineStyle::Curly,
-                            4 => UnderlineStyle::Dotted,
-                            5 => UnderlineStyle::Dashed,
-                            _ => UnderlineStyle::Single,
-                        }
-                    } else {
-                        UnderlineStyle::Single
-                    };
-                    t.attrs.underline = style != UnderlineStyle::None;
-                    t.attrs.underline_style = style;
-                }
-                5 | 6 => t.attrs.blink = true,
-                7 => t.attrs.reverse = true,
-                8 => t.attrs.hidden = true,
-                9 => t.attrs.strikethrough = true,
-                21 => {
-                    t.attrs.underline = true;
-                    t.attrs.underline_style = UnderlineStyle::Double;
-                }
-                22 => {
-                    t.attrs.bold = false;
-                    t.attrs.dim = false;
-                }
-                23 => t.attrs.italic = false,
-                24 => {
-                    t.attrs.underline = false;
-                    t.attrs.underline_style = UnderlineStyle::None;
-                }
-                25 => t.attrs.blink = false,
-                27 => t.attrs.reverse = false,
-                28 => t.attrs.hidden = false,
-                29 => t.attrs.strikethrough = false,
-                30..=37 => t.fg = Color::Indexed((code - 30) as u8),
-                38 | 48 | 58 => {
-                    if let Some((color, extra)) = parse_extended_color(&groups, i) {
-                        match code {
-                            38 => t.fg = color,
-                            48 => t.bg = color,
-                            _ => t.attrs.underline_color = Some(color),
-                        }
-                        i += extra;
-                    }
-                }
-                39 => t.fg = Color::Default,
-                40..=47 => t.bg = Color::Indexed((code - 40) as u8),
-                49 => t.bg = Color::Default,
-                53 => t.attrs.overline = true,
-                55 => t.attrs.overline = false,
-                59 => t.attrs.underline_color = None,
-                90..=97 => t.fg = Color::Indexed((code - 90 + 8) as u8),
-                100..=107 => t.bg = Color::Indexed((code - 100 + 8) as u8),
-                _ => {}
+        let mut groups: [&[u16]; 32] = [&[]; 32];
+        let mut n = 0;
+        for g in params.iter() {
+            if n == 32 {
+                break;
             }
-            i += 1;
+            groups[n] = g;
+            n += 1;
         }
+        apply_sgr_groups(self.terminal, &groups[..n]);
+    }
+}
+
+/// Apply SGR parameter groups (each group: the value plus its `:` sub-values).
+pub(super) fn apply_sgr_groups(t: &mut Terminal, groups: &[&[u16]]) {
+    if groups.is_empty() {
+        t.fg = Color::Default;
+        t.bg = Color::Default;
+        t.attrs = Attrs::default();
+        return;
+    }
+    let mut i = 0;
+    while i < groups.len() {
+        let g = groups[i];
+        let code = g.first().copied().unwrap_or(0);
+        match code {
+            0 => {
+                t.fg = Color::Default;
+                t.bg = Color::Default;
+                t.attrs = Attrs::default();
+            }
+            1 => t.attrs.bold = true,
+            2 => t.attrs.dim = true,
+            3 => t.attrs.italic = true,
+            4 => {
+                let style = if g.len() > 1 {
+                    match g[1] {
+                        0 => UnderlineStyle::None,
+                        2 => UnderlineStyle::Double,
+                        3 => UnderlineStyle::Curly,
+                        4 => UnderlineStyle::Dotted,
+                        5 => UnderlineStyle::Dashed,
+                        _ => UnderlineStyle::Single,
+                    }
+                } else {
+                    UnderlineStyle::Single
+                };
+                t.attrs.underline = style != UnderlineStyle::None;
+                t.attrs.underline_style = style;
+            }
+            5 | 6 => t.attrs.blink = true,
+            7 => t.attrs.reverse = true,
+            8 => t.attrs.hidden = true,
+            9 => t.attrs.strikethrough = true,
+            21 => {
+                t.attrs.underline = true;
+                t.attrs.underline_style = UnderlineStyle::Double;
+            }
+            22 => {
+                t.attrs.bold = false;
+                t.attrs.dim = false;
+            }
+            23 => t.attrs.italic = false,
+            24 => {
+                t.attrs.underline = false;
+                t.attrs.underline_style = UnderlineStyle::None;
+            }
+            25 => t.attrs.blink = false,
+            27 => t.attrs.reverse = false,
+            28 => t.attrs.hidden = false,
+            29 => t.attrs.strikethrough = false,
+            30..=37 => t.fg = Color::Indexed((code - 30) as u8),
+            38 | 48 | 58 => {
+                if let Some((color, extra)) = parse_extended_color(groups, i) {
+                    match code {
+                        38 => t.fg = color,
+                        48 => t.bg = color,
+                        _ => t.attrs.underline_color = Some(color),
+                    }
+                    i += extra;
+                }
+            }
+            39 => t.fg = Color::Default,
+            40..=47 => t.bg = Color::Indexed((code - 40) as u8),
+            49 => t.bg = Color::Default,
+            53 => t.attrs.overline = true,
+            55 => t.attrs.overline = false,
+            59 => t.attrs.underline_color = None,
+            90..=97 => t.fg = Color::Indexed((code - 90 + 8) as u8),
+            100..=107 => t.bg = Color::Indexed((code - 100 + 8) as u8),
+            _ => {}
+        }
+        i += 1;
     }
 }
 

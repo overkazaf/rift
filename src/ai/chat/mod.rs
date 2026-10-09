@@ -89,6 +89,8 @@ pub enum Target {
     /// Remove pending context chip.
     ChipX(usize),
     Composer,
+    /// The LOCAL / CLOUD badge in the header: opens the Privacy Report.
+    Privacy,
 }
 
 /// Geometry of the last rendered frame; used for hit-testing and scrolling.
@@ -113,6 +115,9 @@ pub struct ChatUi {
     pub ratio: f32,
     /// Model name shown in the header.
     pub model: String,
+    /// Header badge: `Some(true)` = LOCAL (loopback endpoint), `Some(false)` =
+    /// CLOUD, `None` = AI not configured.
+    pub local: Option<bool>,
     pub session: ChatSession,
     pub composer: Composer,
     /// Context attached to the composer (shown as removable chips).
@@ -146,6 +151,7 @@ impl ChatUi {
             focused: false,
             ratio: DEFAULT_RATIO,
             model: String::new(),
+            local: None,
             session: ChatSession::new(),
             composer: Composer::new(),
             pending_ctx: Vec::new(),
@@ -264,10 +270,18 @@ pub fn toggle(app: &mut App) {
     }
 }
 
+/// Update the header's model name and LOCAL / CLOUD badge from the model that
+/// would answer a chat message right now.
+pub fn refresh_header(app: &mut App) {
+    let cfg = crate::ai::local::routed(app, crate::ai::local::Feature::Chat).unwrap_or_else(|| app.llm.config.clone());
+    app.chat.model = cfg.model.clone();
+    app.chat.local = cfg.enabled.then(|| crate::ai::local::routing::is_local(&cfg));
+}
+
 /// Show the sidebar and focus the composer.
 pub fn open(app: &mut App) {
     let was_visible = app.chat.visible;
-    app.chat.model = app.llm.config.model.clone();
+    refresh_header(app);
     app.chat.visible = true;
     app.chat.focused = true;
     if !was_visible {
@@ -325,11 +339,16 @@ pub fn new_chat(app: &mut App) {
 /// Append the turn and start streaming the answer.
 pub fn send(app: &mut App, req: AskRequest) {
     // Nothing leaves the machine unless AI is configured or consented to.
-    if !crate::ai::consent::allowed(app) {
-        app.chat.set_toast("AI is off: add [llm] to config.toml or accept the AI prompt");
+    // Chat follows `[ai] chat_provider`; it never falls back across local/cloud.
+    let Some(cfg) = crate::ai::local::routed(app, crate::ai::local::Feature::Chat) else {
+        app.chat.set_toast(if crate::ai::consent::allowed(app) {
+            "No model matches [ai] chat_provider (use \"default\", or pick one via AI: Select Model)"
+        } else {
+            "AI is off: add [llm] to config.toml or accept the AI prompt"
+        });
         app.request_redraw();
         return;
-    }
+    };
     // A new question supersedes an answer that is still streaming.
     if app.chat.stream.is_some() {
         cancel(app);
@@ -346,7 +365,6 @@ pub fn send(app: &mut App, req: AskRequest) {
     let cwd = app.wm.active_pane().terminal.cwd.clone();
     let profile = app.llm.profile.summary();
     let proxy = app.wm.get_proxy();
-    let cfg = app.llm.config.clone();
     app.chat.stream = Some(stream::spawn(
         &cfg,
         move || {
@@ -466,8 +484,11 @@ fn finish_turn(app: &mut App, cancelled: bool) {
                 app.wm.active_pane().terminal.cwd.clone().unwrap_or(ctx.cwd),
                 ctx.git_branch.map(|b| format!(", git branch: {b}")).unwrap_or_default(),
             );
-            app.advisor.review_command(&cmd, &context, &app.llm.config);
-            app.chat.advised = Some(cmd);
+            // The reviewer sees the command, so it follows the chat's routing.
+            if let Some(cfg) = crate::ai::local::routed(app, crate::ai::local::Feature::Chat) {
+                app.advisor.review_command(&cmd, &context, &cfg);
+                app.chat.advised = Some(cmd);
+            }
         }
     }
 }
@@ -614,6 +635,7 @@ fn activate(app: &mut App, t: Target) {
             }
         }
         Target::Composer => {}
+        Target::Privacy => crate::ui::confirm::show_privacy_report(app),
     }
 }
 

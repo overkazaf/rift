@@ -135,7 +135,7 @@ impl Advisor {
 
 fn request_review(config: &LlmConfig, cmd: &str, context: &str) -> Result<AdvisorReview, String> {
     let prompt = build_prompt(cmd, context);
-    let text = super::backend::complete_simple(config, &prompt)?;
+    let text = super::backend::complete_structured(config, &prompt, super::local::Feature::Advisor)?;
     parse_review(&text)
 }
 

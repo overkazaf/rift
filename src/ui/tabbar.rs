@@ -133,6 +133,8 @@ pub struct ChromeUi {
     pub tab_hover: Option<TabHit>,
     pub dragging_tab: Option<usize>,
     pub scrollbar: Option<crate::ui::scrollbar::BarDraw>,
+    /// MCP clients currently connected (draws "MCP · n client(s)" in the tab bar).
+    pub mcp_clients: u16,
 }
 
 impl ChromeUi {
@@ -145,7 +147,9 @@ impl ChromeUi {
             Some(TabHit::Plus) => 3,
         };
         let drag = self.dragging_tab.map_or(0, |i| i as u64 + 1);
-        hover.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ drag.wrapping_mul(0xC2B2_AE3D_27D4_EB4F)
+        hover.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            ^ drag.wrapping_mul(0xC2B2_AE3D_27D4_EB4F)
+            ^ (self.mcp_clients as u64).wrapping_mul(0x1656_67B1_9E37_79F9)
     }
 }
 

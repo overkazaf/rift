@@ -111,6 +111,9 @@ pub fn try_intercept(app: &mut App, event: &KeyEvent, event_loop: &ActiveEventLo
     if app.process_tree.visible {
         return handle_proctree(app, event);
     }
+    if app.mcp.overlay.visible {
+        return handle_mcp_activity(app, event);
+    }
     if app.system_info.visible {
         return handle_sysinfo(app, event);
     }
@@ -491,6 +494,7 @@ pub fn open_command_palette(app: &mut App) {
             .map(|h| SshHostInfo { detail: format!("{}@{}:{}", h.user, h.host, h.port), alias: h.alias })
             .collect(),
         font_size: app.config.font_size,
+        models: crate::ai::local::picker::current_options(app),
     };
     app.command_palette.open(ctx);
 }
@@ -668,6 +672,9 @@ fn dispatch_palette_action(app: &mut App, action: PaletteAction, event_loop: &Ac
             super::shortcuts::sync_webview_for_tab(app);
             app.update_title();
         }
+        PaletteAction::SelectModel(choice) => crate::ai::local::picker::select(app, &choice),
+        PaletteAction::PrivacyReport => crate::ui::confirm::show_privacy_report(app),
+        PaletteAction::McpActivity => app.mcp.overlay.toggle(),
         PaletteAction::Template(_) => {}
     }
 }
@@ -778,6 +785,22 @@ fn handle_netmon(app: &mut App, event: &KeyEvent) -> bool {
         _ => return true,
     };
     app.network_monitor.handle_key(key);
+    app.request_redraw();
+    true
+}
+
+fn handle_mcp_activity(app: &mut App, event: &KeyEvent) -> bool {
+    use crate::mcp::overlay::OverlayKey;
+    let key = match event.logical_key {
+        Key::Named(NamedKey::Escape) => OverlayKey::Escape,
+        Key::Named(NamedKey::ArrowUp) => OverlayKey::Up,
+        Key::Named(NamedKey::ArrowDown) => OverlayKey::Down,
+        Key::Named(NamedKey::PageUp) => OverlayKey::PageUp,
+        Key::Named(NamedKey::PageDown) => OverlayKey::PageDown,
+        _ => return true,
+    };
+    let total = app.mcp.shared.as_ref().map_or(0, |s| s.activity_len());
+    app.mcp.overlay.handle_key(key, total);
     app.request_redraw();
     true
 }

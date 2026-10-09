@@ -33,6 +33,7 @@ use std::time::{Duration, Instant};
 use winit::event::KeyEvent;
 use winit::keyboard::{Key, NamedKey};
 
+use crate::ai::local::Feature;
 use crate::ai::LlmConfig;
 use crate::app::App;
 use crate::terminal::Terminal;
@@ -56,6 +57,7 @@ const CACHE_CAP: usize = 64;
 /// Lines of block output captured for context.
 const MAX_OUTPUT_LINES: usize = 200;
 const MAX_SCREEN_LINES: usize = 60;
+pub const NO_ROUTE_MSG: &str = "No model matches this feature's provider setting ([ai] fix_provider / nl_provider)";
 pub const UNCONFIGURED_MSG: &str = "Configure an AI provider in Preferences to enable AI";
 
 // ── Pure helpers ──
@@ -65,7 +67,7 @@ pub const UNCONFIGURED_MSG: &str = "Configure an AI provider in Preferences to e
 /// This only says a provider is reachable. Whether the user *agreed* to use
 /// it is [`crate::ai::consent::allowed`]; the inline entry points use [`ai_ok`].
 pub fn llm_ready(c: &LlmConfig) -> bool {
-    let local = c.api_url.contains("localhost") || c.api_url.contains("127.0.0.1");
+    let local = crate::ai::local::usage::is_loopback_url(&c.api_url);
     c.enabled && (c.api_key.as_deref().is_some_and(|k| !k.is_empty()) || c.provider == "ollama" || local)
 }
 
@@ -271,6 +273,7 @@ pub fn overlay_open(app: &App) -> bool {
         || app.docker.visible
         || app.network_monitor.visible
         || app.process_tree.visible
+        || app.mcp.overlay.visible
         || app.system_info.visible
         || app.port_dashboard.visible
         || app.regex_playground.visible
@@ -282,12 +285,21 @@ pub fn overlay_open(app: &App) -> bool {
 /// Gate for the inline AI paths (`#`, auto-fix, refine): provider usable AND
 /// consent granted. Nothing is sent (and a `#` line stays an ordinary shell
 /// comment) otherwise; `nag` shows the one-time "not configured" toast.
-fn ai_ok(app: &mut App, nag: bool) -> bool {
-    if crate::ai::consent::allowed(app) {
+///
+/// "Provider usable" is judged per feature: auto-fix and `#` may be routed to
+/// a local model even when the selected default is not usable.
+fn ai_ok(app: &mut App, nag: bool, feature: Feature) -> bool {
+    if crate::ai::local::routed(app, feature).is_some() {
         return true;
     }
-    if nag && !llm_ready(&app.llm.config) {
-        toast_unconfigured(app);
+    if nag {
+        if !llm_ready(&app.llm.config) {
+            toast_unconfigured(app);
+        } else if crate::ai::consent::allowed(app) {
+            // Usable default, but the feature is pinned to a provider kind we lack.
+            app.inline_ai.set_toast(NO_ROUTE_MSG);
+            app.request_redraw();
+        }
     }
     false
 }
@@ -455,7 +467,7 @@ fn submit_popover(app: &mut App) {
             }
             let query = q.to_string();
             app.inline_ai.popover = None;
-            if ai_ok(app, true) {
+            if ai_ok(app, true, Feature::Nl) {
                 start_nl(app, query, previous.clone(), Some(previous));
             }
         }
@@ -671,17 +683,18 @@ pub fn on_enter(app: &mut App) -> bool {
     let Some(typed) = app.wm.active_pane().terminal.typed_input() else { return false };
     let Some(query) = nl::detect_query(&typed) else { return false };
     // No consent / no provider: the line goes to the shell untouched.
-    if !ai_ok(app, false) {
+    if !ai_ok(app, false, Feature::Nl) {
         return false;
     }
     start_nl(app, query, typed, None);
     true
 }
 
-fn spawn_request(config: LlmConfig, prompt: String) -> Receiver<Result<String, String>> {
+fn spawn_request(config: LlmConfig, prompt: String, feature: Feature) -> Receiver<Result<String, String>> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(crate::ai::backend::complete_simple(&config, &prompt));
+        // Both prompts ask for one small JSON object.
+        let _ = tx.send(crate::ai::backend::complete_structured(&config, &prompt, feature));
         crate::wake::wake();
     });
     rx
@@ -689,7 +702,8 @@ fn spawn_request(config: LlmConfig, prompt: String) -> Receiver<Result<String, S
 
 /// Erase the prompt line and ask the model for a command.
 fn start_nl(app: &mut App, query: String, restore: String, previous: Option<String>) {
-    let config = app.llm.config.clone();
+    // Strict: never fall back to the default model when routing says no.
+    let Some(config) = crate::ai::local::routed(app, Feature::Nl) else { return };
     let (os, shell) = env_os_shell();
     let pane = app.wm.active_pane_mut();
     let prompt = nl::nl_prompt(&query, previous.as_deref(), &cwd_of(&pane.terminal), &os, &shell);
@@ -699,7 +713,7 @@ fn start_nl(app: &mut App, query: String, restore: String, previous: Option<Stri
     app.inline_ai.nl = NlState::Pending(NlPending {
         query,
         restore,
-        rx: spawn_request(config, prompt),
+        rx: spawn_request(config, prompt, Feature::Nl),
         started: Instant::now(),
         pane_id,
     });
@@ -820,7 +834,7 @@ fn detect_failure(app: &mut App) {
     if !finished_recently(last.timestamp, last.duration_ms, unix_now()) || fix::should_skip(&last.command, exit) {
         return;
     }
-    if !ai_ok(app, true) {
+    if !ai_ok(app, true, Feature::Fix) {
         return;
     }
     let Some(snap) = snap_block_of(&app.wm.active_pane().terminal, sig.count - 1) else { return };
@@ -839,7 +853,8 @@ fn detect_failure(app: &mut App) {
     let (os, shell) = env_os_shell();
     let cwd = snap.cwd.clone().unwrap_or_else(|| cwd_of(&app.wm.active_pane().terminal));
     let prompt = fix::fix_prompt(&snap.command, exit, &snap.output, &cwd, &os, &shell);
-    let rx = spawn_request(app.llm.config.clone(), prompt);
+    let Some(config) = crate::ai::local::routed(app, Feature::Fix) else { return };
+    let rx = spawn_request(config, prompt, Feature::Fix);
     app.inline_ai.fix.pending = Some(PendingFix { rx, key, sig, snap });
 }
 

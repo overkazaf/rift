@@ -107,6 +107,9 @@ impl SearchOverlay {
         let sb = scrollback.len();
         let total = sb + grid.len();
         let row_at = |i: usize| -> &[Cell] { if i < sb { &scrollback[i] } else { &grid[i - sb] } };
+        // Scrollback rows are stored without their trailing default blanks;
+        // search them as if they were still full width.
+        let cols = grid.first().map_or(0, |r| r.len());
 
         // (row, first cell col, cell col just past the glyph) per searchable char.
         let mut chars: Vec<char> = Vec::new();
@@ -132,7 +135,13 @@ impl SearchOverlay {
                     pos.push((i, col, next));
                     col = next;
                 }
-                let wraps = row.last().map_or(false, |c| c.wrap);
+                let wraps = row.last().map_or(false, |c| c.wrap());
+                if !wraps {
+                    for col in row.len()..cols {
+                        chars.push(' ');
+                        pos.push((i, col, col + 1));
+                    }
+                }
                 i += 1;
                 if !wraps || i >= total {
                     break;

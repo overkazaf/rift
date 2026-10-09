@@ -9,7 +9,7 @@ pub mod images;
 pub mod semantic;
 
 pub use ansi::AnsiHandler;
-pub use grid::{Attrs, Cell, Color};
+pub use grid::{Attrs, Cell, Color, Grid};
 pub use extras::{Hyperlink, Notification};
 pub use reflow::{MAX_COLS, MAX_ROWS};
 pub use images::{ImageCell, ImageStore, TermImage};
@@ -98,7 +98,7 @@ enum ApcScan {
 }
 
 pub struct Terminal {
-    pub grid: Vec<Vec<Cell>>,
+    pub grid: Grid,
     pub cols: usize,
     pub rows: usize,
 
@@ -119,7 +119,7 @@ pub struct Terminal {
     pub response_queue: Vec<Vec<u8>>,
 
     saved: SavedCursor,
-    alt_grid: Vec<Vec<Cell>>,
+    alt_grid: Grid,
     alt_cursor: (usize, usize),
     using_alt_screen: bool,
     wrap_next: bool,
@@ -183,14 +183,26 @@ pub struct Terminal {
     /// Bumped whenever OSC 4 / 104 changes the palette overrides.
     pub palette_gen: u32,
     last_printed: Option<char>,
+    /// Interned (link, underline colour) id stamped on new cells, and the
+    /// inputs it was computed from.
+    pen_x: u16,
+    pen_link: u16,
+    pen_ulc: Option<Color>,
+    /// Spare scrollback row buffers by capacity class (see `take_row_buf`).
+    row_pool: Vec<Vec<Vec<Cell>>>,
 }
+
+/// Scrollback rows are allocated in multiples of this many cells.
+const ROW_GRANULE: usize = 8;
+/// Spare buffers kept per capacity class.
+const ROW_POOL_PER_CLASS: usize = 32;
 
 impl Terminal {
     pub fn new(cols: usize, rows: usize) -> Self {
         let cols = cols.clamp(1, MAX_COLS);
         let rows = rows.clamp(1, MAX_ROWS);
-        let grid = vec![vec![Cell::default(); cols]; rows];
-        let alt_grid = vec![vec![Cell::default(); cols]; rows];
+        let grid = Grid::blank(cols, rows);
+        let alt_grid = Grid::blank(cols, rows);
         let mut tab_stops = vec![false; cols];
         for i in (0..cols).step_by(8) {
             tab_stops[i] = true;
@@ -261,7 +273,22 @@ impl Terminal {
             palette_overrides: vec![None; 256],
             palette_gen: 0,
             last_printed: None,
+            pen_x: 0,
+            pen_link: 0,
+            pen_ulc: None,
+            row_pool: Vec::new(),
         }
+    }
+
+    /// Extra id (hyperlink + SGR 58 colour) for newly written cells.
+    #[inline]
+    fn pen_extra(&mut self) -> u16 {
+        if self.pen_link != self.cur_link || self.pen_ulc != self.attrs.underline_color {
+            self.pen_link = self.cur_link;
+            self.pen_ulc = self.attrs.underline_color;
+            self.pen_x = grid::intern_extra("", self.cur_link, self.pen_ulc).unwrap_or(0);
+        }
+        self.pen_x
     }
 
     // ── Character output ──
@@ -272,16 +299,17 @@ impl Terminal {
         // Apply charset mapping (G0/G1 line drawing)
         let charset = if self.active_charset == 0 { self.g0_charset } else { self.g1_charset };
         let c = if charset == Charset::LineDrawing { map_line_drawing(c) } else { c };
+        let ascii = (' '..='~').contains(&c);
 
         self.scroll_offset = 0;
 
         // Combining marks, variation selectors, ZWJ sequences, skin tones and
         // regional-indicator pairs join the previous cell instead of advancing.
-        if self.try_attach(c) {
+        if !ascii && self.try_attach(c) {
             return;
         }
 
-        let char_width = c.width().unwrap_or(1).max(1).min(self.cols);
+        let char_width = if ascii { 1 } else { c.width().unwrap_or(1).max(1).min(self.cols) };
 
         if self.wrap_next {
             self.wrap_next = false;
@@ -302,26 +330,28 @@ impl Terminal {
 
         // Insert mode: shift existing chars right before writing
         if self.insert_mode {
-            let row = &mut self.grid[self.cursor_row];
+            let r = self.cursor_row;
+            let row = &mut self.grid.rows[r];
             for _ in 0..char_width {
                 if self.cursor_col < row.len() {
                     row.pop();
                     row.insert(self.cursor_col, Cell::default());
                 }
             }
+            self.grid.raise(r, self.cols);
         }
 
         let col = self.cursor_col;
-        let mut cell = Cell::blank_with(self.fg, self.bg);
-        cell.c = c;
-        cell.attrs = self.attrs;
-        cell.link = self.cur_link;
+        let x = self.pen_extra();
+        let cell = Cell::with_pen(c, self.fg, self.bg, self.attrs.bits(), x);
         let cols = self.cols;
-        let row = &mut self.grid[self.cursor_row];
+        let r = self.cursor_row;
+        let row = &mut self.grid.rows[r];
         // Overwriting the right half of a wide char orphans its left half.
-        if row[col].c == '\0' && col > 0 {
+        // (An end-of-row spacer is not the right half of anything.)
+        if row[col].c == '\0' && !row[col].is_spacer() && col > 0 {
             row[col - 1].c = ' ';
-            row[col - 1].ext = 0;
+            row[col - 1].clear_cluster();
         }
         row[col] = cell;
         // Wide char: mark next cell as continuation placeholder
@@ -332,9 +362,10 @@ impl Terminal {
         }
         // Overwriting the left half of a wide char orphans its continuation.
         let after = col + char_width;
-        if after < cols && row[after].c == '\0' && row[after].ext != u16::MAX {
+        if after < cols && row[after].c == '\0' && !row[after].is_spacer() {
             row[after].c = ' ';
         }
+        self.grid.raise(r, (col + char_width).min(cols));
         self.last_printed = Some(c);
 
         self.cursor_col += char_width;
@@ -350,14 +381,16 @@ impl Terminal {
     fn soft_wrap(&mut self, spacer: bool) {
         let last = self.cols - 1;
         let (fg, bg) = (self.fg, self.bg);
-        let row = &mut self.grid[self.cursor_row];
+        let r = self.cursor_row;
+        let row = &mut self.grid.rows[r];
         if spacer && self.cursor_col <= last {
             let mut sp = Cell::blank_with(fg, bg);
             sp.c = '\0';
-            sp.ext = u16::MAX;
+            sp.set_spacer(true);
             row[last] = sp;
         }
-        row[last].wrap = true;
+        row[last].set_wrap(true);
+        self.grid.raise(r, last + 1);
         self.cursor_col = 0;
         self.linefeed();
     }
@@ -398,12 +431,12 @@ impl Terminal {
         if prev.c == '\0' {
             return zero_w;
         }
-        let prev_extra = if prev.ext != 0 { grid::cluster_extra(prev.ext).unwrap_or_default() } else { String::new() };
+        let prev_extra = prev.extra();
         let joined = prev_extra.ends_with('\u{200d}');
         let attach = if zero_w || joined {
             true
         } else if ri {
-            (0x1F1E6..=0x1F1FF).contains(&(prev.c as u32)) && prev.ext == 0
+            (0x1F1E6..=0x1F1FF).contains(&(prev.c as u32)) && !prev.has_cluster()
         } else if tone {
             prev.c as u32 >= 0x203C
         } else {
@@ -415,9 +448,7 @@ impl Terminal {
         if prev_extra.chars().count() < 16 {
             let mut ne = prev_extra;
             ne.push(c);
-            if let Some(id) = grid::intern_cluster(&ne) {
-                self.grid[r][col].ext = id;
-            }
+            self.grid[r][col].set_cluster(&ne);
         }
         // Emoji presentation (VS16) and regional-indicator pairs are wide.
         let widen = (c == '\u{fe0f}' && prev.c as u32 >= 0xA9) || ri;
@@ -430,8 +461,8 @@ impl Terminal {
         {
             let mut cont = prev;
             cont.c = '\0';
-            cont.ext = 0;
-            cont.wrap = false;
+            cont.clear_cluster();
+            cont.set_wrap(false);
             self.grid[r][col + 1] = cont;
             self.cursor_col += 1;
             if self.cursor_col >= self.cols {
@@ -617,27 +648,25 @@ impl Terminal {
 
     pub fn erase_display(&mut self, mode: u16) {
         let blank = Cell::blank_with(self.fg, self.bg);
+        let cols = self.cols;
         match mode {
             0 => {
-                for col in self.cursor_col..self.cols {
-                    self.grid[self.cursor_row][col] = blank;
-                }
+                self.grid.fill_span(self.cursor_row, self.cursor_col, cols, blank);
                 for row in (self.cursor_row + 1)..self.rows {
-                    self.grid[row].fill(blank);
+                    self.grid.fill_row(row, blank);
                 }
             }
             1 => {
                 for row in 0..self.cursor_row {
-                    self.grid[row].fill(blank);
+                    self.grid.fill_row(row, blank);
                 }
-                for col in 0..=self.cursor_col.min(self.cols - 1) {
-                    self.grid[self.cursor_row][col] = blank;
-                }
+                let end = self.cursor_col.min(cols - 1) + 1;
+                self.grid.fill_span(self.cursor_row, 0, end, blank);
             }
             3 => self.clear_scrollback(),
             2 => {
-                for row in &mut self.grid {
-                    row.fill(blank);
+                for row in 0..self.grid.rows.len() {
+                    self.grid.fill_row(row, blank);
                 }
             }
             _ => {}
@@ -646,18 +675,14 @@ impl Terminal {
 
     pub fn erase_line(&mut self, mode: u16) {
         let blank = Cell::blank_with(self.fg, self.bg);
+        let (r, cols) = (self.cursor_row, self.cols);
         match mode {
-            0 => {
-                for col in self.cursor_col..self.cols {
-                    self.grid[self.cursor_row][col] = blank;
-                }
-            }
+            0 => self.grid.fill_span(r, self.cursor_col, cols, blank),
             1 => {
-                for col in 0..=self.cursor_col.min(self.cols - 1) {
-                    self.grid[self.cursor_row][col] = blank;
-                }
+                let end = self.cursor_col.min(cols - 1) + 1;
+                self.grid.fill_span(r, 0, end, blank);
             }
-            2 => self.grid[self.cursor_row].fill(blank),
+            2 => self.grid.fill_row(r, blank),
             _ => {}
         }
     }
@@ -665,9 +690,7 @@ impl Terminal {
     pub fn erase_chars(&mut self, n: usize) {
         let blank = Cell::blank_with(self.fg, self.bg);
         let end = (self.cursor_col + n).min(self.cols);
-        for col in self.cursor_col..end {
-            self.grid[self.cursor_row][col] = blank;
-        }
+        self.grid.fill_span(self.cursor_row, self.cursor_col, end, blank);
     }
 
     // ── Insert / Delete ──
@@ -679,9 +702,11 @@ impl Terminal {
         if n == 0 {
             return;
         }
-        let row = &mut self.grid[self.cursor_row];
+        let r = self.cursor_row;
+        let row = &mut self.grid.rows[r];
         row[col..].rotate_right(n);
         row[col..col + n].fill(blank);
+        self.grid.raise(r, self.cols);
         self.wrap_next = false;
     }
 
@@ -693,9 +718,13 @@ impl Terminal {
             return;
         }
         let cols = self.cols;
-        let row = &mut self.grid[self.cursor_row];
+        let r = self.cursor_row;
+        let row = &mut self.grid.rows[r];
         row[col..].rotate_left(n);
         row[cols - n..].fill(blank);
+        if !blank.is_default_blank() {
+            self.grid.raise(r, cols);
+        }
         self.wrap_next = false;
     }
 
@@ -705,11 +734,13 @@ impl Terminal {
             self.cursor_col = 0;
             self.wrap_next = false;
             let blank = Cell::blank_with(self.fg, self.bg);
-            for _ in 0..n {
-                if self.cursor_row <= self.scroll_bottom {
-                    self.grid.remove(self.scroll_bottom);
-                    self.grid.insert(self.cursor_row, vec![blank; self.cols]);
-                }
+            // The bottom `n` rows fall off; their allocations become the new blank rows.
+            let (top, bottom) = (self.cursor_row, self.scroll_bottom);
+            self.grid.refresh_hints();
+            self.grid.rows[top..=bottom].rotate_right(n);
+            self.grid.hi[top..=bottom].rotate_right(n);
+            for r in top..top + n {
+                self.grid.fill_row(r, blank);
             }
         }
     }
@@ -720,11 +751,12 @@ impl Terminal {
             self.cursor_col = 0;
             self.wrap_next = false;
             let blank = Cell::blank_with(self.fg, self.bg);
-            for _ in 0..n {
-                if self.cursor_row <= self.scroll_bottom {
-                    self.grid.remove(self.cursor_row);
-                    self.grid.insert(self.scroll_bottom, vec![blank; self.cols]);
-                }
+            let (top, bottom) = (self.cursor_row, self.scroll_bottom);
+            self.grid.refresh_hints();
+            self.grid.rows[top..=bottom].rotate_left(n);
+            self.grid.hi[top..=bottom].rotate_left(n);
+            for r in bottom + 1 - n..=bottom {
+                self.grid.fill_row(r, blank);
             }
         }
     }
@@ -733,44 +765,94 @@ impl Terminal {
 
     pub fn scroll_up(&mut self, n: usize) {
         let n = n.min(self.scroll_bottom - self.scroll_top + 1);
+        if self.scroll_top >= self.scroll_bottom {
+            return;
+        }
+        let (top, bottom) = (self.scroll_top, self.scroll_bottom);
         let blank = Cell::blank_with(self.fg, self.bg);
+        let blank_is_default = blank.is_default_blank();
+        let keep_history = !self.using_alt_screen && self.max_scrollback > 0;
+        self.grid.refresh_hints();
         for _ in 0..n {
-            if self.scroll_top < self.scroll_bottom {
-                let removed = self.grid.remove(self.scroll_top);
-                // Recycle a row allocation instead of mallocing one per scrolled line:
-                // the row evicted from a full scrollback (or the discarded alt-screen
-                // row) becomes the new blank line.
-                let mut spare: Option<Vec<Cell>> = None;
+            // Rotate the top row to the bottom: only the row headers move, the
+            // cell storage stays put and is recycled as the new blank line.
+            self.grid.rows[top..=bottom].rotate_left(1);
+            self.grid.hi[top..=bottom].rotate_left(1);
+            if !keep_history {
                 if !self.using_alt_screen {
-                    self.scrollback.push_back(removed);
-                    if self.scrollback.len() > self.max_scrollback {
-                        spare = self.scrollback.pop_front();
-                        self.blocks.shift_lines(1);
-                    }
-                } else {
-                    spare = Some(removed);
+                    self.blocks.shift_lines(1);
                 }
-                let new_row = match spare {
-                    Some(mut r) => {
-                        r.clear();
-                        r.resize(self.cols, blank);
-                        r
-                    }
-                    None => vec![blank; self.cols],
-                };
-                self.grid.insert(self.scroll_bottom, new_row);
+                self.grid.fill_row(bottom, blank);
+                continue;
             }
+            // Scrollback keeps only the used part of the row (`hi` bounds it, so
+            // the blank tail is never even read), in a buffer recycled from the
+            // line evicted from the other end: no malloc/free per scrolled line.
+            let hi = self.grid.hi[bottom] as usize;
+            let keep = grid::trimmed_len(&self.grid.rows[bottom][..hi]);
+            if self.scrollback.len() >= self.max_scrollback {
+                self.blocks.shift_lines(1);
+                if let Some(old) = self.scrollback.pop_front() {
+                    self.recycle_row(old);
+                }
+            }
+            let mut stored = self.take_row_buf(keep);
+            stored.extend_from_slice(&self.grid.rows[bottom][..keep]);
+            self.scrollback.push_back(stored);
+            // Cells at `hi..` are already default blanks.
+            if blank_is_default {
+                self.grid.rows[bottom][..hi].fill(blank);
+                self.grid.hi[bottom] = 0;
+            } else {
+                self.grid.fill_row(bottom, blank);
+            }
+        }
+    }
+
+    /// Capacity class (granule of 8 cells) a scrollback row of `len` cells is allocated in.
+    #[inline]
+    fn row_class(len: usize) -> usize {
+        len.div_ceil(ROW_GRANULE)
+    }
+
+    /// An empty buffer able to hold `len` cells, from the spare pool when possible.
+    fn take_row_buf(&mut self, len: usize) -> Vec<Cell> {
+        let class = Self::row_class(len);
+        if let Some(v) = self.row_pool.get_mut(class).and_then(|p| p.pop()) {
+            return v;
+        }
+        Vec::with_capacity(class * ROW_GRANULE)
+    }
+
+    /// Return an evicted scrollback row's buffer to the spare pool.
+    fn recycle_row(&mut self, mut v: Vec<Cell>) {
+        v.clear();
+        // Only buffers allocated by `take_row_buf` (capacity an exact class
+        // multiple) are pooled; others (reflow, session restore) are freed.
+        let cap = v.capacity();
+        if cap == 0 || cap % ROW_GRANULE != 0 {
+            return;
+        }
+        let class = cap / ROW_GRANULE;
+        if self.row_pool.len() <= class {
+            self.row_pool.resize_with(class + 1, Vec::new);
+        }
+        if self.row_pool[class].len() < ROW_POOL_PER_CLASS {
+            self.row_pool[class].push(v);
         }
     }
 
     pub fn scroll_down(&mut self, n: usize) {
         let n = n.min(self.scroll_bottom - self.scroll_top + 1);
+        if self.scroll_top >= self.scroll_bottom {
+            return;
+        }
         let blank = Cell::blank_with(self.fg, self.bg);
+        self.grid.refresh_hints();
         for _ in 0..n {
-            if self.scroll_top < self.scroll_bottom {
-                self.grid.remove(self.scroll_bottom);
-                self.grid.insert(self.scroll_top, vec![blank; self.cols]);
-            }
+            self.grid.rows[self.scroll_top..=self.scroll_bottom].rotate_right(1);
+            self.grid.hi[self.scroll_top..=self.scroll_bottom].rotate_right(1);
+            self.grid.fill_row(self.scroll_top, blank);
         }
     }
 
@@ -793,8 +875,8 @@ impl Terminal {
             self.cursor_row = 0;
             self.cursor_col = 0;
             self.using_alt_screen = true;
-            for row in &mut self.grid {
-                row.fill(Cell::default());
+            for r in 0..self.grid.rows.len() {
+                self.grid.fill_row(r, Cell::default());
             }
         }
     }
@@ -896,8 +978,8 @@ impl Terminal {
         self.scrollback.clear();
         self.scroll_offset = 0;
         let blank = Cell::blank_with(self.fg, self.bg);
-        for row in &mut self.grid {
-            row.fill(blank);
+        for r in 0..self.grid.rows.len() {
+            self.grid.fill_row(r, blank);
         }
         self.blocks.on_buffer_cleared(dropped);
     }

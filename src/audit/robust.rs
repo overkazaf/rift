@@ -19,6 +19,7 @@ impl Rng {
 
 #[test]
 fn terminal_resize_extremes() {
+    let _rss = super::rss_serial();
     let mut s = Soft::new("robust");
     for (c, r) in [(1usize, 1usize), (1, 100), (100, 1), (2, 2)] {
         let res = catch(move || {

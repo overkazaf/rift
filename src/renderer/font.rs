@@ -251,6 +251,7 @@ pub struct FontManager {
     pub baseline: usize,
     cache: HashMap<(char, u8), Vec<u8>>,
     wide_cache: HashMap<(char, u8), Vec<u8>>,
+    mark_cache: HashMap<(char, bool), Vec<u8>>,
     primary_path: PathBuf,
     /// Lazily loaded bold / italic / bold-italic faces (index = style bits;
     /// slot 0 unused). Outer `None` = not tried yet, inner `None` = no such
@@ -300,6 +301,7 @@ impl FontManager {
             baseline,
             cache: HashMap::new(),
             wide_cache: HashMap::new(),
+            mark_cache: HashMap::new(),
             primary_path: PathBuf::from(font_path),
             styled: [None, None, None, None],
             deco,
@@ -474,6 +476,78 @@ impl FontManager {
         }
         &self.wide_cache[&key]
     }
+}
+
+impl FontManager {
+    /// Coverage bitmap of a combining mark, sized for the base glyph's box
+    /// (`cell_width` or twice that when `wide`), positioned using the mark's
+    /// own metrics so it can be overlaid on the base glyph.
+    pub fn rasterize_mark(&mut self, c: char, wide: bool) -> &[u8] {
+        let key = (c, wide);
+        if !self.mark_cache.contains_key(&key) {
+            let bmp = self.render_mark(c, wide);
+            self.mark_cache.insert(key, bmp);
+        }
+        &self.mark_cache[&key]
+    }
+
+    fn render_mark(&mut self, c: char, wide: bool) -> Vec<u8> {
+        let (cw, ch, baseline) = (self.cell_width, self.cell_height, self.baseline);
+        let target_w = if wide { cw * 2 } else { cw };
+        let size = self.font_size;
+        let (metrics, bitmap) = match self.pick(c) {
+            Source::Primary => self.primary.rasterize(c, size),
+            Source::Fallback(i) => match &self.fallbacks[i].slot {
+                Slot::Loaded(f, fsize) => f.rasterize(c, *fsize),
+                _ => return vec![0u8; target_w * ch],
+            },
+            Source::None => return vec![0u8; target_w * ch],
+        };
+        place_mark(&metrics, &bitmap, target_w, ch, baseline)
+    }
+}
+
+/// True for code points that should be overlaid on the preceding glyph:
+/// zero-width combining marks, excluding joiners / variation selectors.
+pub fn is_overlay_mark(c: char) -> bool {
+    use unicode_width::UnicodeWidthChar;
+    let u = c as u32;
+    if matches!(u, 0x200B..=0x200F | 0x2060..=0x2064 | 0xFE00..=0xFE0F | 0xE0000..=0xE01EF) {
+        return false;
+    }
+    !c.is_control() && c.width() == Some(0)
+}
+
+/// Place a mark bitmap into a `target_w * ch` box. Zero-advance marks are
+/// designed to hang left of the pen (which sits after the base glyph), so
+/// they are offset from the right edge of the box; marks with an advance are
+/// drawn from the box origin using their own `xmin`. Out-of-box ink is
+/// shifted back inside.
+fn place_mark(m: &fontdue::Metrics, bitmap: &[u8], target_w: usize, ch: usize, baseline: usize) -> Vec<u8> {
+    let mut out = vec![0u8; target_w * ch];
+    if bitmap.is_empty() || m.width == 0 || m.height == 0 {
+        return out;
+    }
+    let pen = if m.advance_width.abs() < 0.5 { target_w as i32 } else { 0 };
+    let mut x0 = pen + m.xmin;
+    x0 = x0.min(target_w as i32 - m.width as i32).max(0);
+    let top = baseline as i32 - m.ymin - m.height as i32;
+    for gy in 0..m.height {
+        let cy = top + gy as i32;
+        if cy < 0 || cy >= ch as i32 {
+            continue;
+        }
+        for gx in 0..m.width {
+            let cx = x0 as usize + gx;
+            if cx >= target_w {
+                continue;
+            }
+            if let Some(&v) = bitmap.get(gy * m.width + gx) {
+                out[cy as usize * target_w + cx] = v;
+            }
+        }
+    }
+    out
 }
 
 /// Style bits for [`FontManager::rasterize_styled`].

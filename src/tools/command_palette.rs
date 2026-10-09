@@ -241,6 +241,8 @@ pub enum ParamKind {
     Cd,
     Shell,
     Ask,
+    /// `model <name>`: switch the AI model (local models first).
+    Model,
 }
 
 impl ParamKind {
@@ -253,6 +255,7 @@ impl ParamKind {
             ParamKind::Cd => "cd",
             ParamKind::Shell => ">",
             ParamKind::Ask => "?",
+            ParamKind::Model => "model",
         }
     }
 }
@@ -263,6 +266,7 @@ const PARAM_WORDS: &[(&str, ParamKind)] = &[
     ("open", ParamKind::Open),
     ("ssh", ParamKind::Ssh),
     ("cd", ParamKind::Cd),
+    ("model", ParamKind::Model),
 ];
 
 #[derive(Debug, PartialEq, Eq)]
@@ -429,6 +433,12 @@ pub enum PaletteAction {
     SwitchTab(usize),
     NextTab,
     PrevTab,
+    /// Switch the active AI model (local or cloud) and persist the choice.
+    SelectModel(crate::ai::local::picker::ModelChoice),
+    /// Show the AI Privacy Report overlay.
+    PrivacyReport,
+    /// "MCP Activity": what connected coding agents asked Rift to do.
+    McpActivity,
     /// Internal: completes the query to this keyword; never dispatched.
     Template(&'static str),
 }
@@ -477,6 +487,8 @@ pub struct PaletteContext {
     pub active_tab: usize,
     pub ssh_hosts: Vec<SshHostInfo>,
     pub font_size: f32,
+    /// Models for "AI: Select Model" (discovered local ones, then the cloud one).
+    pub models: Vec<crate::ai::local::picker::ModelOption>,
 }
 
 /// Live-preview request for the dispatcher (theme browsing).
@@ -766,6 +778,24 @@ impl CommandPalette {
             ParamKind::Ask if !arg.is_empty() => {
                 one(format!("Ask AI: {arg}"), Category::Ai, PaletteAction::AskAi(arg.to_string()))
             }
+            ParamKind::Model => {
+                let mut v: Vec<(i32, usize, Hit)> = Vec::new();
+                for (order, m) in self.ctx.models.iter().enumerate() {
+                    let Some(fm) = fuzzy_match(arg, &m.label) else { continue };
+                    v.push((fm.score, order, Hit {
+                        id: None,
+                        name: m.label.clone(),
+                        category: Category::Ai,
+                        shortcut: Some(if m.active { format!("{} - current", m.detail) } else { m.detail.clone() }),
+                        meta: true,
+                        action: PaletteAction::SelectModel(m.choice.clone()),
+                        matches: fm.indices,
+                        section: sec(Category::Ai),
+                    }));
+                }
+                v.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+                v.into_iter().map(|(_, _, h)| h).collect()
+            }
             ParamKind::Ssh => {
                 let mut v: Vec<(i32, usize, Hit)> = Vec::new();
                 for (order, h) in self.ctx.ssh_hosts.iter().enumerate() {
@@ -908,7 +938,7 @@ impl CommandPalette {
     /// Tab: complete a parameterised command keyword (or the highlighted theme / host).
     fn complete(&mut self) {
         if let Some((kind, _)) = &self.param {
-            if matches!(kind, ParamKind::Theme | ParamKind::Ssh) {
+            if matches!(kind, ParamKind::Theme | ParamKind::Ssh | ParamKind::Model) {
                 if let Some(h) = self.results.get(self.selected) {
                     let q = format!("{} {}", kind.keyword(), h.name);
                     self.set_query(&q);
@@ -1074,6 +1104,7 @@ impl CommandPalette {
             ParamKind::Cd => "Change directory in the active pane".to_string(),
             ParamKind::Shell => "Run a shell command in the active pane".to_string(),
             ParamKind::Ask => "Ask the AI assistant".to_string(),
+            ParamKind::Model => "Local models run on this machine (nothing is sent out); Enter switches".to_string(),
         };
         Some((kind.keyword(), desc))
     }
@@ -1087,6 +1118,7 @@ impl CommandPalette {
             Some((ParamKind::Cd, _)) => "Type a directory",
             Some((ParamKind::Shell, _)) => "Type a shell command",
             Some((ParamKind::Ask, _)) => "Type a question",
+            Some((ParamKind::Model, _)) => "No model found - start Ollama / LM Studio, or set [llm] in config.toml",
             None => "No matching commands",
         }
     }
@@ -1298,6 +1330,12 @@ fn entry(name: &str, cat: Category, shortcut: Option<String>, action: PaletteAct
 
 fn dynamic_items(ctx: &PaletteContext) -> Vec<PaletteItem> {
     let mut v = Vec::new();
+    for m in &ctx.models {
+        let mut it = entry(&format!("AI Model: {}", m.label), Category::Ai, Some(if m.active { format!("{} - current", m.detail) } else { m.detail.clone() }), PaletteAction::SelectModel(m.choice.clone()));
+        it.meta = true;
+        it.id = format!("ai-model:{}", m.label);
+        v.push(it);
+    }
     for (i, t) in ctx.tabs.iter().enumerate() {
         let mut it = entry(&format!("Tab {}: {}", i + 1, t), Category::Tabs, (i == ctx.active_tab).then(|| "current".to_string()), PaletteAction::SwitchTab(i));
         it.meta = true;
@@ -1369,11 +1407,13 @@ fn catalog() -> Vec<PaletteItem> {
 
     // AI
     v.push(entry("AI Assistant", Ai, s("Shift+A"), Menu(MenuAction::AiAssistant)));
-    v.push(entry("Observer Mode", Ai, Some("Ctrl+Shift+V".into()), Menu(MenuAction::ObserverMode)));
+    v.push(entry("Observer Mode", Ai, s("Shift+N"), Menu(MenuAction::ObserverMode)));
     v.push(entry("Advisor Mode", Ai, None, Menu(MenuAction::AdvisorMode)));
     v.push(entry("Ask AI About This", Ai, if cfg!(target_os = "macos") { s("K") } else { None }, Menu(MenuAction::AskAboutThis)));
     v.push(entry("Toggle Auto Fix Suggestions", Ai, None, Menu(MenuAction::AutoFixToggle)));
     v.push(entry("Toggle # Natural Language", Ai, None, Menu(MenuAction::NaturalLanguageToggle)));
+    v.push(entry("AI: Select Model", Ai, None, PaletteAction::Template("model ")));
+    v.push(entry("AI: Privacy Report", Ai, None, PaletteAction::PrivacyReport));
 
     // Browser
     let mac = |k: &str| if cfg!(target_os = "macos") { s(k) } else { None };
@@ -1411,6 +1451,7 @@ fn catalog() -> Vec<PaletteItem> {
     v.push(entry("Zoom Out", Settings, Some("Ctrl+-".into()), Menu(MenuAction::ZoomOut)));
     v.push(entry("Reset Zoom", Settings, s("0"), Menu(MenuAction::ZoomReset)));
     v.push(entry("UI Gallery", Settings, None, Menu(MenuAction::UiGallery)));
+    v.push(entry("MCP Activity", Tools, None, PaletteAction::McpActivity));
 
     // Parameterised commands (Tab / Enter completes the keyword)
     v.push(entry("theme <name>", Themes, None, PaletteAction::Template("theme ")));
@@ -1456,7 +1497,48 @@ mod tests {
                 SshHostInfo { alias: "staging".into(), detail: "dev@stg.example.com:2222".into() },
             ],
             font_size: 15.0,
+            models: vec![
+                crate::ai::local::picker::ModelOption {
+                    label: "qwen2.5-coder:7b".into(),
+                    detail: "Ollama - local".into(),
+                    active: true,
+                    choice: crate::ai::local::picker::ModelChoice { provider: "ollama".into(), model: "qwen2.5-coder:7b".into(), api_url: "http://127.0.0.1:11434".into(), local: true },
+                },
+                crate::ai::local::picker::ModelOption {
+                    label: "gpt-4o-mini".into(),
+                    detail: "api.openai.com - cloud".into(),
+                    active: false,
+                    choice: crate::ai::local::picker::ModelChoice { provider: "openai".into(), model: "gpt-4o-mini".into(), api_url: "https://api.openai.com".into(), local: false },
+                },
+            ],
         });
+    }
+
+    #[test]
+    fn select_model_lists_local_and_cloud_and_dispatches() {
+        let mut p = CommandPalette::with_parts(History::default(), None);
+        open(&mut p);
+        // The catalog entry completes to model mode.
+        type_str(&mut p, "ai: select");
+        assert!(matches!(p.results[0].action, PaletteAction::Template("model ")), "{:?}", names(&p));
+        p.set_query("model ");
+        assert!(matches!(p.param, Some((ParamKind::Model, _))));
+        assert_eq!(names(&p), ["qwen2.5-coder:7b", "gpt-4o-mini"]);
+        assert_eq!(p.results[0].shortcut.as_deref(), Some("Ollama - local - current"));
+        p.set_query("model gpt");
+        assert_eq!(names(&p), ["gpt-4o-mini"]);
+        let a = p.handle_key(PaletteKey::Enter);
+        assert!(matches!(a, Some(PaletteAction::SelectModel(ref c)) if c.model == "gpt-4o-mini" && !c.local), "{a:?}");
+    }
+
+    #[test]
+    fn privacy_report_and_direct_model_entries_are_in_the_catalog() {
+        let mut p = CommandPalette::with_parts(History::default(), None);
+        open(&mut p);
+        type_str(&mut p, "privacy report");
+        assert!(matches!(p.results[0].action, PaletteAction::PrivacyReport));
+        p.set_query("ai model qwen");
+        assert!(matches!(&p.results[0].action, PaletteAction::SelectModel(c) if c.model == "qwen2.5-coder:7b"));
     }
 
     fn type_str(p: &mut CommandPalette, s: &str) {

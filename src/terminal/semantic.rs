@@ -65,7 +65,7 @@ impl Terminal {
             for c in &row[from..to] {
                 c.push_text(&mut seg);
             }
-            let wrapped = line != el && row.last().map_or(false, |c| c.wrap);
+            let wrapped = line != el && row.last().map_or(false, |c| c.wrap());
             if wrapped {
                 out.push_str(&seg);
             } else {
@@ -138,7 +138,7 @@ impl Terminal {
                 c.push_text(&mut seg);
             }
             out.push_str(seg.trim_end());
-            if stopped || !row.last().map_or(false, |c| c.wrap) { break; }
+            if stopped || !row.last().map_or(false, |c| c.wrap()) { break; }
             line += 1;
             col = 0;
         }
@@ -180,7 +180,7 @@ impl Terminal {
         for _ in 0..32 {
             // The logical (soft-wrap joined) line ending at `abs`.
             let mut first = abs;
-            while first > 0 && self.abs_row(first - 1).map_or(false, |r| r.last().map_or(false, |c| c.wrap)) {
+            while first > 0 && self.abs_row(first - 1).map_or(false, |r| r.last().map_or(false, |c| c.wrap())) {
                 first -= 1;
             }
             let mut text = String::new();
@@ -190,7 +190,7 @@ impl Terminal {
                 for c in &row[..upto] {
                     c.push_text(&mut text);
                 }
-                if l != abs && !row.last().map_or(false, |c| c.wrap) { text.push('\n'); }
+                if l != abs && !row.last().map_or(false, |c| c.wrap()) { text.push('\n'); }
             }
             if cursor_row {
                 let tail = self.cursor_tail();
@@ -353,7 +353,7 @@ fn strip_rprompt(s: &str) -> &str {
 /// Dim or gray text is autosuggestion ghost text, not part of the buffer.
 fn is_ghost(c: &Cell) -> bool {
     use super::Color;
-    c.attrs.dim
+    c.dim()
         || match c.fg {
             Color::Indexed(n) => n == 8 || (240..=248).contains(&n),
             Color::Rgb(r, g, b) => r == g && g == b && r < 0xA0,
