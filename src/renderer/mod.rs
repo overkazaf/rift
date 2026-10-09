@@ -12,7 +12,8 @@ use crate::window::PaneRect;
 use crate::window::tab::{SplitBorder, SplitDir, BORDER};
 use crate::terminal::{Cell, Color, ImageCell, Terminal, TermImage};
 use crate::window::WindowManager;
-use font::FontManager;
+use font::{Deco, FontManager};
+use crate::terminal::grid::UnderlineStyle;
 
 // ── Cheap hashing (FxHash-style) for damage tracking and the tile cache ──
 
@@ -77,8 +78,14 @@ fn hash_cells(mut h: u64, cells: &[Cell]) -> u64 {
             | (a.italic as u64) << 2
             | (a.underline as u64) << 3
             | (a.reverse as u64) << 4
-            | (a.hidden as u64) << 5;
+            | (a.hidden as u64) << 5
+            | (a.strikethrough as u64) << 6
+            | (a.overline as u64) << 7
+            | (a.ul_style() as u64) << 8;
         h = mix(h, cell.c as u64 | attrs << 32);
+        if let Some(uc) = a.underline_color {
+            h = mix(h, 1 << 40 | color_bits(uc));
+        }
         h = mix(h, color_bits(cell.fg) << 32 | color_bits(cell.bg));
     }
     h
@@ -86,8 +93,9 @@ fn hash_cells(mut h: u64, cells: &[Cell]) -> u64 {
 
 // ── Pre-blended glyph tile cache ──
 
-/// (glyph, fg pixel, underlying bg pixel) -> cw*ch pre-blended pixels.
-type TileKey = (char, u32, u32);
+/// (glyph, fg pixel, underlying bg pixel, style/decoration bits) -> cw*ch
+/// pre-blended pixels.
+type TileKey = (char, u32, u32, u64);
 type TileMap = HashMap<TileKey, Box<[u32]>, FxBuild>;
 
 /// Max number of cached tiles (two generations of half this size each).
@@ -132,7 +140,12 @@ impl TileCache {
     }
 }
 
-fn build_tile(bitmap: &[u8], cw: usize, ch: usize, fg: Rgb, fg_px: u32, bg_px: u32) -> Box<[u32]> {
+/// Decoration paint request for [`build_tile`]: shape, geometry, underline pixel.
+type TileDeco<'a> = (&'a Deco, &'a font::DecoMetrics, u32);
+
+fn build_tile(
+    bitmap: &[u8], cw: usize, ch: usize, fg: Rgb, fg_px: u32, bg_px: u32, deco: Option<TileDeco>,
+) -> Box<[u32]> {
     let n = cw * ch;
     let mut tile = vec![bg_px; n];
     for (i, t) in tile.iter_mut().enumerate() {
@@ -140,7 +153,16 @@ fn build_tile(bitmap: &[u8], cw: usize, ch: usize, fg: Rgb, fg_px: u32, bg_px: u
         if coverage == 0 { continue; }
         *t = if coverage >= 250 { fg_px } else { blend(fg, bg_px, coverage) };
     }
+    if let Some((d, m, ul_px)) = deco {
+        font::paint_decor(&mut tile, cw, 0, 0, cw, ch, d, m, fg_px, ul_px);
+    }
     tile.into_boxed_slice()
+}
+
+/// Decorations (underline shape, strikethrough, overline) of a cell.
+#[inline]
+fn cell_deco(cell: &Cell) -> Deco {
+    Deco { ul: cell.attrs.ul_style(), strike: cell.attrs.strikethrough, over: cell.attrs.overline }
 }
 
 #[inline]
@@ -224,6 +246,8 @@ pub struct Renderer {
     /// Output of the last `render_pane_inner`: which rows were repainted.
     dirty_rows: Vec<bool>,
     tiles: TileCache,
+    /// Draw bold text with the bright palette variant (config `bold_is_bright`).
+    bold_is_bright: bool,
     /// Hover / drag / scrollbar state for the software-drawn chrome; set by
     /// the app right before each frame.
     pub chrome: crate::ui::tabbar::ChromeUi,
@@ -263,6 +287,7 @@ impl Renderer {
             view_cursor_row: 0,
             dirty_rows: Vec::new(),
             tiles: TileCache::default(),
+            bold_is_bright: false,
             chrome: Default::default(),
             prof: if std::env::var("RIFT_PROFILE").map_or(false, |v| v == "1") {
                 Some(Profiler::default())
@@ -817,7 +842,7 @@ impl Renderer {
             }
 
             let (mut fg, mut bg) = (
-                self.resolve(cell.fg, true),
+                self.resolve_fg(cell),
                 self.resolve(cell.bg, false),
             );
             if cell.attrs.reverse { std::mem::swap(&mut fg, &mut bg); }
@@ -828,6 +853,13 @@ impl Renderer {
             // Skip wide-char continuation placeholder
             if cell.c == '\0' { continue; }
 
+            let style = font::style_bits(cell.attrs.bold, cell.attrs.italic);
+            let deco = if cell.attrs.hidden { Deco::default() } else { cell_deco(cell) };
+            let ul_rgb = match cell.attrs.underline_color {
+                Some(c) if deco.ul != UnderlineStyle::None => self.resolve(c, true),
+                _ => fg,
+            };
+
             let is_cursor = show_cursor
                 && row == self.view_cursor_row
                 && col == terminal.cursor_col;
@@ -835,21 +867,27 @@ impl Renderer {
             let has_glyph = cell.c != ' ' && !cell.attrs.hidden;
             let wide = has_glyph && font::is_wide(cell.c);
 
-            if has_glyph && !wide && !is_cursor {
+            if (has_glyph || deco.any()) && !wide && !is_cursor {
                 // Fast path: one pre-blended (glyph, fg, bg) tile, copied row-wise.
                 let under = if cell.bg != Color::Default || cell.attrs.reverse { bg } else { self.theme.bg };
                 let fg_px = pack(fg.0, fg.1, fg.2);
                 let bg_px = pack(under.0, under.1, under.2);
-                let tkey = (cell.c, fg_px, bg_px);
+                let ul_px = pack(ul_rgb.0, ul_rgb.1, ul_rgb.2);
+                let dbits = if deco.any() {
+                    deco.bits() | (if deco.ul != UnderlineStyle::None { (ul_px as u64) << 8 } else { 0 })
+                } else { 0 };
+                let tkey = (if has_glyph { cell.c } else { ' ' }, fg_px, bg_px, dbits | (style as u64) << 40);
                 if !self.tiles.promote(tkey) {
-                    let tile = build_tile(self.font.rasterize(cell.c), cw, ch, fg, fg_px, bg_px);
+                    let dm = self.font.deco;
+                    let bmp: &[u8] = if has_glyph { self.font.rasterize_styled(cell.c, style) } else { &[] };
+                    let tile = build_tile(bmp, cw, ch, fg, fg_px, bg_px, deco.any().then_some((&deco, &dm, ul_px)));
                     self.tiles.insert(tkey, tile);
                 }
                 blit_tile(buffer, buf_width, x0, y0, cw, ch, self.tiles.get(&tkey));
             } else {
                 self.draw_cell_slow(
                     cell, fg, bg, is_cursor, wide, has_glyph, terminal.cursor_style,
-                    buffer, buf_width, x0, y0,
+                    style, deco, ul_rgb, buffer, buf_width, x0, y0,
                 );
             }
 
@@ -862,7 +900,7 @@ impl Renderer {
                     if cell.c != ' ' && !cell.attrs.hidden {
                         let wide = font::is_wide(cell.c);
                         let gw = if wide { cw * 2 } else { cw };
-                        let bitmap = if wide { self.font.rasterize_wide(cell.c) } else { self.font.rasterize(cell.c) };
+                        let bitmap = if wide { self.font.rasterize_wide_styled(cell.c, style) } else { self.font.rasterize_styled(cell.c, style) };
                         for cy in 0..ch {
                             for cx in 0..gw.min(buf_width - x0) {
                                 let coverage = bitmap[cy * gw + cx] as u32;
@@ -900,6 +938,9 @@ impl Renderer {
         wide: bool,
         has_glyph: bool,
         cursor_style: crate::terminal::CursorStyle,
+        style: u8,
+        deco: Deco,
+        ul_rgb: Rgb,
         buffer: &mut [u32],
         buf_width: usize,
         x0: usize,
@@ -959,7 +1000,7 @@ impl Renderer {
             } else { fg };
             let fg_px = pack(text_color.0, text_color.1, text_color.2);
             let gw = if wide { cw * 2 } else { cw };
-            let bitmap = if wide { self.font.rasterize_wide(cell.c) } else { self.font.rasterize(cell.c) };
+            let bitmap = if wide { self.font.rasterize_wide_styled(cell.c, style) } else { self.font.rasterize_styled(cell.c, style) };
             for cy in 0..ch {
                 let row_off = (y0 + cy) * buf_width + x0;
                 let bmp_off = cy * gw;
@@ -974,6 +1015,19 @@ impl Renderer {
                     }
                 }
             }
+        }
+
+        if deco.any() {
+            let text_color = if is_cursor && cursor_style == crate::terminal::CursorStyle::Block {
+                self.theme.bg
+            } else { fg };
+            let ul_c = if cell.attrs.underline_color.is_some() && !(is_cursor && cursor_style == crate::terminal::CursorStyle::Block) { ul_rgb } else { text_color };
+            let w = (if wide { cw * 2 } else { cursor_w.max(cw) }).min(buf_width.saturating_sub(x0));
+            let dm = self.font.deco;
+            font::paint_decor(
+                buffer, buf_width, x0, y0, w, ch, &deco, &dm,
+                pack(text_color.0, text_color.1, text_color.2), pack(ul_c.0, ul_c.1, ul_c.2),
+            );
         }
     }
 
@@ -1127,7 +1181,7 @@ impl Renderer {
                 if x0 + cw > buf_width || y0 + ch > buf_height { continue; }
 
                 let cell = &grid[row][col];
-                let (mut fg, mut bg) = (self.resolve(cell.fg, true), self.resolve(cell.bg, false));
+                let (mut fg, mut bg) = (self.resolve_fg(cell), self.resolve(cell.bg, false));
                 if cell.attrs.reverse { std::mem::swap(&mut fg, &mut bg); }
                 if cell.attrs.dim { fg = (fg.0 / 2, fg.1 / 2, fg.2 / 2); }
 
@@ -1146,7 +1200,8 @@ impl Renderer {
 
                 if cell.c != ' ' && !cell.attrs.hidden {
                     let text_color = if is_cursor { self.theme.bg } else { fg };
-                    let bitmap = self.font.rasterize(cell.c);
+                    let style = font::style_bits(cell.attrs.bold, cell.attrs.italic);
+                    let bitmap = self.font.rasterize_styled(cell.c, style);
                     for cy in 0..ch {
                         for cx in 0..cw {
                             let coverage = bitmap[cy * cw + cx] as u32;
@@ -1156,6 +1211,16 @@ impl Renderer {
                                 buffer[idx] = blend(text_color, buffer[idx], coverage);
                             }
                         }
+                    }
+                }
+                if !cell.attrs.hidden {
+                    let deco = cell_deco(cell);
+                    if deco.any() {
+                        let ul_c = cell.attrs.underline_color.map_or(if is_cursor { self.theme.bg } else { fg }, |c| self.resolve(c, true));
+                        let tc = if is_cursor { self.theme.bg } else { fg };
+                        let dm = self.font.deco;
+                        font::paint_decor(buffer, buf_width, x0, y0, cw, ch, &deco, &dm,
+                            pack(tc.0, tc.1, tc.2), pack(ul_c.0, ul_c.1, ul_c.2));
                     }
                 }
             }
@@ -1226,6 +1291,25 @@ impl Renderer {
                     }
                 }
             }
+        }
+    }
+
+    /// Foreground of `cell`, honoring "bold is bright" for palette 0-7.
+    #[inline]
+    fn resolve_fg(&self, cell: &Cell) -> Rgb {
+        if self.bold_is_bright && cell.attrs.bold {
+            if let Color::Indexed(i @ 0..=7) = cell.fg {
+                return self.theme.resolve_indexed(i + 8);
+            }
+        }
+        self.resolve(cell.fg, true)
+    }
+
+    /// Enable/disable drawing bold text with bright palette colors (0-7 -> 8-15).
+    pub fn set_bold_is_bright(&mut self, on: bool) {
+        if self.bold_is_bright != on {
+            self.bold_is_bright = on;
+            self.invalidate();
         }
     }
 
@@ -1418,12 +1502,12 @@ mod tests {
     fn tile_cache_is_bounded_and_promotes() {
         let mut c = TileCache::default();
         for i in 0..10_000u32 {
-            c.insert(('a', i, 0), vec![i; 4].into_boxed_slice());
+            c.insert(('a', i, 0, 0), vec![i; 4].into_boxed_slice());
             assert!(c.cur.len() + c.old.len() <= TILE_CACHE_CAP);
         }
         // Recent entries survive; a hit in the old generation is promoted.
-        assert!(c.promote(('a', 9_999, 0)));
-        assert!(!c.promote(('a', 0, 0)));
+        assert!(c.promote(('a', 9_999, 0, 0)));
+        assert!(!c.promote(('a', 0, 0, 0)));
         let old_key = *c.old.keys().next().unwrap();
         assert!(c.promote(old_key));
         assert_eq!(c.get(&old_key).len(), 4);
@@ -1646,6 +1730,99 @@ mod tests {
         println!("new    keystroke (1 row + cursor) + memcpy : {typing:8.3} ms");
         println!("new    cat flood (3 lines/frame) + memcpy  : {cat:8.3} ms");
         println!("       (memcpy of back buffer alone        : {copy:8.3} ms)");
+    }
+
+    /// Every decoration / style variant must change pixels vs plain text,
+    /// and decorated cells must match between tile path and slow path
+    /// (cursor on the cell uses the slow path). Also dumps a gallery PNG.
+    #[test]
+    fn decorations_and_styles_render() {
+        use crate::terminal::grid::UnderlineStyle as U;
+        let path = crate::config::find_font_path();
+        if !std::path::Path::new(&path).exists() { return; }
+        let mut r = Renderer::new(&path, 20.0, Theme::catppuccin_mocha());
+        let (cw, ch) = (r.cell_width(), r.cell_height());
+        let variants: Vec<(&str, Box<dyn Fn(&mut crate::terminal::Attrs)>)> = vec![
+            ("plain", Box::new(|_| {})),
+            ("bold", Box::new(|a| a.bold = true)),
+            ("italic", Box::new(|a| a.italic = true)),
+            ("bolditalic", Box::new(|a| { a.bold = true; a.italic = true; })),
+            ("single", Box::new(|a| a.underline_style = U::Single)),
+            ("legacy_ul", Box::new(|a| a.underline = true)),
+            ("double", Box::new(|a| a.underline_style = U::Double)),
+            ("curly", Box::new(|a| a.underline_style = U::Curly)),
+            ("dotted", Box::new(|a| a.underline_style = U::Dotted)),
+            ("dashed", Box::new(|a| a.underline_style = U::Dashed)),
+            ("strike", Box::new(|a| a.strikethrough = true)),
+            ("overline", Box::new(|a| a.overline = true)),
+            ("ul_color", Box::new(|a| { a.underline_style = U::Curly; a.underline_color = Some(Color::Rgb(255, 0, 0)); })),
+        ];
+        let cols = 12;
+        let rows = variants.len();
+        let (w, h) = (cols * cw, rows * ch);
+        let render = |r: &mut Renderer, t: &Terminal| {
+            let mut buf = vec![0u32; w * h];
+            r.cur_pane = NO_CACHE;
+            r.full_frame = true;
+            r.render_pane_inner(t, &mut buf, w, h, PaneRect { x: 0, y: 0, width: w, height: h }, false, false);
+            buf
+        };
+        let mut t = Terminal::new(cols, rows);
+        for (ri, (_, f)) in variants.iter().enumerate() {
+            for (ci, c) in "Hello gjpq 中".chars().enumerate().take(cols) {
+                t.grid[ri][ci].c = c;
+                f(&mut t.grid[ri][ci].attrs);
+            }
+        }
+        let buf = render(&mut r, &t);
+        crate::audit::write_png(&crate::audit::scratch_dir("png").join("styles_gallery.png"), w, h, &buf);
+        let band = |buf: &[u32], row: usize| buf[row * ch * w..(row + 1) * ch * w].to_vec();
+        let plain = band(&buf, 0);
+        for (ri, (name, _)) in variants.iter().enumerate().skip(1) {
+            if *name == "legacy_ul" { assert_eq!(band(&buf, ri), band(&buf, 4), "legacy underline == Single"); continue; }
+            assert_ne!(band(&buf, ri), plain, "{name} must change pixels");
+        }
+        // A blank cell with an underline still draws it; hidden suppresses it.
+        let mut t2 = Terminal::new(4, 1);
+        t2.grid[0][1].attrs.underline_style = U::Double;
+        let b = render(&mut r, &t2);
+        let refpx = b[3 * cw];
+        let cell1 = |b: &[u32]| -> Vec<u32> { (0..ch).flat_map(|y| b[y * w + cw..y * w + 2 * cw].to_vec()).collect() };
+        assert!(cell1(&b).iter().any(|p| *p != refpx), "underlined space");
+        t2.grid[0][1].attrs.hidden = true;
+        let b = render(&mut r, &t2);
+        assert!(cell1(&b).iter().all(|p| *p == refpx), "hidden hides decorations");
+    }
+
+    #[test]
+    fn synthetic_styles_work_without_faces() {
+        let mut bmp = vec![0u8; 8 * 10];
+        for y in 2..8 { bmp[y * 8 + 3] = 255; }
+        let orig = bmp.clone();
+        font::embolden_for_test(&mut bmp, 8, 10);
+        assert!(bmp.iter().filter(|v| **v > 0).count() > orig.iter().filter(|v| **v > 0).count());
+        let mut sh = orig.clone();
+        font::shear_for_test(&mut sh, 8, 10, 8);
+        assert_ne!(sh, orig);
+        // top of the stem leans right of the bottom
+        let cx = |row: usize| (0..8).max_by_key(|x| sh[row * 8 + x]).unwrap();
+        assert!(cx(2) > cx(7));
+    }
+
+    #[test]
+    fn bold_is_bright_remaps_palette() {
+        let path = crate::config::find_font_path();
+        if !std::path::Path::new(&path).exists() { return; }
+        let mut r = Renderer::new(&path, 16.0, Theme::rift_neon());
+        let mut c = Cell::default();
+        c.fg = Color::Indexed(1);
+        c.attrs.bold = true;
+        let plain = r.resolve_fg(&c);
+        r.set_bold_is_bright(true);
+        assert_eq!(r.resolve_fg(&c), r.theme.resolve_indexed(9));
+        assert_ne!(plain, r.resolve_fg(&c));
+        c.fg = Color::Indexed(9);
+        assert_eq!(r.resolve_fg(&c), r.theme.resolve_indexed(9));
     }
 
     /// SGR 7 on a default-background cell must paint the swapped background;

@@ -4,6 +4,7 @@ pub mod inline;
 pub mod autocomplete;
 pub mod backend;
 pub mod chat;
+pub mod consent;
 pub mod context;
 pub mod knowledge;
 pub mod observer;
@@ -34,10 +35,14 @@ impl Default for LlmConfig {
 }
 
 impl LlmConfig {
-    /// Resolve API key: config file > environment variable > None.
-    /// Checks DEEPSEEK_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY based on provider/url.
+    /// Fill in the API key from the environment (config file wins).
+    ///
+    /// This only supplies the credential for an endpoint the user already
+    /// opted into (`[llm]` in config.toml, or the cloud-AI consent prompt):
+    /// it never sets `enabled`, and does nothing while AI is disabled, so a
+    /// key lying around in the environment cannot switch cloud AI on.
     pub fn resolve_api_key(&mut self) {
-        if self.api_key.is_some() { return; }
+        if self.api_key.is_some() || !self.enabled { return; }
 
         let env_keys: &[&str] = if self.api_url.contains("deepseek") {
             &["DEEPSEEK_API_KEY", "OPENAI_API_KEY"]
@@ -52,7 +57,6 @@ impl LlmConfig {
                 if !val.is_empty() {
                     log::info!("LLM: using API key from ${key}");
                     self.api_key = Some(val);
-                    self.enabled = true;
                     return;
                 }
             }
@@ -93,6 +97,7 @@ impl LlmManager {
         std::thread::spawn(move || {
             let result = backend::complete(&config, &question, &ctx, &profile_summary);
             let _ = tx.send(result);
+            crate::wake::wake();
         });
         rx
     }

@@ -49,10 +49,35 @@ _rift_precmd() {
   return $s
 }
 
-# preexec: user hit Enter on a real command; output starts now (C).
+# Escape $1 into $REPLY for OSC 633;E: `\` -> `\\`, `;` and control chars
+# -> `\xNN` (so the payload never contains a raw terminator or separator).
+_rift_escape() {
+  emulate -L zsh
+  local s=${1[1,8192]} out= c h
+  if [[ $s != *[[:cntrl:]]* && $s != *'\'* && $s != *';'* ]]; then
+    REPLY=$s
+    return
+  fi
+  for c in ${(s::)s}; do
+    case $c in
+      '\') out+='\\' ;;
+      ';') out+='\x3b' ;;
+      [[:cntrl:]]) printf -v h '\\x%02x' "'$c"; out+=$h ;;
+      *) out+=$c ;;
+    esac
+  done
+  REPLY=$out
+}
+
+# preexec: user hit Enter on a real command; output starts now (C). The exact
+# command text ($1, as typed) is sent first via OSC 633;E so Rift never has to
+# scrape it off a screen that p10k/starship right prompts, transient prompts
+# and autosuggestions have drawn on.
 _rift_preexec() {
   _rift_cmd_ran=1
-  builtin printf '\e]133;C\a'
+  builtin local REPLY
+  _rift_escape "$1"
+  builtin printf '\e]633;E;%s\a\e]133;C\a' "$REPLY"
 }
 
 # zle-line-init: prompt fully drawn, cursor sits where input starts (B).

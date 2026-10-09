@@ -1,6 +1,9 @@
 use std::path::PathBuf;
-use std::sync::{mpsc, Arc};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
+
+use super::known_hosts::{self, HostKeyStatus};
 
 use winit::event_loop::EventLoopProxy;
 
@@ -59,6 +62,22 @@ impl From<std::io::Error> for SshError {
     }
 }
 
+/// Question for the user: this host's key is not in known_hosts. The
+/// connection thread waits on `reply` (`true` = trust and connect).
+pub struct HostKeyPrompt {
+    pub host: String,
+    pub port: u16,
+    pub key_type: String,
+    /// `SHA256:...`
+    pub fingerprint: String,
+    /// known_hosts already has other key types for this host.
+    pub other_keys_known: bool,
+    pub reply: tokio::sync::oneshot::Sender<bool>,
+}
+
+/// How long the user has to answer a host-key prompt.
+const PROMPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+
 /// An SSH session that mirrors the local `Pty` interface.
 #[allow(dead_code)]
 pub struct SshPty {
@@ -81,30 +100,52 @@ impl SshPty {
         cols: u16,
         rows: u16,
         proxy: EventLoopProxy<()>,
+        prompts: mpsc::Sender<HostKeyPrompt>,
     ) -> Result<Self, SshError> {
         let (data_tx, data_rx) = mpsc::channel::<Vec<u8>>();
         let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<SshCommand>();
         let (ready_tx, ready_rx) = mpsc::sync_channel::<Result<(), SshError>>(1);
 
         let cfg = config.clone();
+        let awaiting = Arc::new(AtomicBool::new(false));
+        let awaiting_t = awaiting.clone();
         let handle = thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .expect("tokio runtime");
-            rt.block_on(ssh_main(cfg, cols, rows, data_tx, cmd_rx, proxy, ready_tx));
+            rt.block_on(ssh_main(cfg, cols, rows, data_tx, cmd_rx, proxy, ready_tx, prompts, awaiting_t));
         });
 
-        match ready_rx.recv_timeout(std::time::Duration::from_secs(30)) {
-            Ok(Ok(())) => Ok(Self {
+        // 30 s of network time; time spent waiting for the user to answer the
+        // host-key prompt does not count.
+        let tick = std::time::Duration::from_millis(250);
+        let mut waited = std::time::Duration::ZERO;
+        let ready = loop {
+            match ready_rx.recv_timeout(tick) {
+                Ok(r) => break r,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    if !awaiting.load(Ordering::Relaxed) {
+                        waited += tick;
+                    }
+                    if waited >= std::time::Duration::from_secs(30) {
+                        break Err(SshError::Connection("connection timeout".into()));
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    break Err(SshError::Connection("connection thread ended".into()));
+                }
+            }
+        };
+        match ready {
+            Ok(()) => Ok(Self {
                 cmd_tx,
                 data_rx,
                 status: SessionStatus::Connected,
                 config,
                 _thread: handle,
             }),
-            Ok(Err(e)) => Err(e),
-            Err(_) => Err(SshError::Connection("connection timeout".into())),
+            Err(e) => Err(e),
         }
     }
 
@@ -129,16 +170,88 @@ impl Drop for SshPty {
 
 // ── Async internals ──
 
-struct Handler;
+struct Handler {
+    host: String,
+    port: u16,
+    prompts: mpsc::Sender<HostKeyPrompt>,
+    proxy: EventLoopProxy<()>,
+    /// True while the user is looking at the host-key prompt.
+    awaiting: Arc<AtomicBool>,
+    /// Why the key was refused (surfaced as the connection error).
+    refusal: Arc<Mutex<Option<String>>>,
+}
 
 impl russh::client::Handler for Handler {
     type Error = russh::Error;
 
     fn check_server_key(
         &mut self,
-        _key: &russh::keys::PublicKeyOrCertificate,
+        key: &russh::keys::PublicKeyOrCertificate,
     ) -> impl std::future::Future<Output = Result<bool, Self::Error>> + Send {
-        std::future::ready(Ok(true))
+        // Certificates are verified by their embedded host key.
+        let pk: russh::keys::PublicKey = match key {
+            russh::keys::PublicKeyOrCertificate::PublicKey { key, .. } => key.clone(),
+            russh::keys::PublicKeyOrCertificate::Certificate(c) => russh::keys::PublicKey::from(c.public_key().clone()),
+        };
+        let (host, port) = (self.host.clone(), self.port);
+        let path = known_hosts::known_hosts_path();
+        let status = known_hosts::check(&host, port, &pk, &path);
+        let prompts = self.prompts.clone();
+        let proxy = self.proxy.clone();
+        let awaiting = self.awaiting.clone();
+        let refusal = self.refusal.clone();
+        async move {
+            let refuse = |msg: String| {
+                log::error!("SSH: {msg}");
+                if let Ok(mut r) = refusal.lock() {
+                    *r = Some(msg);
+                }
+                Ok(false)
+            };
+            match status {
+                HostKeyStatus::Known => Ok(true),
+                HostKeyStatus::Mismatch { .. } => refuse(format!(
+                    "WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED for {host}:{port}! \
+                     The {} key ({}) differs from the one recorded in {}. \
+                     Someone may be eavesdropping on you (man-in-the-middle). Connection refused; \
+                     if the host was legitimately reinstalled, remove that line and reconnect.",
+                    known_hosts::key_type(&pk),
+                    known_hosts::fingerprint(&pk),
+                    path.display(),
+                )),
+                HostKeyStatus::Unreadable(e) => refuse(format!(
+                    "cannot verify host key for {host}:{port}: {} is unreadable ({e}). Connection refused.",
+                    path.display()
+                )),
+                HostKeyStatus::Unknown { other_keys } => {
+                    let (tx, rx) = tokio::sync::oneshot::channel();
+                    let prompt = HostKeyPrompt {
+                        host: host.clone(),
+                        port,
+                        key_type: known_hosts::key_type(&pk),
+                        fingerprint: known_hosts::fingerprint(&pk),
+                        other_keys_known: other_keys,
+                        reply: tx,
+                    };
+                    if prompts.send(prompt).is_err() {
+                        return refuse(format!("unknown host key for {host}:{port} and nobody to ask. Connection refused."));
+                    }
+                    awaiting.store(true, Ordering::Relaxed);
+                    let _ = proxy.send_event(());
+                    let answer = tokio::time::timeout(PROMPT_TIMEOUT, rx).await;
+                    awaiting.store(false, Ordering::Relaxed);
+                    match answer {
+                        Ok(Ok(true)) => {
+                            if let Err(e) = known_hosts::learn(&host, port, &pk, &path) {
+                                log::warn!("SSH: could not record host key in {}: {e}", path.display());
+                            }
+                            Ok(true)
+                        }
+                        _ => refuse(format!("host key for {host}:{port} was not trusted. Connection cancelled.")),
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -150,8 +263,10 @@ async fn ssh_main(
     cmd_rx: tokio::sync::mpsc::UnboundedReceiver<SshCommand>,
     proxy: EventLoopProxy<()>,
     ready_tx: mpsc::SyncSender<Result<(), SshError>>,
+    prompts: mpsc::Sender<HostKeyPrompt>,
+    awaiting: Arc<AtomicBool>,
 ) {
-    if let Err(e) = ssh_run(config, cols, rows, data_tx, cmd_rx, proxy, &ready_tx).await {
+    if let Err(e) = ssh_run(config, cols, rows, data_tx, cmd_rx, proxy, &ready_tx, prompts, awaiting).await {
         log::error!("SSH: {e}");
         let _ = ready_tx.try_send(Err(e));
     }
@@ -165,6 +280,8 @@ async fn ssh_run(
     mut cmd_rx: tokio::sync::mpsc::UnboundedReceiver<SshCommand>,
     proxy: EventLoopProxy<()>,
     ready_tx: &mpsc::SyncSender<Result<(), SshError>>,
+    prompts: mpsc::Sender<HostKeyPrompt>,
+    awaiting: Arc<AtomicBool>,
 ) -> Result<(), SshError> {
     let ssh_cfg = Arc::new(russh::client::Config {
         inactivity_timeout: Some(std::time::Duration::from_secs(120)),
@@ -173,9 +290,24 @@ async fn ssh_run(
     });
 
     log::info!("SSH: connecting to {}", config.display_name());
-    let mut handle = russh::client::connect(ssh_cfg, (&*config.host, config.port), Handler)
+    let refusal = Arc::new(Mutex::new(None));
+    let handler = Handler {
+        host: config.host.clone(),
+        port: config.port,
+        prompts,
+        proxy: proxy.clone(),
+        awaiting,
+        refusal: refusal.clone(),
+    };
+    let mut handle = russh::client::connect(ssh_cfg, (&*config.host, config.port), handler)
         .await
-        .map_err(|e| SshError::Connection(e.to_string()))?;
+        .map_err(|e| {
+            // A refused host key surfaces as a generic protocol error; show why.
+            match refusal.lock().ok().and_then(|mut r| r.take()) {
+                Some(reason) => SshError::Connection(reason),
+                None => SshError::Connection(e.to_string()),
+            }
+        })?;
 
     authenticate(&mut handle, &config).await?;
     log::info!("SSH: authenticated as {}", config.user);

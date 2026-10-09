@@ -289,7 +289,7 @@ pub fn handle_key(app: &mut App, event: &KeyEvent) -> bool {
             if s.eq_ignore_ascii_case("v") {
                 if let Some(text) = crate::window::selection::paste_from_clipboard() {
                     // One line only.
-                    ed.insert_str(text.lines().next().unwrap_or(""));
+                    ed.insert_str(&crate::window::selection::sanitize_paste(text.lines().next().unwrap_or(""), false));
                 }
             }
         }

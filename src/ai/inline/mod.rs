@@ -61,6 +61,9 @@ pub const UNCONFIGURED_MSG: &str = "Configure an AI provider in Preferences to e
 // ── Pure helpers ──
 
 /// Is an LLM provider usable (key present, or a local Ollama-style endpoint)?
+///
+/// This only says a provider is reachable. Whether the user *agreed* to use
+/// it is [`crate::ai::consent::allowed`]; the inline entry points use [`ai_ok`].
 pub fn llm_ready(c: &LlmConfig) -> bool {
     let local = c.api_url.contains("localhost") || c.api_url.contains("127.0.0.1");
     c.enabled && (c.api_key.as_deref().is_some_and(|k| !k.is_empty()) || c.provider == "ollama" || local)
@@ -276,6 +279,19 @@ pub fn overlay_open(app: &App) -> bool {
         || crate::ui::kit::gallery::visible()
 }
 
+/// Gate for the inline AI paths (`#`, auto-fix, refine): provider usable AND
+/// consent granted. Nothing is sent (and a `#` line stays an ordinary shell
+/// comment) otherwise; `nag` shows the one-time "not configured" toast.
+fn ai_ok(app: &mut App, nag: bool) -> bool {
+    if crate::ai::consent::allowed(app) {
+        return true;
+    }
+    if nag && !llm_ready(&app.llm.config) {
+        toast_unconfigured(app);
+    }
+    false
+}
+
 fn toast_unconfigured(app: &mut App) {
     if !app.inline_ai.unconfigured_toasted {
         app.inline_ai.unconfigured_toasted = true;
@@ -300,6 +316,8 @@ fn cwd_of(t: &Terminal) -> String {
 
 /// Type `text` at the prompt without executing it.
 fn paste_into_prompt(pane: &mut Pane, text: &str) {
+    // Model output is untrusted: no ESC / paste-end markers / control bytes.
+    let text = &crate::window::selection::sanitize_paste(text, pane.terminal.bracketed_paste);
     pane.terminal.scroll_to_bottom();
     if pane.terminal.bracketed_paste {
         pane.write(b"\x1b[200~");
@@ -335,7 +353,7 @@ fn screen_text(t: &Terminal) -> String {
     let mut lines: Vec<String> = t
         .visible_rows()
         .iter()
-        .map(|row| row.iter().filter(|c| c.c != '\0').map(|c| c.c).collect::<String>().trim_end().to_string())
+        .map(|row| crate::terminal::grid::cells_text(row).trim_end().to_string())
         .collect();
     while lines.last().is_some_and(|l| l.is_empty()) {
         lines.pop();
@@ -437,10 +455,8 @@ fn submit_popover(app: &mut App) {
             }
             let query = q.to_string();
             app.inline_ai.popover = None;
-            if llm_ready(&app.llm.config) {
+            if ai_ok(app, true) {
                 start_nl(app, query, previous.clone(), Some(previous));
-            } else {
-                toast_unconfigured(app);
             }
         }
     }
@@ -654,8 +670,8 @@ pub fn on_enter(app: &mut App) -> bool {
     }
     let Some(typed) = app.wm.active_pane().terminal.typed_input() else { return false };
     let Some(query) = nl::detect_query(&typed) else { return false };
-    if !llm_ready(&app.llm.config) {
-        toast_unconfigured(app);
+    // No consent / no provider: the line goes to the shell untouched.
+    if !ai_ok(app, false) {
         return false;
     }
     start_nl(app, query, typed, None);
@@ -666,6 +682,7 @@ fn spawn_request(config: LlmConfig, prompt: String) -> Receiver<Result<String, S
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         let _ = tx.send(crate::ai::backend::complete_simple(&config, &prompt));
+        crate::wake::wake();
     });
     rx
 }
@@ -803,8 +820,7 @@ fn detect_failure(app: &mut App) {
     if !finished_recently(last.timestamp, last.duration_ms, unix_now()) || fix::should_skip(&last.command, exit) {
         return;
     }
-    if !llm_ready(&app.llm.config) {
-        toast_unconfigured(app);
+    if !ai_ok(app, true) {
         return;
     }
     let Some(snap) = snap_block_of(&app.wm.active_pane().terminal, sig.count - 1) else { return };

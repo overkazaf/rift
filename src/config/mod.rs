@@ -23,6 +23,66 @@ pub const LEGACY_THEME: &str = "catppuccin-mocha";
 
 pub type Rgb = (u8, u8, u8);
 
+/// `[security] osc52`: what programs running in the terminal may do to the
+/// system clipboard through OSC 52.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Osc52Policy {
+    /// Reads and writes are both refused.
+    Deny,
+    /// Programs may set the clipboard (size-capped, with a toast); reads are refused.
+    WriteOnly,
+    /// Reads and writes are both honoured.
+    Allow,
+}
+
+impl Osc52Policy {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "deny" | "off" | "none" => Some(Self::Deny),
+            "write-only" | "write_only" | "writeonly" | "write" => Some(Self::WriteOnly),
+            "allow" | "on" | "all" => Some(Self::Allow),
+            _ => None,
+        }
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Deny => "deny",
+            Self::WriteOnly => "write-only",
+            Self::Allow => "allow",
+        }
+    }
+    fn to_u8(self) -> u8 {
+        match self { Self::Deny => 0, Self::WriteOnly => 1, Self::Allow => 2 }
+    }
+    fn from_u8(v: u8) -> Self {
+        match v { 1 => Self::WriteOnly, 2 => Self::Allow, _ => Self::Deny }
+    }
+}
+
+/// Process-wide OSC 52 policy consulted by the escape parser. It starts at
+/// the most restrictive value so that nothing (tests, headless panes, code
+/// that runs before the config is loaded) can touch the clipboard by
+/// accident; `main` installs the configured policy at startup.
+static OSC52_POLICY: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+pub fn osc52_policy() -> Osc52Policy {
+    Osc52Policy::from_u8(OSC52_POLICY.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+pub fn set_osc52_policy(p: Osc52Policy) {
+    OSC52_POLICY.store(p.to_u8(), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Largest OSC 52 payload (base64 text, ~100 KB decoded) a program may put
+/// on the clipboard.
+pub const OSC52_MAX_B64: usize = 136_536;
+
+/// Bounds applied to every value read from config.toml (and used when saving).
+pub const FONT_SIZE_RANGE: (f32, f32) = (6.0, 72.0);
+pub const OPACITY_RANGE: (f32, f32) = (0.2, 1.0);
+pub const COLS_RANGE: (i64, i64) = (10, 1000);
+pub const ROWS_RANGE: (i64, i64) = (10, 500);
+
 pub struct Config {
     pub font_size: f32,
     pub font_family: Option<String>,
@@ -43,6 +103,18 @@ pub struct Config {
     pub effect_intensity: f32,
     /// Play the short RIFT logo reveal at startup (`startup_animation`).
     pub startup_animation: bool,
+    /// Draw bold text with the bright palette variant (colors 0-7 -> 8-15).
+    pub bold_is_bright: bool,
+    /// Scrollback history per pane in lines (`scrollback_lines`, default 10000).
+    pub scrollback_lines: usize,
+    /// Keyboard settings: `shift_enter`, `option_as_meta`, `[keybindings]` (read-only here).
+    pub input: crate::input::InputConfig,
+    /// `[ai] consent`: the user's answer to the one-time cloud-AI prompt.
+    pub ai_consent: crate::ai::consent::Consent,
+    /// `[llm]` was written in config.toml (an explicit opt-in to that endpoint).
+    pub llm_explicit: bool,
+    /// `[security] osc52`.
+    pub osc52: Osc52Policy,
 }
 
 impl Default for Config {
@@ -57,11 +129,18 @@ impl Default for Config {
             theme: Theme::rift_neon(),
             theme_name: DEFAULT_THEME.to_string(),
             llm: crate::ai::LlmConfig::default(),
-            ai_auto_fix: true,
+            // Off until the user has consented to AI (see `ai::consent`).
+            ai_auto_fix: false,
             ai_nl_hash: true,
             effect: None,
             effect_intensity: crate::effects::DEFAULT_INTENSITY,
             startup_animation: true,
+            bold_is_bright: false,
+            scrollback_lines: 10_000,
+            input: crate::input::InputConfig::default(),
+            ai_consent: crate::ai::consent::Consent::Unset,
+            llm_explicit: false,
+            osc52: Osc52Policy::WriteOnly,
         }
     }
 }
@@ -256,11 +335,11 @@ impl Theme {
 
 pub fn resolve_font_path(config: &Config) -> String {
     if let Some(ref path) = config.font_path {
-        if std::path::Path::new(path).exists() {
+        if font_file_ok(path) {
             log::info!("Using configured font path: {path}");
             return path.clone();
         }
-        log::warn!("Font path not found: {path}, falling back");
+        log::warn!("Font path is missing or not a usable font file: {path}, falling back");
     }
 
     if let Some(ref family) = config.font_family {
@@ -272,6 +351,18 @@ pub fn resolve_font_path(config: &Config) -> String {
     }
 
     find_font_path()
+}
+
+/// Is `path` a regular file that parses as a font (TTF/OTF/TTC)?
+fn font_file_ok(path: &str) -> bool {
+    let p = std::path::Path::new(path);
+    if !p.is_file() {
+        return false;
+    }
+    match std::fs::read(p) {
+        Ok(data) => ttf_parser::Face::parse(&data, 0).is_ok(),
+        Err(_) => false,
+    }
 }
 
 fn find_font_by_name(name: &str) -> Option<String> {

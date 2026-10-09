@@ -1,6 +1,6 @@
 use winit::event::KeyEvent;
 use winit::event_loop::ActiveEventLoop;
-use winit::keyboard::{Key, ModifiersState, NamedKey};
+use winit::keyboard::{Key, NamedKey};
 
 use crate::input;
 use crate::tools::exec_preview::ExecPreview;
@@ -10,16 +10,9 @@ use crate::network::{AuthMethod, SshConfig, SshPty, SshConnectRequest};
 
 use crate::window::tab::PaneCmd;
 
+use super::keymap::Action;
 use super::{App, SshConnecting};
 use super::overlays;
-
-/// On macOS, terminal shortcuts use Cmd (super); on other platforms, Ctrl.
-fn cmd_or_ctrl(modifiers: &ModifiersState) -> bool {
-    #[cfg(target_os = "macos")]
-    { modifiers.super_key() }
-    #[cfg(not(target_os = "macos"))]
-    { modifiers.control_key() }
-}
 
 // ── Effects ──
 
@@ -48,6 +41,132 @@ pub fn adjust_effect_intensity(app: &mut App, delta: f32) {
     log::info!("Effect intensity: {v:.1}");
     crate::config::toml::save_config(&app.config);
     app.request_redraw();
+}
+
+// ── Key routing helpers ──
+
+/// True while the foreground program owns the keyboard: alternate screen
+/// (vim, tmux, less...), kitty keyboard protocol enabled, or mouse reporting on.
+pub fn app_owns_keys(app: &App) -> bool {
+    let t = &app.wm.active_pane().terminal;
+    t.is_alt_screen() || t.kitty_keyboard_flags() != 0 || t.mouse_mode != crate::terminal::MouseMode::None
+}
+
+fn encode_opts(app: &App) -> input::EncodeOpts {
+    let t = &app.wm.active_pane().terminal;
+    input::EncodeOpts {
+        app_cursor: t.app_cursor_keys,
+        app_keypad: t.app_keypad(),
+        kitty_flags: t.kitty_keyboard_flags(),
+        shift_enter: app.config.input.shift_enter,
+        option_as_meta: app.config.input.option_as_meta,
+        mac: cfg!(target_os = "macos"),
+    }
+}
+
+/// Kitty protocol event-type reporting: forward the release of a key whose
+/// press went to the PTY.
+pub fn handle_key_release(app: &mut App, event: &KeyEvent) {
+    if !input::take_forwarded(event.physical_key) {
+        return;
+    }
+    let opts = encode_opts(app);
+    if opts.kitty_flags & 2 == 0 {
+        return;
+    }
+    if let Some(bytes) = input::encode_key(event, app.modifiers, &opts) {
+        if let Some(rec) = &mut app.recorder {
+            rec.record_input(&bytes);
+        }
+        if app.broadcast {
+            for pane in app.wm.active_tab_mut().panes_mut() {
+                pane.write(&bytes);
+            }
+        } else {
+            app.wm.active_pane_mut().write(&bytes);
+        }
+    }
+}
+
+/// Execute a keymap action. Returns true when the key was consumed.
+fn run_action(app: &mut App, action: Action, event: &KeyEvent, event_loop: &ActiveEventLoop) -> bool {
+    use super::keymap::Action::*;
+    // One-shot actions must not auto-repeat (but the key is still ours).
+    if event.repeat && !matches!(action, ZoomIn | ZoomOut | EffectIntensityUp | EffectIntensityDown) {
+        return true;
+    }
+    match action {
+        Copy => {
+            if app.selection.active {
+                if super::mouse::copy_selection(app) {
+                    log::info!("Copied selection");
+                }
+                app.selection.clear();
+                app.request_redraw();
+            }
+        }
+        Paste => super::mouse::paste_clipboard(app),
+        SelectAll => super::mouse::select_all(app),
+        SplitRight => super::panes::run_pane_cmd(app, PaneCmd::SplitRight, event_loop),
+        SplitDown => super::panes::run_pane_cmd(app, PaneCmd::SplitDown, event_loop),
+        Search => handle_menu_action(app, MenuAction::Find, event_loop),
+        CommandPalette => {
+            super::overlays::open_command_palette(app);
+            app.request_redraw();
+        }
+        HistorySearch => {
+            app.history.toggle();
+            app.request_redraw();
+        }
+        Autocomplete => trigger_autocomplete(app),
+        NewTab => handle_menu_action(app, MenuAction::NewTab, event_loop),
+        CloseTab => handle_menu_action(app, MenuAction::CloseTab, event_loop),
+        PrevTab | NextTab => {
+            if action == PrevTab { app.wm.prev_tab() } else { app.wm.next_tab() }
+            sync_webview_for_tab(app);
+            app.update_title();
+            app.request_redraw();
+        }
+        Preferences => handle_menu_action(app, MenuAction::Preferences, event_loop),
+        Welcome => handle_menu_action(app, MenuAction::Welcome, event_loop),
+        Recording => handle_menu_action(app, MenuAction::Recording, event_loop),
+        TimeWarp => handle_menu_action(app, MenuAction::TimeWarp, event_loop),
+        Hud => handle_menu_action(app, MenuAction::HudToggle, event_loop),
+        Ssh => handle_menu_action(app, MenuAction::SshConnect, event_loop),
+        AiAssistant => handle_menu_action(app, MenuAction::AiAssistant, event_loop),
+        Browser => handle_menu_action(app, MenuAction::WebView, event_loop),
+        GitPanel => handle_menu_action(app, MenuAction::GitPanel, event_loop),
+        CompareOutput => handle_menu_action(app, MenuAction::CompareOutput, event_loop),
+        FileManager => handle_menu_action(app, MenuAction::FileManager, event_loop),
+        Cicd => handle_menu_action(app, MenuAction::CicdPanel, event_loop),
+        Teaching => handle_menu_action(app, MenuAction::TeachingMode, event_loop),
+        Heatmap => handle_menu_action(app, MenuAction::Heatmap, event_loop),
+        Docker => handle_menu_action(app, MenuAction::DockerPanel, event_loop),
+        Regex => handle_menu_action(app, MenuAction::RegexPlayground, event_loop),
+        SecretMask => handle_menu_action(app, MenuAction::SecretMask, event_loop),
+        AuditLog => handle_menu_action(app, MenuAction::AuditLog, event_loop),
+        Broadcast => handle_menu_action(app, MenuAction::BroadcastToggle, event_loop),
+        Observer => {
+            if !app.observer.enabled {
+                app.observer.toggle();
+            }
+            app.observer_summary = Some(app.observer.generate_summary());
+            app.request_redraw();
+        }
+        ZoomIn => zoom_font(app, 1.0),
+        ZoomOut => zoom_font(app, -1.0),
+        ZoomReset => reset_font(app),
+        EffectCrt => set_effect(app, Some(EffectKind::Crt)),
+        EffectGlitch => set_effect(app, Some(EffectKind::Glitch)),
+        EffectNeon => set_effect(app, Some(EffectKind::Neon)),
+        EffectMatrix => set_effect(app, Some(EffectKind::Matrix)),
+        EffectAmber => set_effect(app, Some(EffectKind::Amber)),
+        EffectHologram => set_effect(app, Some(EffectKind::Hologram)),
+        EffectOff => set_effect(app, None),
+        EffectIntensityUp => adjust_effect_intensity(app, 0.1),
+        EffectIntensityDown => adjust_effect_intensity(app, -0.1),
+    }
+    true
 }
 
 // ── Keyboard ──
@@ -83,30 +202,33 @@ pub fn handle_key(app: &mut App, event: &KeyEvent, event_loop: &ActiveEventLoop)
         return;
     }
 
-    // 2. Cmd+C / Cmd+V (copy/paste) — macOS super key
-    if app.modifiers.super_key() {
-        let is_copy = matches!(&event.logical_key, Key::Character(s) if s.eq_ignore_ascii_case("c"));
-        let is_paste = matches!(&event.logical_key, Key::Character(s) if s.eq_ignore_ascii_case("v"));
-        let is_select_all = matches!(&event.logical_key, Key::Character(s) if s.eq_ignore_ascii_case("a"));
+    // 2. Rift keybindings (src/app/keymap.rs). Ctrl/Alt chords fall through to the
+    //    program while it owns the keyboard (alt screen / kitty keyboard / mouse
+    //    reporting) unless the action is Essential (clipboard, tabs).
+    if let Some((action, chord)) = app.keymap.lookup_event(event, app.modifiers) {
+        let guard = super::keymap::ACTIONS.iter().find(|d| d.action == action).map(|d| d.guard);
+        let blocked = chord.is_program_chord()
+            && guard == Some(super::keymap::Guard::Passthrough)
+            && app_owns_keys(app);
+        if !blocked && run_action(app, action, event, event_loop) {
+            return;
+        }
+    }
 
-        if is_copy {
-            if app.selection.active {
-                if super::mouse::copy_selection(app) {
-                    log::info!("Copied selection");
-                }
-                app.selection.clear();
-                app.request_redraw();
-            }
-            return;
+    // 2a. Legacy Ctrl+Space autocomplete: only at a shell prompt (OSC 133) and never
+    //     while a program owns the keyboard; everywhere else Ctrl+Space is NUL.
+    if app.modifiers.control_key()
+        && !app.modifiers.shift_key()
+        && !app.modifiers.alt_key()
+        && !app.modifiers.super_key()
+        && matches!(event.logical_key, Key::Named(NamedKey::Space))
+        && !app_owns_keys(app)
+        && app.wm.active_pane().terminal.at_shell_prompt()
+    {
+        if !event.repeat {
+            trigger_autocomplete(app);
         }
-        if is_paste {
-            super::mouse::paste_clipboard(app);
-            return;
-        }
-        if is_select_all {
-            super::mouse::select_all(app);
-            return;
-        }
+        return;
     }
 
     // Clear selection on any typing
@@ -117,147 +239,13 @@ pub fn handle_key(app: &mut App, event: &KeyEvent, event_loop: &ActiveEventLoop)
         }
     }
 
-    // 2a2. Pane management (focus / resize / swap / zoom / equalize / close)
+    // 2b. Pane management (focus / resize / swap / zoom / equalize / close)
     if super::panes::try_pane_shortcut(app, event, event_loop) {
         return;
     }
 
-    // 2b. Font zoom: Cmd+= (zoom in), Ctrl+- (zoom out, Cmd+- eaten by macOS), Cmd+0 (reset)
-    if app.modifiers.super_key() && !app.modifiers.shift_key() {
-        if let Key::Character(ref s) = event.logical_key {
-            match s.as_str() {
-                "=" | "+" => { zoom_font(app, 1.0); return; }
-                "0" => { reset_font(app); return; }
-                _ => {}
-            }
-        }
-    }
-    // Ctrl+- / Ctrl+= for zoom (bypass macOS menu interception)
-    if app.modifiers.control_key() && !app.modifiers.shift_key() && !app.modifiers.super_key() {
-        if let Key::Character(ref s) = event.logical_key {
-            match s.as_str() {
-                "-" | "\u{2013}" | "\u{2014}" | "\u{2212}" | "\u{1f}" => { zoom_font(app, -1.0); return; }
-                "=" | "+" => { zoom_font(app, 1.0); return; }
-                "0" => { reset_font(app); return; }
-                _ => {}
-            }
-        }
-    }
-    // Ctrl+Shift shortcuts (avoid macOS interception)
-    if app.modifiers.control_key() && app.modifiers.shift_key() {
-        if let Key::Character(ref s) = event.logical_key {
-            match s.to_lowercase().as_str() {
-                "z" if !event.repeat => {
-                    if app.timewarp_browser.active { app.timewarp_browser.exit(); }
-                    else { app.timewarp_browser.enter(); }
-                    app.request_redraw();
-                    return;
-                }
-                "v" if !event.repeat => {
-                    if !app.observer.enabled { app.observer.toggle(); }
-                    app.observer_summary = Some(app.observer.generate_summary());
-                    app.request_redraw();
-                    return;
-                }
-                _ => {}
-            }
-        }
-    }
-
-    // 2b2. Cmd+D (no shift) = vertical split, Cmd+F = search
-    if app.modifiers.super_key() && !app.modifiers.shift_key() {
-        if let Key::Character(ref s) = event.logical_key {
-            if s.eq_ignore_ascii_case("d") && !event.repeat {
-                super::panes::run_pane_cmd(app, PaneCmd::SplitRight, event_loop);
-                return;
-            }
-            if s.eq_ignore_ascii_case("f") && !event.repeat {
-                app.search.toggle();
-                if app.search.visible {
-                    let pane = app.wm.active_pane();
-                    app.search.search(&pane.terminal.scrollback, &pane.terminal.grid);
-                }
-                app.request_redraw();
-                return;
-            }
-            if s.eq_ignore_ascii_case("p") && !event.repeat {
-                super::overlays::open_command_palette(app);
-                app.request_redraw();
-                return;
-            }
-        }
-    }
-
-    // 2c. Ctrl+Space → autocomplete (always Ctrl, not Cmd)
-    if app.modifiers.control_key() && !app.modifiers.shift_key() {
-        if let Key::Named(NamedKey::Space) = event.logical_key {
-            trigger_autocomplete(app);
-            return;
-        }
-    }
-
-    // 2c2. Ctrl+R → Smart History Search (fzf/atuin-style reverse search)
-    if app.modifiers.control_key() && !app.modifiers.shift_key() {
-        if let Key::Character(ref s) = event.logical_key {
-            if s.eq_ignore_ascii_case("r") && !event.repeat {
-                app.history.toggle();
-                app.request_redraw();
-                return;
-            }
-        }
-    }
-
-    // 2c. Ctrl+Shift+number — visual effects (NOT Cmd, to avoid macOS screenshot conflict)
-    if app.modifiers.control_key() && app.modifiers.shift_key() {
-        if let Key::Character(ref s) = event.logical_key {
-            let effect_handled = match s.as_str() {
-                "1" | "!" => { set_effect(app, Some(EffectKind::Crt)); true }
-                "2" | "@" => { set_effect(app, Some(EffectKind::Glitch)); true }
-                "3" | "#" => { set_effect(app, Some(EffectKind::Neon)); true }
-                "4" | "$" => { set_effect(app, Some(EffectKind::Matrix)); true }
-                "5" | "%" => { set_effect(app, Some(EffectKind::Amber)); true }
-                "6" | "^" => { set_effect(app, Some(EffectKind::Hologram)); true }
-                "0" | ")" => { set_effect(app, None); true }
-                "=" | "+" => { adjust_effect_intensity(app, 0.1); true }
-                "-" | "_" => { adjust_effect_intensity(app, -0.1); true }
-                _ => false,
-            };
-            if effect_handled && !event.repeat {
-                app.request_redraw();
-                return;
-            }
-        }
-    }
-
-    // 3. Cmd+Shift (macOS) / Ctrl+Shift (others) hotkeys
-    if cmd_or_ctrl(&app.modifiers) && app.modifiers.shift_key() {
-        if let Key::Character(ref s) = event.logical_key {
-            if !event.repeat && handle_mod_shift(app, s, event_loop) {
-                app.request_redraw();
-                return;
-            }
-        }
-    }
-
-    // 4. Ctrl+Tab — switch tabs (always Ctrl, Cmd+Tab is macOS App Switcher)
-    if app.modifiers.control_key() {
-        if let Key::Named(NamedKey::Tab) = event.logical_key {
-            if !event.repeat {
-                if app.modifiers.shift_key() {
-                    app.wm.prev_tab();
-                } else {
-                    app.wm.next_tab();
-                }
-                sync_webview_for_tab(app);
-                app.update_title();
-                app.request_redraw();
-            }
-            return;
-        }
-    }
-
     // 5. Shift+PageUp/PageDown — scrollback navigation
-    if app.modifiers.shift_key() && !app.modifiers.control_key() {
+    if app.modifiers.shift_key() && !app.modifiers.control_key() && !app.wm.active_pane().terminal.is_alt_screen() {
         match event.logical_key {
             Key::Named(NamedKey::PageUp) => {
                 let rows = app.wm.active_pane().terminal.rows;
@@ -289,30 +277,32 @@ pub fn handle_key(app: &mut App, event: &KeyEvent, event_loop: &ActiveEventLoop)
     // 6. Alt+Arrow pane focus is handled by panes::try_pane_shortcut (step 2a2).
 
     // 7. Normal input → active pane (or broadcast to all panes)
-    let app_cursor = app.wm.active_pane().terminal.app_cursor_keys;
-    if let Some(bytes) = input::encode_key(event, app.modifiers, app_cursor) {
-        // Enter key: feed observer + block tracking
-        if bytes == b"\r" {
+    let opts = encode_opts(app);
+    if let Some(bytes) = input::encode_key(event, app.modifiers, &opts) {
+        input::note_forwarded(event.physical_key, true);
+        // The shell behind this pane exited ("[process exited N]" is on screen):
+        // Enter closes the pane/tab instead of typing into a dead PTY.
+        if (bytes == b"\r" || bytes == b"\x1b[13u") && app.wm.active_pane().exited.is_some() {
+            if app.wm.close_current() {
+                event_loop.exit();
+            }
+            app.update_title();
+            return;
+        }
+        // Enter key: feed observer + block tracking (also CSI 13 u when the
+        // program asked for every key as an escape code, so safety checks still run)
+        if bytes == b"\r" || bytes == b"\x1b[13u" {
             // `# natural language` at the prompt: generate instead of running.
             if crate::ai::inline::on_enter(app) {
                 return;
             }
+            // The command being submitted: OSC 133 marked input when the shell
+            // is integrated (never while a command runs, at a non-prompt, or
+            // in the alternate screen), screen scraping only without OSC 133.
             let (cmd_opt, scrollback_line) = {
                 let term = &app.wm.active_pane().terminal;
                 let row = term.cursor_row.min(term.grid.len().saturating_sub(1));
-                let line: String = term.grid[row].iter().map(|c| c.c).collect();
-                let trimmed = line.trim();
-                let cmd = if !trimmed.is_empty() {
-                    let c = if let Some(pos) = trimmed.rfind(|c| c == '$' || c == '%') {
-                        trimmed[pos + 1..].trim()
-                    } else {
-                        trimmed
-                    };
-                    if c.is_empty() { None } else { Some(c.to_string()) }
-                } else {
-                    None
-                };
-                (cmd, term.scrollback.len() + row)
+                (term.pending_command_line(), term.scrollback.len() + row)
             };
 
             if let Some(cmd) = cmd_opt {
@@ -323,7 +313,7 @@ pub fn handle_key(app: &mut App, event: &KeyEvent, event_loop: &ActiveEventLoop)
                 // buffer of its own), so they're already sitting uncommitted
                 // in the shell's line editor — confirming later just needs
                 // to submit that buffer (see overlays::handle_exec_preview).
-                if let Some(preview) = ExecPreview::check_command_in(&cmd, app.wm.active_pane().terminal.cwd.as_deref()) {
+                if let Some(preview) = ExecPreview::check_for_enter(&cmd, app.wm.active_pane().terminal.cwd.as_deref()) {
                     app.exec_preview = preview;
                     app.exec_preview.visible = true;
                     app.request_redraw();
@@ -340,16 +330,11 @@ pub fn handle_key(app: &mut App, event: &KeyEvent, event_loop: &ActiveEventLoop)
                 if app.audit.enabled {
                     app.audit.log_command(&cmd, 0);
                 }
-                // Teaching mode: ask LLM to explain the command
-                if app.teaching.enabled {
-                    let prompt = crate::tools::teaching::TeachingMode::explain_prompt(&cmd);
+                // Teaching mode: explains automatically only when opted in
+                // (`teaching.on_submit`); otherwise on demand, see MenuAction::TeachingMode.
+                if crate::ai::consent::allowed(app) {
                     let config = app.llm.config.clone();
-                    let (tx, rx) = std::sync::mpsc::channel();
-                    std::thread::spawn(move || {
-                        let result = crate::ai::backend::complete_simple(&config, &prompt);
-                        let _ = tx.send(result);
-                    });
-                    app.teaching.set_receiver(rx);
+                    app.teaching.on_submit(&cmd, &config);
                 }
             }
         }
@@ -451,7 +436,19 @@ pub fn handle_menu_action(app: &mut App, action: MenuAction, event_loop: &Active
         MenuAction::Heatmap => app.heatmap.toggle(),
         MenuAction::SecretMask => app.secret_mask.toggle(),
         MenuAction::AuditLog => app.audit.toggle(),
-        MenuAction::TeachingMode => app.teaching.toggle(),
+        MenuAction::TeachingMode => {
+            // While on, using the shortcut again with a command typed at the prompt
+            // explains that command (before it runs); with an empty prompt it toggles off.
+            let typed = if app.teaching.enabled { app.wm.active_pane().terminal.typed_input() } else { None };
+            match typed.filter(|t| !t.trim().is_empty()) {
+                Some(cmd) if crate::ai::consent::allowed(app) => {
+                    let config = app.llm.config.clone();
+                    app.teaching.explain_now(&cmd, &config);
+                }
+                Some(_) => {}
+                None => app.teaching.toggle(),
+            }
+        }
         // AI
         MenuAction::AiAssistant => crate::ai::chat::toggle(app),
         MenuAction::ObserverMode => {
@@ -526,14 +523,15 @@ pub fn do_ssh_connect(app: &mut App, req: SshConnectRequest) {
     let proxy = app.wm.get_proxy();
     let proxy2 = proxy.clone();
     let (tx, rx) = std::sync::mpsc::channel();
+    let (prompt_tx, prompt_rx) = std::sync::mpsc::channel();
 
     std::thread::spawn(move || {
-        let result = SshPty::connect(config, cols, rows, proxy2);
+        let result = SshPty::connect(config, cols, rows, proxy2, prompt_tx);
         let _ = tx.send(result.map_err(|e| e.to_string()));
         let _ = proxy.send_event(());
     });
 
-    app.ssh_connecting = Some(SshConnecting { rx, req });
+    app.ssh_connecting = Some(SshConnecting { rx, req, prompts: prompt_rx });
 }
 
 // ── WebView ──
@@ -543,94 +541,6 @@ pub fn open_webview(app: &mut App, url: &str) {
 }
 
 // ── Private helpers ──
-
-fn handle_mod_shift(app: &mut App, key: &str, event_loop: &ActiveEventLoop) -> bool {
-    match key {
-        "r" | "R" => { app.toggle_recording(); true }
-        "t" | "T" => {
-            let (c, r) = pane_size(app);
-            app.wm.new_tab(c, r);
-            sync_webview_for_tab(app);
-            app.update_title();
-            true
-        }
-        "w" | "W" => {
-            if app.wm.close_current() { event_loop.exit(); }
-            app.update_title();
-            true
-        }
-        "d" | "D" => {
-            // Cmd+Shift+D = split down (new pane below)
-            super::panes::run_pane_cmd(app, PaneCmd::SplitDown, event_loop);
-            true
-        }
-        "-" | "_" => {
-            super::panes::run_pane_cmd(app, PaneCmd::SplitDown, event_loop);
-            true
-        }
-        // Effects moved to Ctrl+Shift+1-8 (avoids macOS screenshot conflict)
-        "," | "<" => { app.prefs.toggle(); true }
-        "[" | "{" => {
-            app.wm.prev_tab(); sync_webview_for_tab(app); app.update_title(); true
-        }
-        "]" | "}" => {
-            app.wm.next_tab(); sync_webview_for_tab(app); app.update_title(); true
-        }
-        "?" | "/" => { app.welcome.toggle(); true }
-        "z" | "Z" => {
-            if app.timewarp_browser.active {
-                app.timewarp_browser.exit();
-            } else {
-                app.timewarp_browser.enter();
-            }
-            true
-        }
-        "h" | "H" => {
-            app.hud_visible = !app.hud_visible;
-            if app.hud_visible { app.hud.update(); }
-            // Resize panes to account for HUD space
-            resize_from_window(app);
-            true
-        }
-        "s" | "S" => { app.ssh_dialog.toggle(); true }
-        "a" | "A" => { crate::ai::chat::toggle(app); true }
-        "b" | "B" => { crate::network::browser::toggle(app); true }
-        "g" | "G" => {
-            app.git_panel.toggle();
-            true
-        }
-        "k" | "K" => {
-            let panes = app.wm.active_tab().panes();
-            app.compare_view.collect_and_compare(&panes);
-            true
-        }
-        "f" | "F" => {
-            app.search.toggle();
-            if app.search.visible {
-                let pane = app.wm.active_pane();
-                app.search.search(&pane.terminal.scrollback, &pane.terminal.grid);
-            }
-            true
-        }
-        "e" | "E" => { app.file_manager.toggle(); true }
-        "i" | "I" => { app.cicd.toggle(); true }
-        "l" | "L" => { app.teaching.toggle(); true }
-        "y" | "Y" => { app.heatmap.toggle(); true }
-        "o" | "O" => { app.docker.toggle(); true }
-        "x" | "X" => { app.regex_playground.toggle(); true }
-        "m" | "M" => { app.secret_mask.toggle(); true }
-        "u" | "U" => { app.audit.toggle(); true }
-        // "v" removed — Cmd+Shift+V intercepted by macOS "Paste and Match Style"
-        // Observer moved to Ctrl+Shift+V below
-        "p" | "P" => {
-            app.broadcast = !app.broadcast;
-            app.update_title();
-            log::info!("Broadcast mode: {}", if app.broadcast { "ON" } else { "OFF" });
-            true
-        }
-        _ => false,
-    }
-}
 
 pub(super) fn sync_webview_for_tab(app: &mut App) {
     if let Some(wv) = &mut app.webview {

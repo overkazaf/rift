@@ -4,12 +4,15 @@ set -e
 
 APP_NAME="Rift"
 BUNDLE_ID="com.overkazaf.rift"
-VERSION="0.3.0"
+VERSION="${RIFT_VERSION:-0.3.0}"
 ICON_PNG="assets/icon.png"
 
-# Build release
-echo "Building release..."
-cargo build --release --features gpu,webview 2>/dev/null || cargo build --release
+# Build release (CI sets SKIP_BUILD=1 after producing target/release/rift itself,
+# e.g. a lipo'd universal binary)
+if [ -z "${SKIP_BUILD:-}" ]; then
+    echo "Building release..."
+    cargo build --release --features gpu,webview 2>/dev/null || cargo build --release
+fi
 
 # Create bundle structure
 BUNDLE="target/${APP_NAME}.app"

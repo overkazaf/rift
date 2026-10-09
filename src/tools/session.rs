@@ -396,7 +396,7 @@ fn layout_to_json(node: &PaneNode<Option<String>>, out: &mut String) {
 }
 
 /// Maximum nesting accepted when reading a layout (guards a corrupt file).
-const MAX_LAYOUT_DEPTH: usize = 32;
+const MAX_LAYOUT_DEPTH: usize = 256;
 
 fn layout_from_json(v: &JsonValue, depth: usize) -> Option<PaneNode<Option<String>>> {
     if depth > MAX_LAYOUT_DEPTH {
@@ -471,14 +471,19 @@ fn obj_get<'a>(obj: &'a [(String, JsonValue)], key: &str) -> Option<&'a JsonValu
     obj.iter().find(|(k, _)| k == key).map(|(_, v)| v)
 }
 
+/// Maximum JSON nesting (objects/arrays) accepted when parsing a session file.
+/// Layouts nest two JSON levels per split, so this comfortably fits MAX_LAYOUT_DEPTH.
+const MAX_JSON_DEPTH: usize = 2 * MAX_LAYOUT_DEPTH + 16;
+
 struct JsonParser {
     chars: Vec<char>,
     pos: usize,
+    depth: usize,
 }
 
 impl JsonParser {
     fn new(src: &str) -> Self {
-        Self { chars: src.chars().collect(), pos: 0 }
+        Self { chars: src.chars().collect(), pos: 0, depth: 0 }
     }
 
     fn skip_ws(&mut self) {
@@ -504,8 +509,16 @@ impl JsonParser {
     fn parse_value(&mut self) -> Option<JsonValue> {
         self.skip_ws();
         match self.peek()? {
-            '{' => self.parse_object(),
-            '[' => self.parse_array(),
+            '{' | '[' => {
+                // Bound recursion so a corrupt/hostile session file can't overflow the stack.
+                if self.depth >= MAX_JSON_DEPTH {
+                    return None;
+                }
+                self.depth += 1;
+                let v = if self.peek() == Some('{') { self.parse_object() } else { self.parse_array() };
+                self.depth -= 1;
+                v
+            }
             '"' => self.parse_string().map(JsonValue::Str),
             't' => self.parse_lit("true", JsonValue::Bool(true)),
             'f' => self.parse_lit("false", JsonValue::Bool(false)),
@@ -690,4 +703,11 @@ mod tests {
             assert_eq!(expand_tilde("~/code"), home.join("code").display().to_string());
         }
     }
+
+    #[test]
+    fn hostile_deeply_nested_json_does_not_overflow() {
+        let deep = "[".repeat(100_000) + &"]".repeat(100_000);
+        assert!(JsonParser::new(&deep).parse_value().is_none());
+    }
+
 }

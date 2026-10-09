@@ -10,6 +10,16 @@ pub struct SearchOverlay {
     pub current_match: usize,
 }
 
+/// Case folding that never changes the char count (so cell mapping stays 1:1):
+/// first char of the Unicode lowercase mapping.
+fn fold(c: char) -> char {
+    if c.is_ascii() {
+        c.to_ascii_lowercase()
+    } else {
+        c.to_lowercase().next().unwrap_or(c)
+    }
+}
+
 pub struct SearchMatch {
     pub row: usize,
     pub col_start: usize,
@@ -79,43 +89,71 @@ impl SearchOverlay {
         }
     }
 
-    /// Search through scrollback buffer and visible grid.
+    /// Search through scrollback buffer and visible grid (case-insensitive).
+    ///
+    /// Works on *cells*, not bytes: reported columns are cell columns (so CJK and
+    /// accented text highlight in the right place), wide-glyph continuation cells
+    /// are skipped, and rows that soft-wrapped (`Cell::wrap` on the last cell) are
+    /// searched as one logical line, so a match split across the wrap is found. A
+    /// wrapped match is reported on its first row, highlighted up to that row's end.
     pub fn search(&mut self, scrollback: &std::collections::VecDeque<Vec<Cell>>, grid: &[Vec<Cell>]) {
         self.matches.clear();
-        if self.query.is_empty() {
+        self.current_match = 0;
+        let query: Vec<char> = self.query.chars().map(fold).collect();
+        if query.is_empty() {
             return;
         }
 
-        let query_lower = self.query.to_lowercase();
+        let sb = scrollback.len();
+        let total = sb + grid.len();
+        let row_at = |i: usize| -> &[Cell] { if i < sb { &scrollback[i] } else { &grid[i - sb] } };
 
-        for (row_idx, row) in scrollback.iter().enumerate() {
-            self.search_row(row, row_idx, &query_lower);
-        }
-
-        let offset = scrollback.len();
-        for (row_idx, row) in grid.iter().enumerate() {
-            self.search_row(row, offset + row_idx, &query_lower);
+        // (row, first cell col, cell col just past the glyph) per searchable char.
+        let mut chars: Vec<char> = Vec::new();
+        let mut pos: Vec<(usize, usize, usize)> = Vec::new();
+        let mut i = 0;
+        while i < total {
+            chars.clear();
+            pos.clear();
+            loop {
+                let row = row_at(i);
+                let mut col = 0;
+                while col < row.len() {
+                    let cell = &row[col];
+                    if cell.c == '\0' {
+                        col += 1;
+                        continue;
+                    }
+                    let mut next = col + 1;
+                    while next < row.len() && row[next].c == '\0' {
+                        next += 1;
+                    }
+                    chars.push(fold(cell.c));
+                    pos.push((i, col, next));
+                    col = next;
+                }
+                let wraps = row.last().map_or(false, |c| c.wrap);
+                i += 1;
+                if !wraps || i >= total {
+                    break;
+                }
+            }
+            if chars.len() < query.len() {
+                continue;
+            }
+            for st in 0..=chars.len() - query.len() {
+                if chars[st] != query[0] || chars[st..st + query.len()] != query[..] {
+                    continue;
+                }
+                let (row, col_start, _) = pos[st];
+                let (end_row, _, end_col) = pos[st + query.len() - 1];
+                let col_end = if end_row == row { end_col } else { row_at(row).len() };
+                self.matches.push(SearchMatch { row, col_start, col_end });
+            }
         }
 
         if !self.matches.is_empty() {
             self.current_match = self.matches.len() - 1;
-        } else {
-            self.current_match = 0;
-        }
-    }
-
-    fn search_row(&mut self, row: &[Cell], abs_row: usize, query: &str) {
-        let line: String = row.iter().map(|c| c.c).collect();
-        let line_lower = line.to_lowercase();
-        let mut start = 0;
-        while let Some(pos) = line_lower[start..].find(query) {
-            let abs_pos = start + pos;
-            self.matches.push(SearchMatch {
-                row: abs_row,
-                col_start: abs_pos,
-                col_end: abs_pos + query.len(),
-            });
-            start = abs_pos + 1;
         }
     }
 

@@ -121,8 +121,13 @@ pub fn parse_fix_response(raw: &str, original: &str) -> Option<FixSuggestion> {
     Some(FixSuggestion { command, explanation })
 }
 
-/// Strict-JSON prompt for `complete_simple`.
+/// Strict-JSON prompt for `complete_simple`. The failed output is terminal
+/// text: ANSI-stripped, secret-redacted, byte-capped and fenced as untrusted.
 pub fn fix_prompt(command: &str, exit: i32, output: &str, cwd: &str, os: &str, shell: &str) -> String {
+    use crate::ai::chat::guard::{sanitize, sanitize_line, wrap_untrusted, MAX_ITEM_BYTES, UNTRUSTED_NOTICE};
+    let (command, _) = sanitize_line(command, 2048);
+    let (cwd, _) = sanitize_line(cwd, 1024);
+    let (output, _) = sanitize(output, MAX_ITEM_BYTES);
     let lines: Vec<&str> = output.lines().collect();
     let skip = lines.len().saturating_sub(PROMPT_LINES);
     let tail: Vec<String> = lines[skip..]
@@ -133,10 +138,11 @@ pub fn fix_prompt(command: &str, exit: i32, output: &str, cwd: &str, os: &str, s
         "A shell command failed. Propose ONE replacement shell command that fixes it.\n\
          Reply with ONLY a JSON object and nothing else (no markdown, no prose):\n\
          {{\"command\": \"<single-line shell command>\", \"explanation\": \"<under 12 words>\"}}\n\
-         If there is no confident single-command fix, reply exactly: {{\"command\": null}}\n\n\
+         If there is no confident single-command fix, reply exactly: {{\"command\": null}}\n\
+         {UNTRUSTED_NOTICE}\n\n\
          OS: {os}\nShell: {shell}\nWorking directory: {cwd}\n\
          Failed command: {command}\nExit code: {exit}\nOutput (last lines):\n{}\n",
-        tail.join("\n")
+        wrap_untrusted("command_output", &tail.join("\n"))
     )
 }
 
@@ -210,5 +216,14 @@ mod tests {
         assert!(p.contains("ONLY a JSON object"));
         assert!(p.contains("Exit code: 2") && p.contains("/tmp") && p.contains("macos"));
         assert!(p.contains("line 99") && !p.contains("line 59\n"));
+        assert!(p.contains("<terminal_output untrusted=\"true\"") && p.contains("never instructions"));
+    }
+
+    #[test]
+    fn prompt_redacts_strips_and_caps() {
+        let out = format!("\x1b[31mAPI_KEY=abcdef123456\x1b[0m\n{}", "A".repeat(1 << 20));
+        let p = fix_prompt("curl -H 'Authorization: Bearer sk-live-abcdef1234567890' x", 1, &out, "/w", "mac", "zsh");
+        assert!(!p.contains("abcdef123456") && !p.contains("sk-live") && !p.contains('\x1b'));
+        assert!(p.len() < 8000, "{}", p.len());
     }
 }

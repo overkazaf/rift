@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 use crate::ui::kit::{Ctx, Rect, Tokens, Tone};
 
 #[allow(dead_code)]
+#[derive(Clone)]
 pub struct HudData {
     pub user: String,
     pub host: String,
@@ -53,6 +54,9 @@ pub struct Hud {
     static_inited: bool,
     cpu_hist: VecDeque<f32>,
     mem_hist: VecDeque<f32>,
+    /// In-flight background refresh (system stats shell out to ps/df/git/...,
+    /// which must never run on the UI thread).
+    worker: Option<std::sync::mpsc::Receiver<Hud>>,
 }
 
 /// Samples kept for the sparklines (one per `update_interval`, ~80s).
@@ -70,8 +74,10 @@ impl Hud {
             static_inited: false,
             cpu_hist: VecDeque::with_capacity(HIST_LEN),
             mem_hist: VecDeque::with_capacity(HIST_LEN),
+            worker: None,
         };
-        hud.update();
+        // First sample is collected lazily on a worker thread (see `update`).
+        hud.last_update = Instant::now() - Duration::from_secs(10);
         hud
     }
 
@@ -88,6 +94,7 @@ impl Hud {
             static_inited: true,
             cpu_hist: cpu_hist.iter().copied().collect(),
             mem_hist: mem_hist.iter().copied().collect(),
+            worker: None,
         }
     }
 
@@ -95,7 +102,58 @@ impl Hud {
         self.last_update.elapsed() >= self.update_interval
     }
 
+    /// Start a background refresh (no-op while one is running). Results are
+    /// picked up by [`Hud::poll`]; the UI thread never blocks on process forks.
     pub fn update(&mut self) {
+        if self.worker.is_some() {
+            return;
+        }
+        self.last_update = Instant::now();
+        let mut snap = Hud {
+            last_update: self.last_update,
+            update_interval: self.update_interval,
+            mem_used_mb: self.mem_used_mb,
+            mem_total_mb: self.mem_total_mb,
+            cpu_usage: self.cpu_usage,
+            cached: self.cached.clone(),
+            static_inited: self.static_inited,
+            cpu_hist: self.cpu_hist.clone(),
+            mem_hist: self.mem_hist.clone(),
+            worker: None,
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.worker = Some(rx);
+        let spawned = std::thread::Builder::new().name("hud-sampler".into()).spawn(move || {
+            snap.update_sync();
+            let _ = tx.send(snap);
+            crate::wake::wake();
+        });
+        if spawned.is_err() {
+            self.worker = None;
+        }
+    }
+
+    /// Adopt a finished background sample. Returns true when the data changed.
+    pub fn poll(&mut self) -> bool {
+        let Some(rx) = &self.worker else { return false };
+        match rx.try_recv() {
+            Ok(done) => {
+                let last = self.last_update;
+                *self = done;
+                self.last_update = last;
+                self.worker = None;
+                true
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => false,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.worker = None;
+                false
+            }
+        }
+    }
+
+    /// Synchronous collection; runs on the sampler thread.
+    pub(crate) fn update_sync(&mut self) {
         self.last_update = Instant::now();
         self.update_memory();
         self.update_cpu();
@@ -497,7 +555,7 @@ mod qa_tests {
     fn history_is_bounded() {
         let mut hud = Hud::new();
         for _ in 0..(HIST_LEN + 10) {
-            hud.update();
+            hud.update_sync(); // `update()` samples on a worker thread; the test wants determinism
         }
         let (c, m) = hud.history();
         assert_eq!((c.len(), m.len()), (HIST_LEN, HIST_LEN));

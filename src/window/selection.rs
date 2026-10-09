@@ -197,15 +197,17 @@ impl Selection {
             let mut seg = String::new();
             for cell in &cells[from..to] {
                 // '\0' marks the right half of a wide character.
-                if cell.c != '\0' {
-                    seg.push(cell.c);
-                }
+                // Clusters (combining marks, ZWJ sequences) are copied whole.
+                cell.push_text(&mut seg);
             }
-            if row < er || self.mode == SelMode::Block {
+            // A soft-wrapped row continues on the next one: join without a newline
+            // (and keep its trailing spaces, they are real content of the line).
+            let joins_next = row < er && self.mode != SelMode::Block && cells.last().map_or(false, |c| c.wrap);
+            if (row < er && !joins_next) || self.mode == SelMode::Block {
                 seg.truncate(seg.trim_end_matches(' ').len());
             }
             text.push_str(&seg);
-            if row < er {
+            if row < er && !joins_next {
                 text.push('\n');
             }
         }
@@ -257,7 +259,8 @@ pub fn word_range(cells: &[Cell], col: usize) -> (usize, usize) {
     if cells[col].c == '\0' && col > 0 {
         col -= 1;
     }
-    let line: String = cells.iter().map(|c| if c.c == '\0' { ' ' } else { c.c }).collect();
+    // '\0' (wide-glyph continuation) stays in the line: detect_urls keeps it inside a URL.
+    let line: String = cells.iter().map(|c| c.c).collect();
     if let Some((s, e, _)) = crate::tools::url_detect::detect_urls(&line)
         .into_iter()
         .find(|(s, e, _)| col >= *s && col < *e)
@@ -284,11 +287,10 @@ pub fn word_range(cells: &[Cell], col: usize) -> (usize, usize) {
     (s, e)
 }
 
-/// A row that is filled up to its last column is assumed to continue on the
-/// next row (the grid keeps no explicit wrap flag; this mirrors what
-/// `terminal::semantic` assumes).
+/// Did this row soft-wrap into the next one? (`Cell::wrap` on its last cell,
+/// set by the terminal when auto-wrap moved the cursor to the next line.)
 pub fn row_is_wrapped(cells: &[Cell]) -> bool {
-    cells.last().map_or(false, |c| c.c != ' ')
+    cells.last().map_or(false, |c| c.wrap)
 }
 
 /// First and last absolute row of the logical (soft-wrap joined) line that
@@ -387,6 +389,34 @@ pub fn paste_from_clipboard() -> Option<String> {
     None
 }
 
+/// Make text safe to write into a PTY as user input.
+///
+/// * removes the bracketed-paste markers `ESC[200~` / `ESC[201~` (a pasted
+///   `ESC[201~` would end the paste early and run the rest as typed input),
+/// * removes every remaining ESC, DEL, C0 control (except tab, LF, CR) and C1
+///   control (U+0080..=U+009F, which include the 8-bit CSI),
+/// * turns CRLF into CR (what Enter sends), in both paste modes.
+pub fn sanitize_paste(text: &str, bracketed: bool) -> String {
+    let _ = bracketed; // same rules in both modes; the caller adds the markers.
+    let text = text.replace("\x1b[200~", "").replace("\x1b[201~", "");
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\r' => {
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                out.push('\r');
+            }
+            '\n' | '\t' => out.push(c),
+            c if (c as u32) < 0x20 || c == '\x7f' || ('\u{80}'..='\u{9f}').contains(&c) => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -473,7 +503,12 @@ mod tests {
 
     #[test]
     fn wrapped_row_heuristic() {
-        assert!(row_is_wrapped(&cells("abcd")));
+        // Only the terminal's soft-wrap flag on the last cell counts - a full row
+        // that ended in a real newline is not wrapped.
+        let mut full = cells("abcd");
+        assert!(!row_is_wrapped(&full));
+        full.last_mut().unwrap().wrap = true;
+        assert!(row_is_wrapped(&full));
         assert!(!row_is_wrapped(&cells("abc ")));
         assert!(!row_is_wrapped(&[]));
     }
@@ -572,5 +607,22 @@ mod tests {
         s.select_all(3, 3);
         assert!(s.active);
         assert_eq!(text(&s, &g), "one\ntwo\nsix");
+    }
+
+    #[test]
+    fn sanitize_paste_strips_escapes_and_paste_markers() {
+        assert_eq!(sanitize_paste("ls\x1b[201~; rm -rf ~\r", true), "ls; rm -rf ~\r");
+        assert_eq!(sanitize_paste("a\x1b[200~b", false), "ab");
+        assert_eq!(sanitize_paste("\x1b]0;title\x07x\x1b[31mred", true), "]0;titlex[31mred");
+        assert_eq!(sanitize_paste("c\u{9b}201~d\u{85}e", true), "c201~de");
+        assert_eq!(sanitize_paste("a\x03b\x04c\x7fd\x00e", false), "abcde");
+    }
+
+    #[test]
+    fn sanitize_paste_keeps_text_and_normalizes_newlines() {
+        assert_eq!(sanitize_paste("a\tb \u{4e2d}\u{6587} \u{1f600}", true), "a\tb \u{4e2d}\u{6587} \u{1f600}");
+        assert_eq!(sanitize_paste("l1\r\nl2\r\n", true), "l1\rl2\r");
+        assert_eq!(sanitize_paste("l1\nl2\r", false), "l1\nl2\r");
+        assert_eq!(sanitize_paste("", true), "");
     }
 }

@@ -47,8 +47,10 @@ impl Terminal {
     }
 
     /// Text from (`start_line`, `start_col`) up to (`end_line`, `end_col`)
-    /// exclusive of the end position. Rows that are filled to the last column
-    /// are treated as soft-wrapped and joined without a newline.
+    /// exclusive of the end position. Rows flagged as soft-wrapped (the
+    /// terminal sets `Cell::wrap` on the last cell when auto-wrap moved on to
+    /// the next row) are joined without a newline; every other row break is a
+    /// real line break, so an exactly-full row followed by `\n` stays split.
     fn text_between(&self, start: (usize, usize), end: (usize, usize)) -> String {
         let mut out = String::new();
         let (sl, sc) = start;
@@ -59,8 +61,11 @@ impl Terminal {
             let from = if line == sl { sc.min(row.len()) } else { 0 };
             let to = if line == el { ec.min(row.len()) } else { row.len() };
             if from >= to { continue; }
-            let seg: String = row[from..to].iter().filter(|c| c.c != '\0').map(|c| c.c).collect();
-            let wrapped = line != el && row.last().map_or(false, |c| c.c != ' ' && c.c != '\0');
+            let mut seg = String::new();
+            for c in &row[from..to] {
+                c.push_text(&mut seg);
+            }
+            let wrapped = line != el && row.last().map_or(false, |c| c.wrap);
             if wrapped {
                 out.push_str(&seg);
             } else {
@@ -69,6 +74,24 @@ impl Terminal {
             }
         }
         out.trim().to_string()
+    }
+
+    /// The pending input as marked by OSC 133;B (first prompt) plus any
+    /// continuation prompts (PS2) up to `end`: PS2 text is not part of the
+    /// command, and the segments are joined with real newlines.
+    fn marked_input(&self, end: (usize, usize)) -> String {
+        let starts = self.blocks.input_starts();
+        let mut parts = Vec::new();
+        for (k, &start) in starts.iter().enumerate() {
+            let seg_end = match starts.get(k + 1) {
+                Some(&(l, _)) => (l, 0),
+                None => end,
+            };
+            if seg_end < start { continue; }
+            let t = self.text_between(start, seg_end);
+            parts.push(strip_rprompt(&t).to_string());
+        }
+        parts.join("\n")
     }
 
     /// True while the shell sits at an editable prompt: OSC 133 is active, a
@@ -83,7 +106,8 @@ impl Terminal {
 
     /// Text typed at the prompt, from the `B` mark up to the cursor (so
     /// ghost text such as zsh autosuggestions after the cursor is excluded).
-    /// `None` when not at a prompt.
+    /// Multi-line input (continuation prompts) comes back as one string with
+    /// `\n` separators and without the PS2 prompts. `None` when not at a prompt.
     pub fn typed_input(&self) -> Option<String> {
         if !self.at_shell_prompt() {
             return None;
@@ -93,7 +117,106 @@ impl Terminal {
         if end < start {
             return Some(String::new());
         }
-        Some(self.text_between(start, end))
+        Some(self.marked_input(end))
+    }
+
+    /// Real (non-ghost) buffer text to the right of the cursor on its row
+    /// (and on the rows it soft-wraps into). Non-empty only when the user
+    /// moved the cursor back into the line, or for non-dim trailing text.
+    fn cursor_tail(&self) -> String {
+        let mut out = String::new();
+        let mut line = self.abs_cursor_line();
+        let mut col = self.cursor_col;
+        for _ in 0..8 {
+            let Some(row) = self.abs_row(line) else { break };
+            let mut gap = 0usize;
+            let mut seg = String::new();
+            let mut stopped = false;
+            for c in row.iter().skip(col) {
+                if is_ghost(c) { stopped = true; break; }
+                if c.c == ' ' { gap += 1; if gap >= 4 { stopped = true; break; } } else { gap = 0; }
+                c.push_text(&mut seg);
+            }
+            out.push_str(seg.trim_end());
+            if stopped || !row.last().map_or(false, |c| c.wrap) { break; }
+            line += 1;
+            col = 0;
+        }
+        out
+    }
+
+    /// What pressing Enter would submit, for the Preview-Then-Accept safety
+    /// check. `None` means "do not intercept": full-screen program, command
+    /// running, not at a prompt, or nothing typed.
+    ///
+    /// With shell integration (OSC 133) the marked input is authoritative.
+    /// Without it the screen is scraped heuristically, and only if the cursor
+    /// row really looks like a shell prompt.
+    pub fn pending_command_line(&self) -> Option<String> {
+        if self.is_alt_screen() {
+            return None;
+        }
+        let text = if self.blocks.osc_seen() {
+            if !self.at_shell_prompt() {
+                return None;
+            }
+            let mut t = self.typed_input()?;
+            t.push_str(&self.cursor_tail());
+            t
+        } else {
+            self.scrape_command_line()?
+        };
+        let t = text.trim();
+        if t.is_empty() { None } else { Some(t.to_string()) }
+    }
+
+    /// Fallback for shells without integration: reconstruct the command from
+    /// the screen. Walks up through continuation prompts to the PS1 row.
+    fn scrape_command_line(&self) -> Option<String> {
+        let sb = self.scrapable_row_base();
+        let mut abs = sb + self.cursor_row.min(self.grid.len().saturating_sub(1));
+        let mut lines: Vec<String> = Vec::new();
+        let mut cursor_row = true;
+        for _ in 0..32 {
+            // The logical (soft-wrap joined) line ending at `abs`.
+            let mut first = abs;
+            while first > 0 && self.abs_row(first - 1).map_or(false, |r| r.last().map_or(false, |c| c.wrap)) {
+                first -= 1;
+            }
+            let mut text = String::new();
+            for l in first..=abs {
+                let Some(row) = self.abs_row(l) else { break };
+                let upto = if cursor_row && l == abs { self.cursor_col.min(row.len()) } else { row.len() };
+                for c in &row[..upto] {
+                    c.push_text(&mut text);
+                }
+                if l != abs && !row.last().map_or(false, |c| c.wrap) { text.push('\n'); }
+            }
+            if cursor_row {
+                let tail = self.cursor_tail();
+                text.push_str(&tail);
+            }
+            let text = strip_rprompt(text.trim_end()).to_string();
+            if let Some(rest) = strip_ps2(&text) {
+                lines.insert(0, rest.to_string());
+                if first == 0 { return None; }
+                abs = first - 1;
+                cursor_row = false;
+                continue;
+            }
+            return match strip_ps1(&text) {
+                Some(cmd) => {
+                    lines.insert(0, cmd.to_string());
+                    Some(lines.join("\n"))
+                }
+                None => None,
+            };
+        }
+        None
+    }
+
+    fn scrapable_row_base(&self) -> usize {
+        self.scrollback.len()
     }
 
     fn push_mark(&mut self, kind: MarkKind, exit_code: Option<i32>) {
@@ -128,12 +251,12 @@ impl Terminal {
                 self.blocks.on_command_start(line, self.cursor_col);
             }
             b'C' => {
-                self.push_mark(MarkKind::OutputStart, None);
-                let start = self.blocks.command_start_pos();
-                let command = start
-                    .map(|s| self.text_between(s, (line, self.cursor_col)))
-                    .unwrap_or_default();
-                self.blocks.on_command_output(line, command);
+                // A block starts only if a `B` is pending (see on_command_output).
+                if self.blocks.command_start_pos().is_some() {
+                    let command = self.marked_input((line, self.cursor_col));
+                    self.push_mark(MarkKind::OutputStart, None);
+                    self.blocks.on_command_output(line, command);
+                }
             }
             b'D' => {
                 let exit = args
@@ -148,6 +271,24 @@ impl Terminal {
             }
             _ => {}
         }
+    }
+
+    /// Handle `OSC 633 ; E ; <escaped command>` (VS Code style): the shell
+    /// states the exact command line it is executing. Escapes: `\\` for a
+    /// backslash and `\xNN` for `;`, control characters and anything else.
+    pub fn handle_osc633(&mut self, args: &[&[u8]]) {
+        let Some(kind) = args.first() else { return };
+        if *kind != b"E" {
+            return;
+        }
+        let mut raw = Vec::new();
+        for (i, a) in args.iter().skip(1).enumerate() {
+            if i > 0 {
+                raw.push(b';');
+            }
+            raw.extend_from_slice(a);
+        }
+        self.blocks.on_command_text(unescape_command(&raw));
     }
 
     /// Handle `OSC 7 ; file://host/path`.
@@ -172,6 +313,71 @@ impl Terminal {
             }
         }
     }
+}
+
+/// Undo the shell-side escaping of OSC 633;E payloads.
+pub fn unescape_command(raw: &[u8]) -> String {
+    let hex = |b: u8| (b as char).to_digit(16).map(|d| d as u8);
+    let mut out = Vec::with_capacity(raw.len());
+    let mut i = 0;
+    while i < raw.len() {
+        if raw[i] == b'\\' {
+            match raw.get(i + 1) {
+                Some(b'\\') => {
+                    out.push(b'\\');
+                    i += 2;
+                    continue;
+                }
+                Some(b'x') => {
+                    if let (Some(h), Some(l)) = (raw.get(i + 2).and_then(|b| hex(*b)), raw.get(i + 3).and_then(|b| hex(*b))) {
+                        out.push(h * 16 + l);
+                        i += 4;
+                        continue;
+                    }
+                }
+                _ => {}
+            }
+        }
+        out.push(raw[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Drop a right-hand prompt's trailing box-drawing remains (`─╯`) and blanks.
+fn strip_rprompt(s: &str) -> &str {
+    let t = s.trim_end();
+    t.trim_end_matches(|c| ('\u{2500}'..='\u{257f}').contains(&c)).trim_end()
+}
+
+/// Dim or gray text is autosuggestion ghost text, not part of the buffer.
+fn is_ghost(c: &Cell) -> bool {
+    use super::Color;
+    c.attrs.dim
+        || match c.fg {
+            Color::Indexed(n) => n == 8 || (240..=248).contains(&n),
+            Color::Rgb(r, g, b) => r == g && g == b && r < 0xA0,
+            Color::Default => false,
+        }
+}
+
+/// `"cmdand> rm -rf \\"` -> `Some("rm -rf \\")` for zsh/bash secondary prompts.
+fn strip_ps2(line: &str) -> Option<&str> {
+    let i = line.find("> ").or_else(|| line.strip_suffix('>').map(|_| line.len() - 1))?;
+    let prefix = &line[..i];
+    if prefix.len() <= 20 && prefix.chars().all(|c| c.is_ascii_lowercase() || c == ' ') {
+        Some(line.get(i + 2..).unwrap_or(""))
+    } else {
+        None
+    }
+}
+
+/// Command text after the primary prompt terminator on `line`, if the line
+/// looks like a shell prompt at all.
+fn strip_ps1(line: &str) -> Option<&str> {
+    const TERMS: &[&str] = &["$ ", "% ", "# ", "❯ ", "➜ ", "› ", "» ", "λ ", "→ ", "▶ ", "➤ ", "⟩ "];
+    let best = TERMS.iter().filter_map(|t| line.find(t).map(|i| i + t.len())).min()?;
+    Some(line[best..].trim())
 }
 
 /// Parse `file://host/path` (or a bare absolute path) into a decoded path.
@@ -346,5 +552,117 @@ mod tests {
         // `false` printed nothing: output range is empty (end < start).
         assert!(bl[1].output_end < bl[1].output_start);
         assert_eq!(bl[1].command_line, 2);
+    }
+
+    #[test]
+    fn explicit_command_text_wins_over_screen_text() {
+        let mut t = Terminal::new(60, 6);
+        // p10k-style: right prompt remnants on the command row.
+        feed(&mut t, b"\x1b]133;A\x07~ % \x1b]133;B\x07echo hi                      \xe2\x94\x80\xe2\x95\xaf\x1b[1G\x1b[7C");
+        feed(&mut t, b"\x1b]633;E;echo hi\x07\r\n\x1b]133;C\x07hi\r\n\x1b]133;D;0\x07");
+        let b = &t.blocks.blocks()[0];
+        assert_eq!(b.command, "echo hi");
+        // Escapes: `;` and control characters / backslashes round-trip.
+        assert_eq!(unescape_command(br"echo \x3b a\\b\x0a"), "echo ; a\\b\n");
+        assert_eq!(unescape_command(br"100%"), "100%");
+    }
+
+    #[test]
+    fn rprompt_remnants_are_stripped_without_explicit_text() {
+        let mut t = Terminal::new(60, 6);
+        feed(&mut t, "\x1b]133;A\x07~ % \x1b]133;B\x07false                    ─╯\r\n\x1b]133;C\x07\x1b]133;D;1\x07".as_bytes());
+        assert_eq!(t.blocks.blocks()[0].command, "false");
+    }
+
+    #[test]
+    fn duplicate_marks_from_two_integrations_make_one_block() {
+        // iTerm2's integration next to ours: B, B, C;, C, D, D and an empty-Enter C;/D pair.
+        let mut t = Terminal::new(40, 8);
+        feed(&mut t, b"\x1b]133;A\x07$ \x1b]133;B\x07\x1b]133;B\x07echo hi\r\n\x1b]133;C;\x07\x1b]633;E;echo hi\x07\x1b]133;C\x07hi\r\n\x1b]133;D;0\x07\x1b]133;A\x07\x1b]133;D;0\x07");
+        assert_eq!(t.blocks.blocks().len(), 1);
+        assert_eq!(t.blocks.blocks()[0].command, "echo hi");
+        assert_eq!(t.blocks.blocks()[0].exit_code, Some(0));
+        feed(&mut t, b"$ \x1b]133;B\x07\r\n\x1b]133;C;\x07\x1b]133;D;0\x07\x1b]133;A\x07$ \x1b]133;B\x07");
+        // The empty Enter above had a B before C;, but no command: it must not
+        // leave a running block behind, and the prompt must be live again.
+        assert!(!t.blocks.is_running());
+        assert!(t.at_shell_prompt());
+        // C;/D pair arriving right after A (no B) is ignored.
+        let n = t.blocks.blocks().len();
+        feed(&mut t, b"\r\n\x1b]133;A\x07$ \x1b]133;C;\x07\x1b]133;D;0\x07\x1b]133;B\x07");
+        assert_eq!(t.blocks.blocks().len(), n);
+        assert!(t.at_shell_prompt());
+    }
+
+    #[test]
+    fn continuation_prompts_are_excluded_from_typed_input() {
+        let mut t = Terminal::new(40, 8);
+        feed(&mut t, b"\x1b]133;A\x07$ \x1b]133;B\x07rm -rf \\\r\ncmdand> \x1b]133;B\x07/tmp/x");
+        assert_eq!(t.typed_input().as_deref(), Some("rm -rf \\\n/tmp/x"));
+        assert_eq!(t.pending_command_line().as_deref(), Some("rm -rf \\\n/tmp/x"));
+        feed(&mut t, b"\r\n\x1b]133;C\x07");
+        assert_eq!(t.blocks.blocks().len(), 0);
+        assert_eq!(t.blocks.get(0).unwrap().command, "rm -rf \\\n/tmp/x");
+        // A prompt redraw on the same line replaces B instead of adding a segment.
+        let mut t = Terminal::new(40, 8);
+        feed(&mut t, b"\x1b]133;A\x07$ \x1b]133;B\x07ls\x1b[2D\x1b]133;B\x07");
+        assert_eq!(t.blocks.input_starts().len(), 1);
+    }
+
+    #[test]
+    fn soft_wrapped_input_is_one_logical_line() {
+        let mut t = Terminal::new(10, 6);
+        feed(&mut t, b"\x1b]133;A\x07$ \x1b]133;B\x07rm -rf /tmp/abcdefgh");
+        assert_eq!(t.typed_input().as_deref(), Some("rm -rf /tmp/abcdefgh"));
+        // A full row followed by a real newline is NOT merged.
+        let mut t = Terminal::new(10, 6);
+        feed(&mut t, b"\x1b]133;A\x07$ \x1b]133;B\x07aaaaaaaa\r\nbbb");
+        assert_eq!(t.typed_input().as_deref(), Some("aaaaaaaa\nbbb"));
+    }
+
+    #[test]
+    fn pending_command_line_uses_osc133_and_refuses_non_prompts() {
+        let mut t = Terminal::new(60, 6);
+        // Alternate screen (vim) with "rm -rf /" in insert mode: never a command.
+        feed(&mut t, b"\x1b[?1049h\x1b[Hrm -rf /");
+        assert_eq!(t.pending_command_line(), None);
+        feed(&mut t, b"\x1b[?1049l");
+        // Integrated shell, command running: no.
+        feed(&mut t, b"\x1b]133;A\x07$ \x1b]133;B\x07sleep 5\r\n\x1b]133;C\x07rm -rf /");
+        assert_eq!(t.pending_command_line(), None);
+        feed(&mut t, b"\x1b]133;D;0\x07\x1b]133;A\x07\r\n$ \x1b]133;B\x07rm -rf ~");
+        assert_eq!(t.pending_command_line().as_deref(), Some("rm -rf ~"));
+        // Cursor moved back into the buffer: the whole line is what gets submitted.
+        feed(&mut t, b"\x1b[8D");
+        assert_eq!(t.pending_command_line().as_deref(), Some("rm -rf ~"));
+        // Dim ghost text (autosuggestion) after the cursor is not part of it.
+        let mut t = Terminal::new(60, 6);
+        feed(&mut t, b"\x1b]133;A\x07$ \x1b]133;B\x07rm\x1b[2m -rf /\x1b[0m\x1b[7D");
+        assert_eq!(t.pending_command_line().as_deref(), Some("rm"));
+    }
+
+    fn scrape(rows: &[&str], cursor_col: usize) -> Option<String> {
+        let mut t = Terminal::new(80, rows.len().max(2));
+        let text = rows.join("\r\n");
+        feed(&mut t, text.as_bytes());
+        feed(&mut t, format!("\x1b[{}G", cursor_col + 1).as_bytes());
+        t.pending_command_line()
+    }
+
+    #[test]
+    fn screen_scraping_fallback_without_osc133() {
+        assert_eq!(scrape(&["~/proj % rm -rf build"], 21).as_deref(), Some("rm -rf build"));
+        assert_eq!(scrape(&["user@host:~$ echo 100% && rm -rf /tmp/x"], 41).as_deref(), Some("echo 100% && rm -rf /tmp/x"));
+        assert_eq!(scrape(&["~ % rm -rf \"$HOME/x\""], 21).as_deref(), Some("rm -rf \"$HOME/x\""));
+        // p10k two-line prompt with right prompt remnants.
+        let row = format!("╰─❯ rm -rf /tmp/x{}─╯", " ".repeat(40));
+        assert_eq!(scrape(&["╭─ ~/proj", &row], 18).as_deref(), Some("rm -rf /tmp/x"));
+        // Continuation prompts are stripped and rows joined with newlines.
+        assert_eq!(scrape(&["~ % rm -rf \\", "> /tmp/x"], 8).as_deref(), Some("rm -rf \\\n/tmp/x"));
+        assert_eq!(scrape(&["~ % for i in 1 2; do", "for> echo $i", "for> done"], 9).as_deref(), Some("for i in 1 2; do\necho $i\ndone"));
+        // Not a prompt (editor insert mode on the main screen, plain text): never.
+        assert_eq!(scrape(&["rm -rf /"], 8), None);
+        assert_eq!(scrape(&["-- INSERT -- rm -rf /"], 21), None);
+        assert_eq!(scrape(&["~ % "], 4), None);
     }
 }

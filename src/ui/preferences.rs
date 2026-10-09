@@ -131,7 +131,7 @@ impl Preferences {
                         PrefItem::Info { label: "Heatmap", value: format!("{}+Shift+Y", mk) },
                         PrefItem::Info { label: "SecretMask", value: format!("{}+Shift+M", mk) },
                         PrefItem::Info { label: "Audit Log", value: format!("{}+Shift+U", mk) },
-                        PrefItem::Info { label: "Complete", value: "Ctrl+Space".into() },
+                        PrefItem::Info { label: "Complete", value: if cfg!(target_os = "macos") { "Cmd+.".into() } else { "Ctrl+Shift+Space".into() } },
                         PrefItem::Info { label: "Settings", value: format!("{}+Shift+,", mk) },
                         PrefItem::Info { label: "Welcome", value: format!("{}+Shift+?", mk) },
                         PrefItem::Info { label: "Zoom In", value: format!("{}+=", mk) },

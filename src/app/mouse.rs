@@ -135,7 +135,22 @@ pub fn url_at_cursor(app: &App) -> Option<String> {
         None => t.visible_rows(),
     };
     let cells = rows.get(row)?;
-    let line: String = cells.iter().map(|c| if c.c == '\0' { ' ' } else { c.c }).collect();
+    // OSC 8 hyperlink under the pointer wins over text-based URL detection.
+    if let Some(mut cell) = cells.get(col) {
+        if cell.c == '\0' && col > 0 {
+            cell = &cells[col - 1];
+        }
+        if let Some(uri) = t.hyperlink_uri(cell.link) {
+            let scheme_ok = ["http://", "https://", "mailto:", "file://", "ftp://"]
+                .iter()
+                .any(|p| uri.as_bytes().len() >= p.len() && uri.as_bytes()[..p.len()].eq_ignore_ascii_case(p.as_bytes()));
+            if scheme_ok {
+                return Some(uri.to_string());
+            }
+        }
+    }
+    // '\0' (wide-glyph continuation) is kept: URL detection treats it as part of the URL.
+    let line: String = cells.iter().map(|c| c.c).collect();
     crate::tools::url_detect::url_at_col(&line, col)
 }
 
@@ -160,17 +175,39 @@ pub fn copy_selection(app: &mut App) -> bool {
 
 pub fn paste_clipboard(app: &mut App) {
     if let Some(text) = selection::paste_from_clipboard() {
-        let pane = app.wm.active_pane_mut();
-        pane.terminal.scroll_to_bottom();
-        if pane.terminal.bracketed_paste {
-            pane.write(b"\x1b[200~");
-            pane.write(text.as_bytes());
-            pane.write(b"\x1b[201~");
-        } else {
-            pane.write(text.as_bytes());
-        }
-        app.request_redraw();
+        paste_text(app, &text);
     }
+}
+
+/// User paste (clipboard, middle click): sanitise, and when the shell is not
+/// in bracketed-paste mode ask before pasting anything with a newline, since
+/// every line would execute immediately.
+pub fn paste_text(app: &mut App, text: &str) {
+    let bracketed = app.wm.active_pane().terminal.bracketed_paste;
+    let clean = selection::sanitize_paste(text, bracketed);
+    if clean.is_empty() {
+        return;
+    }
+    if !bracketed && clean.contains(['\n', '\r']) {
+        crate::ui::confirm::show_paste_confirm(app, clean, bracketed);
+        app.request_redraw();
+        return;
+    }
+    write_paste(app, &clean, bracketed);
+}
+
+/// Write already-sanitised paste text to the active pane.
+pub fn write_paste(app: &mut App, clean: &str, bracketed: bool) {
+    let pane = app.wm.active_pane_mut();
+    pane.terminal.scroll_to_bottom();
+    if bracketed {
+        pane.write(b"\x1b[200~");
+        pane.write(clean.as_bytes());
+        pane.write(b"\x1b[201~");
+    } else {
+        pane.write(clean.as_bytes());
+    }
+    app.request_redraw();
 }
 
 /// Select the whole buffer, scrollback included.

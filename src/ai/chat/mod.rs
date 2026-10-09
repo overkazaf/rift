@@ -25,6 +25,7 @@
 //! * this file    state, input handling, actions
 
 pub mod composer;
+pub mod guard;
 pub mod json;
 pub mod markdown;
 mod render;
@@ -323,6 +324,12 @@ pub fn new_chat(app: &mut App) {
 
 /// Append the turn and start streaming the answer.
 pub fn send(app: &mut App, req: AskRequest) {
+    // Nothing leaves the machine unless AI is configured or consented to.
+    if !crate::ai::consent::allowed(app) {
+        app.chat.set_toast("AI is off: add [llm] to config.toml or accept the AI prompt");
+        app.request_redraw();
+        return;
+    }
     // A new question supersedes an answer that is still streaming.
     if app.chat.stream.is_some() {
         cancel(app);
@@ -468,7 +475,11 @@ fn finish_turn(app: &mut App, cancelled: bool) {
 fn fail_turn(app: &mut App, err: String) {
     let partial = app.chat.session.last_assistant_mut().is_some_and(|m| !m.content.is_empty());
     if partial {
-        app.chat.set_toast(format!("Stream interrupted: {err}"));
+        // Keep what arrived, but never let a cut-off answer pass as complete.
+        if let Some(m) = app.chat.session.last_assistant_mut() {
+            m.incomplete = Some(err.clone());
+        }
+        app.chat.set_toast(format!("Answer incomplete: {err}"));
         finish_turn(app, true);
     } else if let Some(m) = app.chat.session.last_assistant_mut() {
         m.content = err;
@@ -497,6 +508,8 @@ fn code_block(app: &App, msg: usize, block: usize) -> Option<(String, String)> {
 /// commands are routed through the Preview-Then-Accept modal: the text is
 /// typed but Enter is withheld until the user confirms.
 pub fn send_to_terminal(app: &mut App, cmd: &str, run: bool) {
+    // Model output is untrusted: no ESC / paste-end markers / control bytes.
+    let cmd = &crate::window::selection::sanitize_paste(cmd, false);
     let lines: Vec<&str> = cmd.lines().map(str::trim_end).filter(|l| !l.trim().is_empty()).collect();
     if lines.is_empty() {
         return;
@@ -545,10 +558,15 @@ fn run_block(app: &mut App, msg: usize, block: usize, run: bool) {
         return;
     }
     let multi = cmd.lines().filter(|l| !l.trim().is_empty()).count() > 1;
-    if run && multi && app.chat.confirm_run != Some((msg, block)) {
+    let injected = app.chat.session.turn_injection(msg).is_some();
+    if run && (multi || injected) && app.chat.confirm_run != Some((msg, block)) {
         // First click only arms the button; the block is already on screen.
         app.chat.confirm_run = Some((msg, block));
-        app.chat.set_toast("Multi-line block: click Run again to execute all lines");
+        app.chat.set_toast(if injected {
+            "The terminal text behind this answer looked like a prompt injection: review the command, then click Run again"
+        } else {
+            "Multi-line block: click Run again to execute all lines"
+        });
         app.request_redraw();
         return;
     }
@@ -632,6 +650,11 @@ pub fn handle_key(app: &mut App, event: &KeyEvent) -> bool {
         // (Cmd+Shift+Enter) keeps working everywhere else.
         Key::Named(NamedKey::Enter) if cmd => {
             match first_command_of_last_answer(app) {
+                // Keyboard shortcut must not bypass the injection confirmation.
+                Some(c) if !shift && app.chat.session.last_turn_injection().is_some() => {
+                    send_to_terminal(app, &c, false);
+                    app.chat.set_toast("Possible prompt injection in the context: inserted, not run");
+                }
                 Some(c) => send_to_terminal(app, &c, !shift),
                 None => {
                     app.chat.set_toast("No command in the last answer");

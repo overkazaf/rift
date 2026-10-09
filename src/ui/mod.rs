@@ -1,3 +1,4 @@
+pub mod confirm;
 pub mod context_menu;
 pub mod kit;
 pub mod menubar;

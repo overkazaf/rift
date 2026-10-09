@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  build-test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libx11-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libwayland-dev libxrandr-dev libxi-dev libxcursor-dev libgtk-3-dev libxdo-dev \
+            libssl-dev xvfb
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
+
+      - name: Build (default features)
+        run: cargo build --locked
+
+      - name: Build (--features gpu)
+        run: cargo build --locked --features gpu
+
+      # The wry/WebView embed is a macOS feature (WKWebView); skip elsewhere.
+      - name: Build (--features gpu,webview)
+        if: runner.os == 'macOS'
+        run: cargo build --locked --features gpu,webview
+
+      # Audit modules (src/audit) are adversarial/perf harnesses that spawn real
+      # shells and take minutes; they run via the manual `audit` job below.
+      - name: Test (unit tests, audit suites excluded)
+        run: 'cargo test --locked --bin rift -- --skip audit::'
+
+      - name: Clippy (warnings allowed for now)
+        # TODO: tighten to `-D warnings` once the existing backlog is cleared.
+        run: cargo clippy --locked --all-targets -- -W clippy::all || true
+
+  audit:
+    # Opt-in: Actions tab -> CI -> Run workflow. Real shells + timing-sensitive checks.
+    name: audit suites (macOS)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked --release --bin rift audit::robust audit::textops audit::splits audit::escapes -- --nocapture --test-threads=1
+      - run: cargo test --locked --release --bin rift audit::perf -- --ignored --nocapture --test-threads=1

@@ -8,6 +8,7 @@ mod config;
 mod input;
 mod pty;
 mod shell_integration;
+mod wake;
 mod terminal;
 mod renderer;
 mod window;
@@ -23,6 +24,8 @@ mod tools;
 mod plugin;
 mod platform;
 mod screenshot;
+#[cfg(test)]
+mod audit;
 
 use winit::event_loop::EventLoop;
 
@@ -33,18 +36,31 @@ fn main() {
     if args.iter().any(|a| a == "--screenshot") {
         std::process::exit(screenshot::run(&args[1..]));
     }
-    for arg in &args[1..] {
+    let mut it = args[1..].iter();
+    while let Some(arg) = it.next() {
         match arg.as_str() {
             "--version" | "-V" => {
                 println!("rift {}", config::VERSION);
+                return;
+            }
+            "--list-keybindings" => {
+                let cfg = config::toml::load_config();
+                print!("{}", app::keymap::Keymap::build(&cfg.input.keybindings).table());
                 return;
             }
             "--help" | "-h" => {
                 print_help();
                 return;
             }
-            _ if arg.starts_with("--config=") || arg == "--config" => {
-                // handled by load_config (future)
+            "--config" => match it.next() {
+                Some(path) if !path.is_empty() => config::toml::set_config_path(path.into()),
+                _ => {
+                    eprintln!("--config needs a PATH");
+                    std::process::exit(1);
+                }
+            },
+            _ if arg.starts_with("--config=") && arg.len() > "--config=".len() => {
+                config::toml::set_config_path(arg["--config=".len()..].into());
             }
             _ => {
                 eprintln!("Unknown option: {arg}");
@@ -57,6 +73,7 @@ fn main() {
     env_logger::init();
 
     let config = config::toml::load_config();
+    config::set_osc52_policy(config.osc52);
     log::info!("Theme: {}", config.theme_name);
     log::info!(
         "LLM: provider={}, model={}, enabled={}",
@@ -66,13 +83,16 @@ fn main() {
     let font_path = config::resolve_font_path(&config);
     let theme = config.theme.clone();
     let mut renderer = renderer::Renderer::new(&font_path, config.font_size, theme);
+    renderer.set_bold_is_bright(config.bold_is_bright);
     renderer.opacity = config.opacity;
     renderer.shader.set_intensity(config.effect_intensity);
     renderer.shader.set_effect(config.effect);
 
     let event_loop = EventLoop::new().unwrap();
     let proxy = event_loop.create_proxy();
-    let wm = window::WindowManager::new(proxy, config.cols as usize, config.rows as usize);
+    wake::init(proxy.clone());
+    let mut wm = window::WindowManager::new(proxy, config.cols as usize, config.rows as usize);
+    wm.set_scrollback_lines(config.scrollback_lines);
 
     let mut app = app::App::new(config, renderer, wm);
     event_loop.run_app(&mut app).unwrap();
@@ -87,6 +107,7 @@ fn print_help() {
     println!("OPTIONS:");
     println!("  -h, --help       Print this help message");
     println!("  -V, --version    Print version");
+    println!("  --list-keybindings  Print the effective keybinding table");
     println!("  --config PATH    Use custom config file");
     println!("  --screenshot SCENE|all --out DIR [--width 1600 --height 1000 --theme NAME]");
     println!("                   Render product screenshots offscreen (no window)");
@@ -94,6 +115,7 @@ fn print_help() {
     println!("CONFIG: ~/.config/rift/config.toml");
     println!();
     println!("KEY SHORTCUTS:");
+    println!("  (see --list-keybindings for the full table; override in [keybindings])");
     println!("  {mk}+D              Split vertical (left/right)");
     println!("  {mk}+Shift+D        Split horizontal (up/down)");
     println!("  {mk}+Shift+T        New tab");

@@ -38,6 +38,7 @@ ureq = "3"
 unicode-width = "0.2"
 bytemuck = { version = "1", features = ["derive"], optional = true }
 flate2 = "1"
+libc = "0.2"
 
 # Optimize even in debug mode — pixel-level rendering is 10-50x slower at opt-level 0
 [profile.dev]

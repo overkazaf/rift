@@ -4363,6 +4363,7 @@ dependencies = [
  "env_logger",
  "flate2",
  "fontdue",
+ "libc",
  "log",
  "muda",
  "objc",

@@ -171,8 +171,14 @@ impl Parser<'_> {
                             {
                                 self.i += 2;
                                 let lo = self.hex4()?;
-                                let cp = 0x10000 + ((hi - 0xD800) << 10) + (lo.wrapping_sub(0xDC00) & 0x3FF);
-                                s.push(char::from_u32(cp).unwrap_or('\u{FFFD}'));
+                                if (0xDC00..0xE000).contains(&lo) {
+                                    let cp = 0x10000 + ((hi - 0xD800) << 10) + (lo - 0xDC00);
+                                    s.push(char::from_u32(cp).unwrap_or('\u{FFFD}'));
+                                } else {
+                                    // High surrogate not followed by a low one: replacement char, keep the second escape.
+                                    s.push('\u{FFFD}');
+                                    s.push(char::from_u32(lo).unwrap_or('\u{FFFD}'));
+                                }
                             } else {
                                 s.push(char::from_u32(hi).unwrap_or('\u{FFFD}'));
                             }
@@ -227,6 +233,15 @@ mod tests {
         let o = parse_first_object(r#"{"command": "echo \"a}b\" é 😀\n", "n": 3}"#).unwrap();
         assert_eq!(o.get_str("command"), Some("echo \"a}b\" é 😀\n"));
         assert_eq!(o.get("n"), Some(&Val::Num(3.0)));
+    }
+
+    #[test]
+    fn decodes_u_escapes_cjk_emoji_and_bad_surrogates() {
+        let o = parse_first_object(r#"{"a": "\u4e2d\u6587 \ud83d\ude00 \u00e9", "b": "\ud83dA", "c": "\ud83d\u0041", "d": "\ude00x"}"#).unwrap();
+        assert_eq!(o.get_str("a"), Some("中文 😀 é"));
+        assert_eq!(o.get_str("b"), Some("\u{fffd}A"));
+        assert_eq!(o.get_str("c"), Some("\u{fffd}A"));
+        assert_eq!(o.get_str("d"), Some("\u{fffd}x"));
     }
 
     #[test]

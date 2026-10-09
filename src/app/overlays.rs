@@ -28,6 +28,10 @@ use super::App;
 /// Route key events to the topmost visible overlay.
 /// Returns true if the event was consumed.
 pub fn try_intercept(app: &mut App, event: &KeyEvent, event_loop: &ActiveEventLoop) -> bool {
+    // Consent / paste / host-key confirmations beat everything.
+    if app.confirm.visible() {
+        return handle_confirm(app, event);
+    }
     // Preview-Then-Accept danger confirmation — absolute highest priority.
     // Nothing should be able to bypass an unconfirmed dangerous command.
     if app.exec_preview.visible {
@@ -128,6 +132,25 @@ pub fn try_intercept(app: &mut App, event: &KeyEvent, event_loop: &ActiveEventLo
         return handle_autocomplete(app, event);
     }
     false
+}
+
+fn handle_confirm(app: &mut App, event: &KeyEvent) -> bool {
+    use crate::ui::confirm::ConfirmKey;
+    let k = match event.logical_key {
+        Key::Named(NamedKey::ArrowLeft) | Key::Named(NamedKey::ArrowUp) => Some(ConfirmKey::Left),
+        Key::Named(NamedKey::ArrowRight) | Key::Named(NamedKey::ArrowDown) | Key::Named(NamedKey::Tab) => Some(ConfirmKey::Right),
+        Key::Named(NamedKey::Enter) => Some(ConfirmKey::Enter),
+        Key::Named(NamedKey::Escape) => Some(ConfirmKey::Escape),
+        Key::Character(ref s) => s.chars().next().and_then(|c| c.to_digit(10)).map(|d| ConfirmKey::Digit(d as usize)),
+        _ => None,
+    };
+    if let Some(k) = k {
+        if let Some((req, choice)) = app.confirm.handle_key(k) {
+            crate::ui::confirm::resolve(app, req, choice);
+        }
+        app.request_redraw();
+    }
+    true
 }
 
 /// Preview-Then-Accept modal: Enter/Y confirms (Critical commands additionally
@@ -267,7 +290,7 @@ fn handle_webview_dialog(app: &mut App, event: &KeyEvent) -> bool {
             match s.as_str() {
                 "v" => {
                     if let Some(text) = crate::window::selection::paste_from_clipboard() {
-                        let clean = text.lines().next().unwrap_or("").to_string();
+                        let clean = crate::window::selection::sanitize_paste(text.lines().next().unwrap_or(""), false);
                         for c in clean.chars() {
                             app.webview_dialog.handle_key(WvDialogKey::Char(c));
                         }
@@ -405,7 +428,7 @@ fn handle_autocomplete(app: &mut App, event: &KeyEvent) -> bool {
                 let terminal = &app.wm.active_pane().terminal;
                 let row = terminal.cursor_row;
                 let col = terminal.cursor_col;
-                let line: String = terminal.grid[row].iter().take(col).map(|c| c.c).collect();
+                let line: String = crate::terminal::grid::cells_text(&terminal.grid[row][..col.min(terminal.grid[row].len())]);
                 let current_word = line.split_whitespace().last().unwrap_or("");
                 let mut out = vec![0x7fu8; current_word.len()];
                 out.extend_from_slice(text.as_bytes());
@@ -442,9 +465,11 @@ fn handle_history(app: &mut App, event: &KeyEvent) -> bool {
         if let Some(action) = app.history.handle_key(k) {
             match action {
                 HistoryAction::Execute(cmd) => {
+                    let cmd = crate::window::selection::sanitize_paste(&cmd, false);
                     app.wm.active_pane_mut().write(format!("{cmd}\n").as_bytes());
                 }
                 HistoryAction::Insert(cmd) => {
+                    let cmd = crate::window::selection::sanitize_paste(&cmd, false);
                     app.wm.active_pane_mut().write(cmd.as_bytes());
                 }
             }
@@ -535,8 +560,9 @@ fn handle_command_palette(app: &mut App, event: &KeyEvent, event_loop: &ActiveEv
         _ => None,
     };
     if let Some(text) = paste {
-        // Single-line input: take the first line only.
-        for c in text.lines().next().unwrap_or("").chars() {
+        // Single-line input: take the first line only, minus control chars.
+        let first = crate::window::selection::sanitize_paste(text.lines().next().unwrap_or(""), false);
+        for c in first.chars() {
             let _ = app.command_palette.handle_key(PaletteKey::Char(c));
         }
     }
@@ -617,6 +643,7 @@ fn dispatch_palette_action(app: &mut App, action: PaletteAction, event_loop: &Ac
             app.wm.active_pane_mut().write(line.as_bytes());
         }
         PaletteAction::Shell(cmd) => {
+            let cmd = crate::window::selection::sanitize_paste(&cmd, false);
             app.wm.active_pane_mut().write(format!("{cmd}\n").as_bytes());
         }
         PaletteAction::AskAi(question) => {
@@ -732,6 +759,7 @@ fn handle_docker(app: &mut App, event: &KeyEvent) -> bool {
     if let Some(action) = app.docker.handle_key(dk) {
         match action {
             DockerAction::RunCommand(cmd) => {
+                let cmd = crate::window::selection::sanitize_paste(&cmd, false);
                 app.wm.active_pane_mut().write(format!("{cmd}\n").as_bytes());
                 app.docker.toggle();
             }

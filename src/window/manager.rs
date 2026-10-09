@@ -1,7 +1,13 @@
+use std::time::{Duration, Instant};
 use winit::event_loop::EventLoopProxy;
 
 use super::pane::{Pane, PtyKind};
 use super::tab::{MinSize, PaneNode, PaneRect, SplitDir, Tab};
+
+/// Total parse time per event-loop pass across all panes.
+pub const TOTAL_PARSE_BUDGET: Duration = Duration::from_millis(8);
+/// Cap for a single pane in one pass (so a flood leaves time for siblings).
+const PANE_PARSE_BUDGET: Duration = Duration::from_millis(6);
 
 /// A change to the tab list that outside indexes (e.g. the webview's tab)
 /// must follow. Drained with [`WindowManager::take_tab_events`].
@@ -21,6 +27,11 @@ pub struct WindowManager {
     /// (e.g. which pane takes focus after a close).
     last_area: PaneRect,
     tab_events: Vec<TabEvent>,
+    /// Rotating start index for fair round-robin output processing.
+    rr_next: usize,
+    backlog: bool,
+    /// Scrollback capacity applied to every new pane (config `scrollback_lines`).
+    scrollback_lines: usize,
 }
 
 impl WindowManager {
@@ -34,6 +45,9 @@ impl WindowManager {
             proxy: Some(proxy),
             last_area: PaneRect { x: 0, y: 0, width: 0, height: 0 },
             tab_events: Vec::new(),
+            rr_next: 0,
+            backlog: false,
+            scrollback_lines: 10_000,
         }
     }
 
@@ -47,14 +61,29 @@ impl WindowManager {
             proxy: None,
             last_area: PaneRect { x: 0, y: 0, width: 0, height: 0 },
             tab_events: Vec::new(),
+            rr_next: 0,
+            backlog: false,
+            scrollback_lines: 10_000,
         }
     }
 
     /// Spawn a shell pane, or an inert one when headless.
     fn make_pane(&self, id: usize, cols: usize, rows: usize, cwd: Option<&str>) -> Pane {
-        match &self.proxy {
+        let mut pane = match &self.proxy {
             Some(p) => Pane::new_in(id, cols, rows, p.clone(), cwd),
             None => Pane::scripted(id, cols, rows),
+        };
+        pane.terminal.set_max_scrollback(self.scrollback_lines);
+        pane
+    }
+
+    /// Apply the configured scrollback size to all current and future panes.
+    pub fn set_scrollback_lines(&mut self, lines: usize) {
+        self.scrollback_lines = lines;
+        for tab in &mut self.tabs {
+            for pane in tab.panes_mut() {
+                pane.terminal.set_max_scrollback(lines);
+            }
         }
     }
 
@@ -220,6 +249,7 @@ impl WindowManager {
         tab.active = active.min(tab.pane_count().saturating_sub(1));
         tab.zoomed = false;
         self.next_pane_id = next;
+        self.set_scrollback_lines(self.scrollback_lines);
     }
 
     pub fn focus_next_pane(&mut self) {
@@ -230,16 +260,65 @@ impl WindowManager {
         self.active_tab_mut().focus_prev();
     }
 
+    /// Parse queued output from every pane, spending at most ~[`TOTAL_PARSE_BUDGET`]
+    /// in total. Panes are visited round-robin from a rotating start so a flooding
+    /// pane cannot starve the others; whatever is left stays queued (see
+    /// [`WindowManager::has_backlog`]).
     pub fn process_all_output(&mut self) -> bool {
+        let start = Instant::now();
         let mut changed = false;
-        for tab in &mut self.tabs {
-            for pane in tab.panes_mut() {
-                if pane.process_output() {
-                    changed = true;
+        let mut backlog = false;
+        let total: usize = self.tabs.iter().map(|t| t.pane_count()).sum();
+        if total == 0 {
+            return false;
+        }
+        let first = self.rr_next % total;
+        self.rr_next = self.rr_next.wrapping_add(1);
+        let mut idx = 0usize;
+        // Two passes give the panes before `first` their turn too.
+        for pass in 0..2 {
+            for tab in &mut self.tabs {
+                for pane in tab.panes_mut() {
+                    let i = idx;
+                    idx += 1;
+                    let in_pass = if pass == 0 { i >= first } else { i < first };
+                    if !in_pass {
+                        continue;
+                    }
+                    let left = TOTAL_PARSE_BUDGET.saturating_sub(start.elapsed());
+                    if left.is_zero() {
+                        // Out of time: remember panes that still have data queued.
+                        // (conservative: it may turn out to be empty next pass)
+                        backlog = true;
+                        continue;
+                    }
+                    if pane.process_output_budget(left.min(PANE_PARSE_BUDGET)) {
+                        changed = true;
+                    }
+                    backlog |= pane.backlog;
                 }
             }
+            idx = 0;
         }
+        self.backlog = backlog;
         changed
+    }
+
+    /// Output is still queued in some pane (the last pass ran out of budget);
+    /// the event loop should come straight back instead of sleeping.
+    pub fn has_backlog(&self) -> bool {
+        self.backlog
+    }
+
+    /// Tell every terminal the theme colours so OSC 4 / 10 / 11 / 12 queries
+    /// are answered truthfully.
+    pub fn sync_theme_colors(&mut self, theme: &crate::config::Theme) {
+        for tab in &mut self.tabs {
+            for pane in tab.panes_mut() {
+                pane.terminal.set_reported_colors(theme.fg, theme.bg, theme.cursor);
+                pane.terminal.set_reported_palette(&theme.palette);
+            }
+        }
     }
 
     pub fn flush_all_responses(&mut self) {
@@ -277,8 +356,8 @@ impl WindowManager {
                 }
             }
             for (pane, (_, rect)) in tab.panes_mut().into_iter().zip(layouts) {
-                let cols = (rect.width / cell_width.max(1)).max(1);
-                let rows = (rect.height / cell_height.max(1)).max(1);
+                let cols = (rect.width / cell_width.max(1)).clamp(1, crate::terminal::MAX_COLS);
+                let rows = (rect.height / cell_height.max(1)).clamp(1, crate::terminal::MAX_ROWS);
                 pane.resize(cols, rows);
             }
         }
@@ -301,7 +380,8 @@ impl WindowManager {
         self.alloc_id()
     }
 
-    pub fn add_ssh_tab(&mut self, pane: Pane, title: &str) {
+    pub fn add_ssh_tab(&mut self, mut pane: Pane, title: &str) {
+        pane.terminal.set_max_scrollback(self.scrollback_lines);
         let mut tab = Tab::new(pane);
         tab.title = title.to_string();
         self.tabs.push(tab);

@@ -131,7 +131,7 @@ pub enum CompareKey {
 
 fn extract_lines(terminal: &crate::terminal::Terminal, max_lines: usize) -> Vec<String> {
     terminal.grid.iter().rev().take(max_lines).collect::<Vec<_>>().into_iter().rev()
-        .map(|row| row.iter().map(|c| c.c).collect::<String>().trim_end().to_string())
+        .map(|row| crate::terminal::grid::cells_text(row).trim_end().to_string())
         .collect()
 }
 

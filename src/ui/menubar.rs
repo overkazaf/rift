@@ -68,6 +68,9 @@ pub struct AppMenuBar {
     ai_nl_hash: CheckMenuItem,
     /// Effects submenu items, so GPU-only ones can be disabled without a GPU.
     fx_items: Vec<(MenuItem, crate::effects::EffectKind)>,
+    /// Menu clicks forwarded by the muda event handler (which also wakes the
+    /// event loop, so the UI thread needs no polling timer).
+    events: std::sync::mpsc::Receiver<MenuEvent>,
 }
 
 impl AppMenuBar {
@@ -152,7 +155,7 @@ impl AppMenuBar {
         let view_menu = Submenu::new("View", true);
         let fullscreen = MenuItem::new("Toggle Full Screen", true, accel("Ctrl+CmdOrCtrl+F"));
         let zoom_in = MenuItem::new("Zoom In", true, accel("CmdOrCtrl+="));
-        let zoom_out = MenuItem::new("Zoom Out", true, accel("Ctrl+-"));
+        let zoom_out = MenuItem::new("Zoom Out", true, accel("CmdOrCtrl+-"));
         let zoom_reset = MenuItem::new("Reset Zoom", true, accel("CmdOrCtrl+0"));
 
         actions.insert(fullscreen.id().clone(), MenuAction::ToggleFullScreen);
@@ -378,7 +381,12 @@ impl AppMenuBar {
             &help_menu,
         ]);
 
-        Self { menu, actions, ai_auto_fix, ai_nl_hash, fx_items }
+        let (tx, events) = std::sync::mpsc::channel();
+        MenuEvent::set_event_handler(Some(move |e: MenuEvent| {
+            let _ = tx.send(e);
+            crate::wake::wake();
+        }));
+        Self { menu, actions, ai_auto_fix, ai_nl_hash, fx_items, events }
     }
 
     /// Sync the AI toggle check marks with the config (muda flips a check
@@ -404,7 +412,7 @@ impl AppMenuBar {
     }
 
     pub fn poll_event(&self) -> Option<MenuAction> {
-        if let Ok(event) = MenuEvent::receiver().try_recv() {
+        if let Ok(event) = self.events.try_recv() {
             self.actions.get(event.id()).copied()
         } else {
             None

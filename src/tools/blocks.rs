@@ -32,6 +32,12 @@ struct OscState {
     seen: bool,
     prompt_line: Option<usize>,
     cmd_start: Option<(usize, usize)>,
+    /// Starts of continuation prompts (PS2: `> `, `cmdand> `, ...) that
+    /// followed `cmd_start` before the command was accepted, in order.
+    cont_starts: Vec<(usize, usize)>,
+    /// Command text sent explicitly by the shell (OSC 633;E) that has not
+    /// been claimed by a block yet.
+    explicit: Option<String>,
     running: Option<(CommandBlock, Instant)>,
 }
 
@@ -166,15 +172,40 @@ impl BlockManager {
         self.osc.seen = true;
         self.osc.prompt_line = Some(line);
         self.osc.cmd_start = None;
+        self.osc.cont_starts.clear();
+        self.osc.explicit = None;
     }
 
     /// 133;B — prompt ended, user input starts at (`line`, `col`).
+    ///
+    /// A second `B` on the same line as the previous one (a prompt redraw,
+    /// or a second shell-integration script such as iTerm2's running next to
+    /// ours) replaces it; a `B` on a later line before the command was
+    /// accepted is a continuation prompt (PS2) and extends the input.
     pub fn on_command_start(&mut self, line: usize, col: usize) {
         self.osc.seen = true;
-        self.osc.cmd_start = Some((line, col));
+        match (self.osc.cmd_start, self.osc.cont_starts.last().copied()) {
+            (None, _) => self.osc.cmd_start = Some((line, col)),
+            (Some(first), last) => {
+                let last = last.unwrap_or(first);
+                if line == last.0 {
+                    match self.osc.cont_starts.last_mut() {
+                        Some(l) => *l = (line, col),
+                        None => self.osc.cmd_start = Some((line, col)),
+                    }
+                } else if line > last.0 {
+                    self.osc.cont_starts.push((line, col));
+                } else {
+                    // The screen was redrawn above us: start over.
+                    self.osc.cmd_start = Some((line, col));
+                    self.osc.cont_starts.clear();
+                }
+            }
+        }
         // No (or a stale, later) A mark, e.g. a prompt drawn before hooks loaded.
-        if self.osc.prompt_line.map_or(true, |p| p > line) {
-            self.osc.prompt_line = Some(line);
+        let first = self.osc.cmd_start.map_or(line, |p| p.0);
+        if self.osc.prompt_line.map_or(true, |p| p > first) {
+            self.osc.prompt_line = Some(first);
         }
     }
 
@@ -183,19 +214,52 @@ impl BlockManager {
         self.osc.cmd_start
     }
 
+    /// Start positions of all input segments of the pending command: the
+    /// first `B` followed by continuation-prompt `B`s.
+    pub fn input_starts(&self) -> Vec<(usize, usize)> {
+        let mut v: Vec<(usize, usize)> = self.osc.cmd_start.into_iter().collect();
+        v.extend(self.osc.cont_starts.iter().copied());
+        v
+    }
+
+    /// OSC 633;E — the shell told us the exact text of the command it is
+    /// about to run (or is running). Authoritative over screen extraction.
+    pub fn on_command_text(&mut self, text: String) {
+        self.osc.seen = true;
+        let text = text.trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        match &mut self.osc.running {
+            Some((b, _)) => b.command = text,
+            None => self.osc.explicit = Some(text),
+        }
+    }
+
     /// 133;C — command accepted; its output starts at `line`.
-    /// `command` is the text the terminal extracted between B and C.
+    /// `command` is the text the terminal extracted from the marked input.
+    ///
+    /// A `C` is only meaningful after a `B` of the current prompt. Shells with
+    /// two integration scripts (ours + iTerm2's) emit duplicate `C`s, and
+    /// iTerm2's hooks emit a `C`/`D` pair even for an empty Enter; neither
+    /// may start a block.
     pub fn on_command_output(&mut self, line: usize, command: String) {
         self.osc.seen = true;
         if !self.enabled { return; }
+        let Some((cmd_line, _)) = self.osc.cmd_start.take() else { return };
+        self.osc.cont_starts.clear();
         // A new C without a D: close the previous block unfinished.
         if self.osc.running.is_some() {
             self.on_command_finished(line, None);
         }
-        let (cmd_line, _) = self.osc.cmd_start.take().unwrap_or((line.saturating_sub(1), 0));
         let prompt_line = self.osc.prompt_line.take().unwrap_or(cmd_line);
+        let explicit = self.osc.explicit.take();
+        let command = match explicit {
+            Some(e) => e,
+            None => command.trim().to_string(),
+        };
         let block = CommandBlock {
-            command: command.trim().to_string(),
+            command,
             prompt_line: prompt_line.min(cmd_line),
             command_line: cmd_line,
             output_start: line,
@@ -226,8 +290,22 @@ impl BlockManager {
     }
 
     /// The terminal dropped `n` lines from the top of scrollback; keep all
-    /// absolute line numbers in sync.
+    /// absolute line numbers in sync. Finished blocks that lived entirely in
+    /// the dropped lines are removed; partially dropped ones are clamped.
     pub fn shift_lines(&mut self, n: usize) {
+        if n == 0 { return; }
+        self.blocks.retain(|b| b.output_end.max(b.output_start).max(b.command_line) >= n);
+        self.shift_pointers(n);
+    }
+
+    /// "Clear Buffer": scrollback *and* the visible screen were erased, so
+    /// every finished block now points at blank lines. Forget them all.
+    pub fn on_buffer_cleared(&mut self, dropped_scrollback: usize) {
+        self.blocks.clear();
+        self.shift_pointers(dropped_scrollback);
+    }
+
+    fn shift_pointers(&mut self, n: usize) {
         let sub = |v: &mut usize| *v = v.saturating_sub(n);
         for b in &mut self.blocks {
             sub(&mut b.prompt_line);
@@ -243,6 +321,28 @@ impl BlockManager {
         }
         if let Some(p) = &mut self.osc.prompt_line { sub(p); }
         if let Some((l, _)) = &mut self.osc.cmd_start { sub(l); }
+        for (l, _) in &mut self.osc.cont_starts { sub(l); }
+    }
+
+    /// The terminal re-laid out its lines (resize reflow): map every stored
+    /// absolute line number through `f`.
+    pub fn remap_lines(&mut self, f: &dyn Fn(usize) -> usize) {
+        for b in &mut self.blocks {
+            b.prompt_line = f(b.prompt_line);
+            b.command_line = f(b.command_line);
+            b.output_start = f(b.output_start);
+            b.output_end = f(b.output_end);
+        }
+        if let Some((b, _)) = &mut self.osc.running {
+            b.prompt_line = f(b.prompt_line);
+            b.command_line = f(b.command_line);
+            b.output_start = f(b.output_start);
+            b.output_end = f(b.output_end);
+        }
+        if let Some(p) = &mut self.osc.prompt_line { *p = f(*p); }
+        if let Some((l, _)) = &mut self.osc.cmd_start { *l = f(*l); }
+        for (l, _) in &mut self.osc.cont_starts { *l = f(*l); }
+        if let Some(c) = &mut self.current { c.start_line = f(c.start_line); }
     }
 
     // ── Private ──
@@ -347,5 +447,58 @@ mod tests {
         m.on_command_finished(12, Some(0));
         m.shift_lines(5);
         assert_eq!(m.blocks()[0].output_start, 6);
+    }
+
+    fn finished(m: &mut BlockManager, line: usize, n: usize) {
+        m.on_prompt_start(line);
+        m.on_command_start(line, 2);
+        m.on_command_output(line + 1, format!("c{line}"));
+        m.on_command_finished(line + n, Some(0));
+    }
+
+    #[test]
+    fn fully_scrolled_out_blocks_are_dropped_partial_ones_clamped() {
+        let mut m = BlockManager::new();
+        finished(&mut m, 0, 5); // lines 0..=5
+        finished(&mut m, 7, 5); // 7..=12
+        finished(&mut m, 20, 5);
+        m.shift_lines(8);
+        assert_eq!(m.blocks().len(), 2);
+        assert_eq!(m.blocks()[0].command, "c7");
+        assert_eq!((m.blocks()[0].command_line, m.blocks()[0].output_end), (0, 4));
+        assert_eq!(m.blocks()[1].output_start, 13);
+    }
+
+    #[test]
+    fn clear_buffer_forgets_finished_blocks_but_keeps_running_one() {
+        let mut m = BlockManager::new();
+        finished(&mut m, 0, 5);
+        m.on_prompt_start(10);
+        m.on_command_start(10, 2);
+        m.on_command_output(11, "sleep".into());
+        m.on_buffer_cleared(6);
+        assert!(m.blocks().is_empty());
+        assert!(m.is_running());
+        assert_eq!(m.get(0).unwrap().output_start, 5);
+    }
+
+    #[test]
+    fn c_requires_a_pending_b_and_explicit_text_is_claimed_once() {
+        let mut m = BlockManager::new();
+        m.on_prompt_start(0);
+        m.on_command_output(1, "bogus".into()); // no B: ignored
+        assert!(!m.is_running());
+        m.on_command_start(0, 2);
+        m.on_command_text("real; text".into());
+        m.on_command_output(1, "screen text".into());
+        m.on_command_output(1, "dup".into()); // duplicate C: ignored
+        assert_eq!(m.get(0).unwrap().command, "real; text");
+        m.on_command_text("override".into()); // E after C (bash style) overrides
+        assert_eq!(m.get(0).unwrap().command, "override");
+        m.on_command_finished(1, Some(0));
+        m.on_prompt_start(2);
+        m.on_command_start(2, 2);
+        m.on_command_output(3, "next".into());
+        assert_eq!(m.get(1).unwrap().command, "next");
     }
 }

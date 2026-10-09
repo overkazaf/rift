@@ -89,6 +89,11 @@ pub fn startup_active(app: &App) -> bool {
 }
 
 pub fn redraw(app: &mut App) {
+    // DEC 2026 synchronized output: hold the frame while the app is mid-update
+    // (the scheduler re-requests a redraw once the 150 ms safety timeout hits).
+    if app.wm.active_pane().terminal.sync_pending() {
+        return;
+    }
     let splash = startup_active(app);
     let Some(window) = &app.window else { return };
     let Some(surface) = &mut app.surface else { return };
@@ -536,6 +541,14 @@ pub fn redraw(app: &mut App) {
         );
     }
 
+    // Consent / paste / SSH host-key confirmations: topmost of all.
+    if app.confirm.visible() {
+        app.confirm.render(
+            &mut buffer, width as usize, height as usize,
+            &mut app.renderer.font, &app.renderer.theme,
+        );
+    }
+
     // Pixel-level opacity fallback (non-macOS only; macOS uses native NSWindow alpha)
     #[cfg(not(target_os = "macos"))]
     if app.renderer.opacity < 0.99 {
@@ -602,8 +615,10 @@ pub fn handle_resize(app: &mut App, width: u32, height: u32) {
 /// Target minimum spacing between redraws while PTY output is streaming
 /// (~vsync at 120Hz); keystroke-driven redraws are not throttled.
 const PTY_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(8);
-/// Idle poll cadence (menu events, SSH/AI polling have no wake-up source).
-const IDLE_POLL_MS: u64 = 50;
+/// Safety-net poll while idle. Every producer (PTY/SSH reader, menu callback, AI
+/// and HUD workers) now wakes the loop through the proxy, so this only bounds
+/// the latency of anything that forgot to; idle wakeups stay at <= 1/s.
+const IDLE_POLL_MS: u64 = 1000;
 
 /// Redraw scheduling state for `about_to_wait` / `redraw`.
 #[derive(Default)]
@@ -620,6 +635,16 @@ thread_local! {
 }
 
 pub fn about_to_wait(app: &mut App, event_loop: &ActiveEventLoop) {
+    about_to_wait_inner(app, event_loop);
+    // Parse budget exhausted: output is still queued. Come straight back (after
+    // the pending input / redraw events were dispatched) instead of sleeping;
+    // rendering is paced separately by PTY_FRAME_INTERVAL.
+    if app.wm.has_backlog() {
+        event_loop.set_control_flow(ControlFlow::Poll);
+    }
+}
+
+fn about_to_wait_inner(app: &mut App, event_loop: &ActiveEventLoop) {
     // Animated effects redraw at ~60fps only while they are actually animating.
     let has_shader = app.renderer.shader.animating(app.renderer.start_time.elapsed().as_secs_f32());
     let in_startup = startup_active(app);
@@ -644,6 +669,21 @@ pub fn about_to_wait(app: &mut App, event_loop: &ActiveEventLoop) {
     // Browser: drain webview events (title/url/loading/focus)
     crate::network::browser::poll(app);
 
+    // One-time cloud-AI consent prompt (an env API key alone never enables AI).
+    crate::ai::consent::maybe_prompt(app);
+
+    // Unknown SSH host keys: ask the user, show the fingerprint.
+    if let Some(ref c) = app.ssh_connecting {
+        let mut asked = Vec::new();
+        while let Ok(p) = c.prompts.try_recv() {
+            asked.push(p);
+        }
+        for p in asked {
+            crate::ui::confirm::show_ssh_host_key(app, p);
+            app.request_redraw();
+        }
+    }
+
     // Poll SSH connection
     if let Some(ref connecting) = app.ssh_connecting {
         if let Ok(result) = connecting.rx.try_recv() {
@@ -666,6 +706,9 @@ pub fn about_to_wait(app: &mut App, event_loop: &ActiveEventLoop) {
                 }
                 Err(e) => {
                     log::error!("SSH: connection failed: {e}");
+                    if e.contains("HOST IDENTIFICATION HAS CHANGED") {
+                        crate::ui::confirm::show_notice(app, "SSH host key changed", &e);
+                    }
                     app.ssh_dialog.error_msg = Some(format!("Failed: {e}"));
                     app.ssh_dialog.visible = true;
                 }
@@ -688,6 +731,7 @@ pub fn about_to_wait(app: &mut App, event_loop: &ActiveEventLoop) {
         app.renderer.prof_add(crate::renderer::Phase::Pty, t_pty.elapsed());
     }
     if pty_changed {
+        app.wm.sync_theme_colors(&app.renderer.theme);
         app.wm.flush_all_responses();
         app.update_title();
 
@@ -695,7 +739,7 @@ pub fn about_to_wait(app: &mut App, event_loop: &ActiveEventLoop) {
         {
             let term = &app.wm.active_pane().terminal;
             let row = term.cursor_row.min(term.grid.len().saturating_sub(1));
-            let line: String = term.grid[row].iter().map(|c| c.c).collect();
+            let line: String = crate::terminal::grid::cells_text(&term.grid[row]);
             let trimmed = line.trim();
             if !trimmed.is_empty() {
                 // Observer
@@ -720,16 +764,19 @@ pub fn about_to_wait(app: &mut App, event_loop: &ActiveEventLoop) {
         }
 
         // Handle OSC 52 clipboard requests + bell for all panes
+        let mut osc52_toast: Option<&str> = None;
         for tab in &mut app.wm.tabs {
             for pane in tab.panes_mut() {
                 // OSC 52 clipboard
                 if let Some(req) = pane.terminal.clipboard_request.take() {
                     match req {
                         crate::terminal::ClipboardRequest::Set(b64_data) => {
-                            if let Ok(bytes) = crate::tools::codec::base64_decode(&b64_data) {
-                                if let Ok(text) = String::from_utf8(bytes) {
-                                    crate::window::selection::copy_to_clipboard(&text);
-                                }
+                            let decoded = crate::tools::codec::base64_decode(&b64_data)
+                                .ok()
+                                .and_then(|bytes| String::from_utf8(bytes).ok());
+                            if let Some(text) = decoded {
+                                crate::window::selection::copy_to_clipboard(&text);
+                                osc52_toast = Some("Clipboard set by program");
                             }
                         }
                         crate::terminal::ClipboardRequest::Query => {
@@ -737,6 +784,20 @@ pub fn about_to_wait(app: &mut App, event_loop: &ActiveEventLoop) {
                                 let encoded = crate::tools::codec::base64_encode(text.as_bytes());
                                 let response = format!("\x1b]52;c;{}\x07", encoded);
                                 pane.terminal.response_queue.push(response.into_bytes());
+                            }
+                        }
+                        crate::terminal::ClipboardRequest::Blocked { query, oversized } => {
+                            // Toast once per kind per run; never spam.
+                            let (flag, msg) = if query {
+                                (&mut app.osc52_warned.0, "A program asked to read your clipboard \u{2014} blocked (set [security] osc52 in config.toml)")
+                            } else if oversized {
+                                (&mut app.osc52_warned.1, "A program tried to set a very large clipboard \u{2014} blocked")
+                            } else {
+                                (&mut app.osc52_warned.2, "A program tried to set your clipboard \u{2014} blocked (set [security] osc52 in config.toml)")
+                            };
+                            if !*flag {
+                                *flag = true;
+                                osc52_toast = Some(msg);
                             }
                         }
                     }
@@ -753,6 +814,36 @@ pub fn about_to_wait(app: &mut App, event_loop: &ActiveEventLoop) {
                 }
             }
         }
+        if let Some(msg) = osc52_toast {
+            app.blocks_ui.show_toast(msg);
+            app.needs_render = true;
+        }
+
+        // OSC 9 / OSC 777 desktop notifications (AI agents' "needs you" signal):
+        // always drained; posted only when the user can't already see the pane.
+        {
+            let focused = app.window_focused;
+            let active_tab = app.wm.active_tab;
+            let mut posted = 0;
+            for (ti, tab) in app.wm.tabs.iter_mut().enumerate() {
+                let (zoomed, active_leaf) = (tab.is_zoomed(), tab.active);
+                for (pi, pane) in tab.panes_mut().into_iter().enumerate() {
+                    let notes = pane.terminal.take_notifications();
+                    let visible = ti == active_tab && (!zoomed || pi == active_leaf);
+                    if notes.is_empty() || (focused && visible) {
+                        continue;
+                    }
+                    for n in notes {
+                        if posted >= 3 {
+                            break; // per-pass cap: a misbehaving program can't spam the desktop
+                        }
+                        posted += 1;
+                        let title = if n.title.is_empty() { "rift" } else { n.title.as_str() };
+                        crate::tools::notify::Notifier::send(title, &n.body);
+                    }
+                }
+            }
+        }
 
         // Capture snapshot for TimeWarp (throttled internally to 100ms)
         let pane = app.wm.active_pane();
@@ -760,6 +851,7 @@ pub fn about_to_wait(app: &mut App, event_loop: &ActiveEventLoop) {
     }
 
     // Update HUD system info periodically
+    app.hud.poll();
     if app.hud_visible && app.hud.needs_update() {
         app.hud.update();
     }
@@ -792,6 +884,7 @@ pub fn about_to_wait(app: &mut App, event_loop: &ActiveEventLoop) {
     // Streaming answers animate (caret, spinner); redraw while they run.
     let ai_waiting = app.chat.animating() || chat_changed || advisor_changed || (advisor_busy && app.chat.visible);
     let any_overlay = app.prefs.visible
+        || app.confirm.visible()
         || app.welcome.visible
         || app.ssh_dialog.visible
         || app.autocomplete.visible
@@ -849,7 +942,11 @@ pub fn about_to_wait(app: &mut App, event_loop: &ActiveEventLoop) {
         if pty_changed { s.redraw_pending = true; }
         (s.redraw_pending, s.last_redraw)
     });
-    if pending {
+    let sync_hold = app.wm.active_pane().terminal.sync_remaining();
+    if let Some(rem) = sync_hold.filter(|_| pending) {
+        wake_at = wake_at.min(std::time::Instant::now() + rem);
+    }
+    if pending && sync_hold.is_none() {
         let ready_at = last.map(|t| t + PTY_FRAME_INTERVAL);
         match ready_at {
             Some(t) if t > std::time::Instant::now() => wake_at = wake_at.min(t),

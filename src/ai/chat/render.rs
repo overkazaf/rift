@@ -385,7 +385,16 @@ impl ChatUi {
 
         for (mi, m) in msgs.iter().enumerate() {
             match m.role {
-                Role::User => self.build_user(&mut out, ms, m, inner_w),
+                Role::User => {
+                    self.build_user(&mut out, ms, m, inner_w);
+                    if let Some(why) = &m.injection {
+                        let mut lines = vec!["Possible prompt injection".to_string()];
+                        lines.extend(markdown::wrap_text(&format!("The terminal text sent with this question {why}. Run buttons in the answer ask for confirmation."), cols.saturating_sub(2)));
+                        let hint_at = lines.len();
+                        out.push(Item::Error(lines, hint_at));
+                        out.push(Item::Gap(ms.xs));
+                    }
+                }
                 Role::Assistant => {
                     let is_streaming = streaming && mi == last;
                     let start = out.len();
@@ -441,6 +450,13 @@ impl ChatUi {
                             out.pop();
                         }
                     }
+                    if let (Some(why), false) = (&m.incomplete, m.error) {
+                        out.push(Item::Gap(ms.xs));
+                        let mut lines = vec!["Answer incomplete".to_string()];
+                        lines.extend(markdown::wrap_text(why, cols.saturating_sub(2)));
+                        let hint_at = lines.len();
+                        out.push(Item::Error(lines, hint_at));
+                    }
                     if is_streaming {
                         if out.len() == start {
                             out.push(Item::Thinking);
@@ -459,9 +475,12 @@ impl ChatUi {
     }
 
     fn build_user(&self, out: &mut Vec<Item>, ms: &Ms, m: &Message, inner_w: usize) {
-        if !m.context_badges.is_empty() {
+        if !m.context_badges.is_empty() || m.redacted > 0 {
             let max_label = (inner_w / ms.cw).saturating_sub(6).max(4);
-            let labels: Vec<String> = m.context_badges.iter().map(|b| ellipsize(b, max_label)).collect();
+            let mut labels: Vec<String> = m.context_badges.iter().map(|b| ellipsize(b, max_label)).collect();
+            if m.redacted > 0 {
+                labels.push(session::redaction_label(m.redacted));
+            }
             let ws: Vec<usize> = labels.iter().map(|l| 2 * ms.sm + ms.xs + l.chars().count() * ms.cw).collect();
             let rows = pack_rows(&ws, inner_w, ms.xs).into_iter().map(|r| r.into_iter().map(|i| labels[i].clone()).collect()).collect();
             out.push(Item::Chips(rows));

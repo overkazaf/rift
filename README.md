@@ -136,7 +136,7 @@ rift --config PATH     # use a specific config file
 
 ## AI setup
 
-Config lives at `~/.config/rift/config.toml`. If `api_key` is omitted, Rift reads `$DEEPSEEK_API_KEY` or `$OPENAI_API_KEY` from the environment.
+Config lives at `~/.config/rift/config.toml` (or the file given with `--config PATH`). AI stays off until you configure an `[llm]` section or answer the one-time consent prompt. If `api_key` is omitted from `[llm]`, Rift reads `$DEEPSEEK_API_KEY` or `$OPENAI_API_KEY` from the environment. A key in the environment alone never turns cloud AI on: Rift asks first, and records your answer as `[ai] consent = "cloud" | "local" | "declined"`.
 
 **DeepSeek** (or any OpenAI-compatible API):
 
@@ -170,8 +170,19 @@ Turn the ambient AI features on or off:
 
 ```toml
 [ai]
-auto_fix = true   # suggest a fix when a command fails
+auto_fix = true   # suggest a fix when a command fails (off until you consent to AI)
 nl_hash  = true   # "# ..." at the prompt → generated command
+```
+
+Settings changed in Rift are merged into your file: comments, unknown keys and your `api_key` are left untouched, and nothing is written unless a setting actually changed.
+
+Clipboard access by programs (OSC 52):
+
+```toml
+[security]
+osc52 = "write-only"   # default: programs may set the clipboard (<=100 KB, with a toast), never read it
+# osc52 = "allow"      # reads and writes
+# osc52 = "deny"       # neither
 ```
 
 Other `[general]` keys: `theme` (default `"rift-neon"`), `font_family`, `font_path`, `font_size`, `opacity`, `cols`, `rows`, `effect`, `effect_intensity`, `startup_animation`. You can also open **Preferences** (`Cmd+,`).

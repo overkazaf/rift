@@ -46,7 +46,7 @@ fn shortcut_cmd(app: &App, event: &KeyEvent) -> Option<PaneCmd> {
             Some(PaneCmd::Swap(d))
         } else if sup && ctrl && !shift && !alt {
             Some(PaneCmd::Resize(d))
-        } else if alt && !sup && !ctrl && !shift {
+        } else if alt && !sup && !ctrl && !shift && !super::shortcuts::app_owns_keys(app) {
             // Plain Alt+Arrow keeps switching panes, but only when there is a
             // pane that way; otherwise the shell keeps its word-jump.
             let tab = app.wm.active_tab();

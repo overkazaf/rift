@@ -21,8 +21,23 @@
 //! scroll with the screen — an image dropped into scrollback will stay put
 //! rather than riding the text up, which is a known simplification.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::io::Read;
+
+/// Largest accepted image edge, in pixels.
+pub const MAX_DIM: u32 = 8192;
+/// Largest decoded (RGBA8) size of one image.
+pub const MAX_IMAGE_BYTES: usize = 64 << 20;
+/// Total decoded bytes kept per terminal; least-recently-used images are evicted beyond it.
+pub const STORE_BUDGET: usize = 256 << 20;
+/// Cap on base64 payload accumulated across `m=1` chunks (base64 of one max-size image, plus slack).
+const MAX_PENDING_B64: usize = MAX_IMAGE_BYTES / 3 * 4 + (1 << 16);
+
+/// Is `w x h` RGBA within the per-image limits?
+fn dims_ok(w: u32, h: u32) -> bool {
+    w > 0 && h > 0 && w <= MAX_DIM && h <= MAX_DIM && (w as usize) * (h as usize) * 4 <= MAX_IMAGE_BYTES
+}
 
 /// Where and how big a transmitted image is displayed.
 #[derive(Clone, Copy, Debug)]
@@ -66,11 +81,26 @@ pub struct ImageStore {
     images: HashMap<u32, TermImage>,
     next_id: u32,
     pending: Option<PendingTransmission>,
+    /// A chunked transmission exceeded its cap: swallow the remaining chunks.
+    discarding: bool,
+    /// Sum of `data.len()` over `images`.
+    total_bytes: usize,
+    /// LRU clock + per-image last-use stamp (interior mutability: `get_image` is `&self`).
+    tick: Cell<u64>,
+    used: HashMap<u32, Cell<u64>>,
 }
 
 impl ImageStore {
     pub fn new() -> Self {
-        Self { images: HashMap::new(), next_id: 1, pending: None }
+        Self {
+            images: HashMap::new(),
+            next_id: 1,
+            pending: None,
+            discarding: false,
+            total_bytes: 0,
+            tick: Cell::new(0),
+            used: HashMap::new(),
+        }
     }
 
     /// Store a decoded image, assigning an id automatically if `id == 0`
@@ -84,8 +114,42 @@ impl ImageStore {
         } else {
             id
         };
+        if let Some(old) = self.images.remove(&id) {
+            self.total_bytes = self.total_bytes.saturating_sub(old.data.len());
+        }
+        self.total_bytes += data.len();
         self.images.insert(id, TermImage { id, width, height, data, placement: None });
+        self.touch(id);
+        self.evict_to_budget(id);
         id
+    }
+
+    fn touch(&mut self, id: u32) {
+        let t = self.tick.get() + 1;
+        self.tick.set(t);
+        self.used.entry(id).or_insert_with(|| Cell::new(0)).set(t);
+    }
+
+    /// Drop least-recently-used images (never `keep`) until under [`STORE_BUDGET`].
+    fn evict_to_budget(&mut self, keep: u32) {
+        while self.total_bytes > STORE_BUDGET {
+            let victim = self
+                .images
+                .keys()
+                .copied()
+                .filter(|k| *k != keep)
+                .min_by_key(|k| self.used.get(k).map_or(0, |c| c.get()));
+            match victim {
+                Some(v) => self.delete_image(v),
+                None => break,
+            }
+        }
+    }
+
+    /// Decoded bytes currently held.
+    #[allow(dead_code)]
+    pub fn total_bytes(&self) -> usize {
+        self.total_bytes
     }
 
     /// Place a previously-transmitted image at `(row, col)`, spanning
@@ -98,6 +162,7 @@ impl ImageStore {
                 cell_rows: cell_rows.max(1),
                 cell_cols: cell_cols.max(1),
             });
+            self.touch(id);
         }
     }
 
@@ -125,17 +190,29 @@ impl ImageStore {
     }
 
     pub fn get_image(&self, id: u32) -> Option<&TermImage> {
-        self.images.get(&id)
+        let img = self.images.get(&id)?;
+        if let Some(c) = self.used.get(&id) {
+            let t = self.tick.get() + 1;
+            self.tick.set(t);
+            c.set(t);
+        }
+        Some(img)
     }
 
     pub fn delete_image(&mut self, id: u32) {
-        self.images.remove(&id);
+        if let Some(old) = self.images.remove(&id) {
+            self.total_bytes = self.total_bytes.saturating_sub(old.data.len());
+        }
+        self.used.remove(&id);
     }
 
     /// Drop every stored image and any in-flight chunked transmission.
     pub fn clear(&mut self) {
         self.images.clear();
+        self.used.clear();
+        self.total_bytes = 0;
         self.pending = None;
+        self.discarding = false;
     }
 
     /// Entry point for a decoded Kitty graphics APC command — everything
@@ -179,6 +256,20 @@ impl ImageStore {
     ) {
         let more = get_u32(keys, b'm').unwrap_or(0) == 1;
 
+        if self.discarding {
+            if !more {
+                self.discarding = false;
+            }
+            return;
+        }
+        let have = self.pending.as_ref().map_or(0, |p| p.data.len());
+        if have.saturating_add(payload_b64.len()) > MAX_PENDING_B64 {
+            // Oversized transmission: drop what we have and ignore the rest of it.
+            self.pending = None;
+            self.discarding = more;
+            return;
+        }
+
         let pending = self.pending.get_or_insert_with(|| PendingTransmission {
             meta: keys.to_vec(),
             data: Vec::new(),
@@ -202,14 +293,14 @@ impl ImageStore {
         let Some(raw) = base64_decode(&data) else { return };
 
         let decoded = match format {
-            32 => raw_dims(&meta).map(|(w, h)| (w, h, rgba_from_raw(&raw, w, h, 4))),
-            24 => raw_dims(&meta).map(|(w, h)| (w, h, rgba_from_raw(&raw, w, h, 3))),
+            32 => raw_dims(&meta).filter(|&(w, h)| dims_ok(w, h)).map(|(w, h)| (w, h, rgba_from_raw(&raw, w, h, 4))),
+            24 => raw_dims(&meta).filter(|&(w, h)| dims_ok(w, h)).map(|(w, h)| (w, h, rgba_from_raw(&raw, w, h, 3))),
             100 => decode_png(&raw),
             _ => None,
         };
 
         let Some((w, h, rgba)) = decoded else { return };
-        if w == 0 || h == 0 {
+        if !dims_ok(w, h) {
             return;
         }
 
@@ -410,8 +501,8 @@ fn decode_png(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
 
     let width = hdr.width as usize;
     let height = hdr.height as usize;
-    if width.saturating_mul(height) > 64_000_000 {
-        return None; // Sanity cap (~64MP) before allocating pixel buffers.
+    if !dims_ok(hdr.width, hdr.height) {
+        return None; // Per-image limits, checked before any pixel buffer is allocated.
     }
 
     let channels: usize = match hdr.color_type {
@@ -423,8 +514,10 @@ fn decode_png(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
         _ => return None,
     };
 
-    let inflated = inflate_zlib(&idat)?;
     let stride = width * channels;
+    // A valid stream inflates to exactly `height * (1 + stride)` bytes; never let
+    // a hostile one produce more than that (zip-bomb guard).
+    let inflated = inflate_zlib(&idat, height.checked_mul(stride + 1)?)?;
     let mut raw = vec![0u8; stride * height];
     unfilter(&inflated, &mut raw, width, height, channels)?;
 
@@ -460,10 +553,14 @@ fn decode_png(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
     Some((hdr.width, hdr.height, rgba))
 }
 
-fn inflate_zlib(data: &[u8]) -> Option<Vec<u8>> {
-    let mut decoder = flate2::read::ZlibDecoder::new(data);
+/// Inflate `data`, refusing streams that expand past `limit` bytes.
+fn inflate_zlib(data: &[u8], limit: usize) -> Option<Vec<u8>> {
+    let decoder = flate2::read::ZlibDecoder::new(data);
     let mut out = Vec::new();
-    decoder.read_to_end(&mut out).ok()?;
+    decoder.take(limit as u64 + 1).read_to_end(&mut out).ok()?;
+    if out.len() > limit {
+        return None;
+    }
     Some(out)
 }
 
@@ -719,5 +816,54 @@ mod tests {
         term.feed_apc_byte(b'1');
         term.feed_apc_byte(b'm');
         assert!(term.image_store.get_cell(0, 0).is_none());
+    }
+
+    #[test]
+    fn store_evicts_least_recently_used_over_budget() {
+        let mut store = ImageStore::new();
+        let img = vec![0u8; MAX_IMAGE_BYTES]; // 64 MB each: 4 fit in 256 MB exactly
+        for id in 1..=4 {
+            store.add_image(id, 4096, 4096, img.clone());
+        }
+        assert_eq!(store.total_bytes(), 4 * MAX_IMAGE_BYTES);
+        assert!(store.get_image(1).is_some()); // touch 1: now 2 is the oldest
+        store.add_image(5, 4096, 4096, img.clone());
+        assert!(store.get_image(2).is_none(), "LRU image evicted");
+        assert!(store.get_image(1).is_some() && store.get_image(5).is_some());
+        assert!(store.total_bytes() <= STORE_BUDGET);
+    }
+
+    #[test]
+    fn oversized_dimensions_are_rejected_before_allocation() {
+        let mut term = Terminal::new(80, 24);
+        // 65535 x 65535 raw RGBA would be 17 GB.
+        feed_apc_command(&mut term, "Ga=T,f=32,s=65535,v=65535;AAAA");
+        assert!(term.image_store.get_cell(0, 0).is_none());
+        assert_eq!(term.image_store.total_bytes(), 0);
+        // 8193 wide is over the edge limit even though the byte size is small.
+        feed_apc_command(&mut term, "Ga=T,f=32,s=8193,v=1,i=9;AAAA");
+        assert!(term.image_store.get_image(9).is_none());
+    }
+
+    #[test]
+    fn png_that_inflates_past_its_header_is_refused() {
+        // Header says 2x2 RGBA (needs 2*(1+8)=18 inflated bytes); stream inflates to 1 MB.
+        use std::io::Write;
+        let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
+        z.write_all(&vec![0u8; 1 << 20]).unwrap();
+        let idat = z.finish().unwrap();
+        assert!(inflate_zlib(&idat, 18).is_none());
+        assert_eq!(inflate_zlib(&idat, 1 << 20).map(|v| v.len()), Some(1 << 20));
+    }
+
+    #[test]
+    fn runaway_chunked_transmission_is_dropped() {
+        let mut store = ImageStore::new();
+        let big = vec![b'A'; MAX_PENDING_B64 / 2 + 1];
+        store.handle_kitty_command(0, 0, &[b"a=t,f=32,s=1,v=1,m=1;".as_slice(), &big].concat());
+        store.handle_kitty_command(0, 0, &[b"m=1;".as_slice(), &big].concat());
+        assert!(store.pending.is_none() && store.discarding);
+        store.handle_kitty_command(0, 0, b"m=0;AAAA"); // tail of the oversized transmission is swallowed
+        assert!(!store.discarding && store.get_image(1).is_none());
     }
 }

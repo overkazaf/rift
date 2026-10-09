@@ -18,6 +18,8 @@ use std::path::{Path, PathBuf};
 
 use unicode_width::UnicodeWidthChar;
 
+use crate::terminal::grid::UnderlineStyle;
+
 /// Whether `c` occupies two terminal cells.
 pub fn is_wide(c: char) -> bool {
     c.width().unwrap_or(1) == 2
@@ -181,15 +183,15 @@ struct GFont {
 }
 
 impl GFont {
-    fn from_bytes(data: &[u8], size: f32) -> Option<Self> {
+    fn from_bytes(data: &[u8], size: f32, index: u32) -> Option<Self> {
         let settings = fontdue::FontSettings {
-            collection_index: 0,
+            collection_index: index,
             scale: size,
             ..Default::default()
         };
         let font = fontdue::Font::from_bytes(data, settings).ok()?;
         let mut latin1 = [0u16; 128];
-        match ttf_parser::Face::parse(data, 0) {
+        match ttf_parser::Face::parse(data, index) {
             Ok(face) => {
                 for (i, slot) in latin1.iter_mut().enumerate() {
                     if let Some(c) = char::from_u32(0x80 + i as u32) {
@@ -247,13 +249,20 @@ pub struct FontManager {
     pub cell_width: usize,
     pub cell_height: usize,
     pub baseline: usize,
-    cache: HashMap<char, Vec<u8>>,
-    wide_cache: HashMap<char, Vec<u8>>,
+    cache: HashMap<(char, u8), Vec<u8>>,
+    wide_cache: HashMap<(char, u8), Vec<u8>>,
+    primary_path: PathBuf,
+    /// Lazily loaded bold / italic / bold-italic faces (index = style bits;
+    /// slot 0 unused). Outer `None` = not tried yet, inner `None` = no such
+    /// face (synthesized instead).
+    styled: [Option<Option<GFont>>; 4],
+    /// Underline / strikethrough / overline geometry in cell pixels.
+    pub deco: DecoMetrics,
 }
 
 fn load_font(path: &Path, size: f32) -> Option<GFont> {
     let data = std::fs::read(path).ok()?;
-    GFont::from_bytes(&data, size)
+    GFont::from_bytes(&data, size, 0)
 }
 
 impl FontManager {
@@ -262,7 +271,7 @@ impl FontManager {
             .unwrap_or_else(|e| panic!("Failed to read font {font_path}: {e}"));
         log::info!("Loaded font: {font_path}");
 
-        let font = GFont::from_bytes(&font_data, font_size).expect("Failed to parse font");
+        let font = GFont::from_bytes(&font_data, font_size, 0).expect("Failed to parse font");
 
         let metrics = font
             .font
@@ -273,6 +282,7 @@ impl FontManager {
 
         let (m_metrics, _) = font.font.rasterize('M', font_size);
         let cell_width = m_metrics.advance_width.ceil() as usize;
+        let deco = deco_metrics(&font_data, font_size, baseline, cell_height, cell_width);
 
         let fallbacks = discover_fallbacks(&system_font_dirs(), Some(Path::new(font_path)))
             .into_iter()
@@ -290,7 +300,53 @@ impl FontManager {
             baseline,
             cache: HashMap::new(),
             wide_cache: HashMap::new(),
+            primary_path: PathBuf::from(font_path),
+            styled: [None, None, None, None],
+            deco,
         }
+    }
+
+    /// Load (once) the real bold / italic / bold-italic face for `slot`.
+    /// Returns whether one exists.
+    fn ensure_styled(&mut self, slot: usize) -> bool {
+        if slot == 0 {
+            return true;
+        }
+        if self.styled[slot].is_none() {
+            let (b, i) = (slot & BOLD as usize != 0, slot & ITALIC as usize != 0);
+            let face = find_face(&self.primary_path, b, i).and_then(|(path, idx)| {
+                let data = std::fs::read(&path).ok()?;
+                let f = GFont::from_bytes(&data, self.font_size, idx)?;
+                log::info!("Loaded styled face (bold={b}, italic={i}): {} #{idx}", path.display());
+                Some(f)
+            });
+            self.styled[slot] = Some(face);
+        }
+        matches!(self.styled[slot], Some(Some(_)))
+    }
+
+    /// Choose the face for `style`: `(slot, synth_bold, synth_italic)`.
+    fn face_for(&mut self, style: u8) -> (usize, bool, bool) {
+        let (wb, wi) = (style & BOLD != 0, style & ITALIC != 0);
+        let exact = style as usize;
+        if self.ensure_styled(exact) {
+            return (exact, false, false);
+        }
+        if wb && wi {
+            if self.ensure_styled(BOLD as usize) {
+                return (BOLD as usize, false, true);
+            }
+            if self.ensure_styled(ITALIC as usize) {
+                return (ITALIC as usize, true, false);
+            }
+        }
+        (0, wb, wi)
+    }
+
+    /// Whether the primary font ships a real face for these style bits.
+    #[allow(dead_code)]
+    pub fn has_real_face(&mut self, style: u8) -> bool {
+        self.ensure_styled(style as usize)
     }
 
     /// Open fallback `i` if not yet loaded. Returns whether it is usable.
@@ -337,50 +393,350 @@ impl FontManager {
         Source::None
     }
 
-    fn render(&mut self, c: char, wide: bool) -> Vec<u8> {
+    fn render(&mut self, c: char, wide: bool, style: u8) -> Vec<u8> {
         let (cw, ch, baseline) = (self.cell_width, self.cell_height, self.baseline);
         let target_w = if wide { cw * 2 } else { cw };
         if (c as u32) < 0x20 || c == '\u{7f}' {
             return vec![0u8; target_w * ch];
         }
+        let size = self.font_size;
+        let (mut sb, mut si) = (style & BOLD != 0, style & ITALIC != 0);
+        let mut out: Vec<u8>;
         match self.pick(c) {
             Source::Primary => {
-                place_glyph(&self.primary, c, self.font_size, target_w, ch, baseline, wide, wide)
+                let (slot, fb, fi) = self.face_for(style);
+                let styled = if slot == 0 { None } else { self.styled[slot].as_ref().and_then(|f| f.as_ref()) };
+                match styled {
+                    Some(f) if f.glyph(c) != 0 => {
+                        out = place_glyph(f, c, size, target_w, ch, baseline, wide, wide);
+                        sb = fb;
+                        si = fi;
+                    }
+                    _ => {
+                        out = place_glyph(&self.primary, c, size, target_w, ch, baseline, wide, wide);
+                    }
+                }
             }
             Source::Fallback(i) => {
-                if let Slot::Loaded(f, size) = &self.fallbacks[i].slot {
-                    place_glyph(f, c, *size, target_w, ch, baseline, wide, true)
+                if let Slot::Loaded(f, fsize) = &self.fallbacks[i].slot {
+                    out = place_glyph(f, c, *fsize, target_w, ch, baseline, wide, true);
                 } else {
-                    vec![0u8; target_w * ch]
+                    out = vec![0u8; target_w * ch];
                 }
             }
             Source::None => {
-                if wide || looks_like_emoji(c) {
+                out = if wide || looks_like_emoji(c) {
                     placeholder_box(target_w, ch)
                 } else {
                     vec![0u8; target_w * ch]
-                }
+                };
+                sb = false;
+                si = false;
             }
         }
+        if synth_ok(c) {
+            if sb {
+                embolden(&mut out, target_w, ch);
+            }
+            if si && !wide {
+                shear(&mut out, target_w, ch, baseline);
+            }
+        }
+        out
     }
 
     /// Coverage bitmap `cell_width * cell_height` for a single-width cell.
     pub fn rasterize(&mut self, c: char) -> &[u8] {
-        if !self.cache.contains_key(&c) {
-            let bmp = self.render(c, false);
-            self.cache.insert(c, bmp);
+        self.rasterize_styled(c, 0)
+    }
+
+    /// Like [`rasterize`] for a style (`BOLD | ITALIC` bits).
+    pub fn rasterize_styled(&mut self, c: char, style: u8) -> &[u8] {
+        let key = (c, style);
+        if !self.cache.contains_key(&key) {
+            let bmp = self.render(c, false, style);
+            self.cache.insert(key, bmp);
         }
-        &self.cache[&c]
+        &self.cache[&key]
     }
 
     /// Coverage bitmap `2 * cell_width * cell_height` for a double-width
     /// character, scaled to fit and centered.
     pub fn rasterize_wide(&mut self, c: char) -> &[u8] {
-        if !self.wide_cache.contains_key(&c) {
-            let bmp = self.render(c, true);
-            self.wide_cache.insert(c, bmp);
+        self.rasterize_wide_styled(c, 0)
+    }
+
+    pub fn rasterize_wide_styled(&mut self, c: char, style: u8) -> &[u8] {
+        let key = (c, style);
+        if !self.wide_cache.contains_key(&key) {
+            let bmp = self.render(c, true, style);
+            self.wide_cache.insert(key, bmp);
         }
-        &self.wide_cache[&c]
+        &self.wide_cache[&key]
+    }
+}
+
+/// Style bits for [`FontManager::rasterize_styled`].
+pub const BOLD: u8 = 1;
+pub const ITALIC: u8 = 2;
+
+#[inline]
+pub fn style_bits(bold: bool, italic: bool) -> u8 {
+    bold as u8 | (italic as u8) << 1
+}
+
+/// Block elements, box drawing and powerline glyphs must keep their exact
+/// cell geometry, so they are never synthetically emboldened or slanted.
+fn synth_ok(c: char) -> bool {
+    !matches!(c as u32, 0x2500..=0x259F | 0xE0A0..=0xE0BF | 0x2800..=0x28FF)
+}
+
+/// Synthetic bold: union of the glyph and itself shifted right by one pixel.
+fn embolden(bmp: &mut [u8], w: usize, h: usize) {
+    for y in 0..h {
+        let row = &mut bmp[y * w..(y + 1) * w];
+        for x in (1..w).rev() {
+            let (a, b) = (row[x] as u32, row[x - 1] as u32);
+            // alpha union: a + b - a*b/255
+            row[x] = (a + b - (a * b + 127) / 255) as u8;
+        }
+    }
+}
+
+/// tan(12 degrees).
+const OBLIQUE_SLANT: f32 = 0.2126;
+
+/// Synthetic oblique: shear rows horizontally (sub-pixel, linearly
+/// interpolated) around a pivot a bit above the baseline so the slant is
+/// balanced between ascenders and descenders.
+fn shear(bmp: &mut [u8], w: usize, h: usize, baseline: usize) {
+    let pivot = baseline as f32 - h as f32 * 0.3;
+    let src = bmp.to_vec();
+    for y in 0..h {
+        let shift = (pivot - y as f32) * OBLIQUE_SLANT;
+        let whole = shift.floor();
+        let frac = shift - whole;
+        let whole = whole as i32;
+        let (fa, fb) = (((1.0 - frac) * 256.0) as u32, (frac * 256.0) as u32);
+        for x in 0..w {
+            // dest x takes source x - shift
+            let s0 = x as i32 - whole;
+            let v0 = if s0 >= 0 && (s0 as usize) < w { src[y * w + s0 as usize] as u32 } else { 0 };
+            let s1 = s0 - 1;
+            let v1 = if s1 >= 0 && (s1 as usize) < w { src[y * w + s1 as usize] as u32 } else { 0 };
+            bmp[y * w + x] = ((v0 * fa + v1 * fb) >> 8) as u8;
+        }
+    }
+}
+
+#[cfg(test)]
+pub fn embolden_for_test(b: &mut [u8], w: usize, h: usize) { embolden(b, w, h) }
+#[cfg(test)]
+pub fn shear_for_test(b: &mut [u8], w: usize, h: usize, base: usize) { shear(b, w, h, base) }
+
+/// Find the real `bold` / `italic` sibling of `primary`: another face inside
+/// the same collection (Menlo.ttc), or a sibling file (`-Bold`, `-Italic`,
+/// `-BoldItalic`, `-Oblique`, ...) in the same directory.
+/// Returns `(file, collection index)`.
+pub fn find_face(primary: &Path, bold: bool, italic: bool) -> Option<(PathBuf, u32)> {
+    if !bold && !italic {
+        return Some((primary.to_path_buf(), 0));
+    }
+    let ext = primary.extension()?.to_str()?.to_string();
+    if matches!(ext.to_ascii_lowercase().as_str(), "ttc" | "otc") {
+        let data = std::fs::read(primary).ok()?;
+        let n = ttf_parser::fonts_in_collection(&data)?;
+        for i in 0..n {
+            let Ok(face) = ttf_parser::Face::parse(&data, i) else { continue };
+            let is_it = face.is_italic() || face.is_oblique();
+            if face.is_bold() == bold && is_it == italic {
+                return Some((primary.to_path_buf(), i));
+            }
+        }
+        return None;
+    }
+    let dir = primary.parent()?;
+    let stem = primary.file_stem()?.to_str()?;
+    let mut base = stem;
+    for suffix in ["-Regular", "_Regular", " Regular", "Regular", "-Book", "-Medium"] {
+        if let Some(b) = base.strip_suffix(suffix) {
+            base = b;
+            break;
+        }
+    }
+    let names: &[&str] = match (bold, italic) {
+        (true, false) => &["Bold"],
+        (false, true) => &["Italic", "Oblique"],
+        _ => &["BoldItalic", "BoldOblique", "Bold Italic", "Bold Oblique"],
+    };
+    let exts = [ext.as_str(), "ttf", "otf"];
+    for name in names {
+        for sep in ["-", "", " ", "_"] {
+            for e in exts {
+                let cand = dir.join(format!("{base}{sep}{name}.{e}"));
+                if cand.is_file() && cand != primary {
+                    return Some((cand, 0));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Geometry of text decorations in cell pixels (distance from the cell top).
+#[derive(Clone, Copy, Debug)]
+pub struct DecoMetrics {
+    pub cell_w: usize,
+    pub ul_top: usize,
+    pub ul_thick: usize,
+    pub strike_top: usize,
+    pub strike_thick: usize,
+}
+
+/// Derive decoration geometry from the font's `post` / `OS/2` metrics
+/// (scaled to `size`), with sane fallbacks, clamped to fit in the cell.
+fn deco_metrics(data: &[u8], size: f32, baseline: usize, ch: usize, cw: usize) -> DecoMetrics {
+    let mut ul = None;
+    let mut st = None;
+    let mut scale = 0.0;
+    if let Ok(face) = ttf_parser::Face::parse(data, 0) {
+        scale = size / face.units_per_em() as f32;
+        ul = face.underline_metrics();
+        st = face.strikeout_metrics();
+    }
+    let default_thick = (size / 14.0).round().max(1.0);
+    let thick_of = |m: Option<ttf_parser::LineMetrics>| {
+        m.map(|m| (m.thickness as f32 * scale).round()).filter(|t| *t >= 1.0).unwrap_or(default_thick)
+    };
+    let ul_thick = thick_of(ul);
+    let st_thick = thick_of(st);
+    let ul_pos = ul.map(|m| m.position as f32 * scale).unwrap_or(-size * 0.12);
+    let st_pos = st.map(|m| m.position as f32 * scale).unwrap_or(size * 0.3);
+    let b = baseline as f32;
+    // Keep underline just below the baseline, strike clear of the baseline.
+    let mut ul_top = (b - ul_pos).round().max(b + 1.0);
+    let max_top = (ch as f32 - ul_thick).max(0.0);
+    if ul_top > max_top {
+        ul_top = max_top;
+    }
+    let strike_top = (b - st_pos).round().clamp(0.0, (ch as f32 - st_thick).max(0.0));
+    DecoMetrics {
+        cell_w: cw.max(1),
+        ul_top: ul_top as usize,
+        ul_thick: ul_thick as usize,
+        strike_top: strike_top as usize,
+        strike_thick: st_thick as usize,
+    }
+}
+
+/// Decorations of one cell.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Deco {
+    pub ul: UnderlineStyle,
+    pub strike: bool,
+    pub over: bool,
+}
+
+impl Deco {
+    #[inline]
+    pub fn any(&self) -> bool {
+        self.ul != UnderlineStyle::None || self.strike || self.over
+    }
+
+    /// Compact key for caches.
+    #[inline]
+    pub fn bits(&self) -> u64 {
+        self.ul as u64 | (self.strike as u64) << 3 | (self.over as u64) << 4
+    }
+}
+
+/// Paint underline / strikethrough / overline for a cell spanning `w` pixels
+/// starting at (`x0`, `y0`) in `buf` (row stride `stride`, cell height `ch`).
+/// Solid pixels; underline uses `ul_px`, strike / overline use `fg_px`.
+#[allow(clippy::too_many_arguments)]
+pub fn paint_decor(
+    buf: &mut [u32],
+    stride: usize,
+    x0: usize,
+    y0: usize,
+    w: usize,
+    ch: usize,
+    d: &Deco,
+    m: &DecoMetrics,
+    fg_px: u32,
+    ul_px: u32,
+) {
+    let mut put = |x: usize, y: usize, px: u32| {
+        if y < ch && x < w {
+            let i = (y0 + y) * stride + x0 + x;
+            if let Some(p) = buf.get_mut(i) {
+                *p = px;
+            }
+        }
+    };
+    let t = m.ul_thick.max(1);
+    match d.ul {
+        UnderlineStyle::None => {}
+        UnderlineStyle::Single => {
+            for dy in 0..t {
+                for x in 0..w {
+                    put(x, m.ul_top + dy, ul_px);
+                }
+            }
+        }
+        UnderlineStyle::Double => {
+            let gap = t.max(1);
+            let total = 2 * t + gap;
+            let top = m.ul_top.min(ch.saturating_sub(total));
+            for line in 0..2 {
+                for dy in 0..t {
+                    for x in 0..w {
+                        put(x, top + line * (t + gap) + dy, ul_px);
+                    }
+                }
+            }
+        }
+        UnderlineStyle::Dotted | UnderlineStyle::Dashed => {
+            let (on, period) = if d.ul == UnderlineStyle::Dotted {
+                (t, 2 * t)
+            } else {
+                let p = (m.cell_w / 2).max(4);
+                ((p * 2 / 3).max(2), p)
+            };
+            for x in 0..w {
+                if x % period < on {
+                    for dy in 0..t {
+                        put(x, m.ul_top + dy, ul_px);
+                    }
+                }
+            }
+        }
+        UnderlineStyle::Curly => {
+            let amp = (t as f32).max(1.0);
+            let max_base = (ch as f32 - t as f32 - amp).max(0.0);
+            let base = (m.ul_top as f32 + amp).min(max_base);
+            for x in 0..w {
+                let phase = (x as f32 + 0.5) / m.cell_w as f32 * std::f32::consts::TAU;
+                let y = (base + amp * phase.sin()).round().max(0.0) as usize;
+                for dy in 0..t {
+                    put(x, y + dy, ul_px);
+                }
+            }
+        }
+    }
+    if d.strike {
+        for dy in 0..m.strike_thick.max(1) {
+            for x in 0..w {
+                put(x, m.strike_top + dy, fg_px);
+            }
+        }
+    }
+    if d.over {
+        for dy in 0..m.ul_thick.max(1) {
+            for x in 0..w {
+                put(x, dy, fg_px);
+            }
+        }
     }
 }
 

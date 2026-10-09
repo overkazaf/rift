@@ -91,6 +91,8 @@ impl MinSize {
 
 pub const BORDER: usize = 1;
 /// Absolute ratio limits (min-size limits are applied on top of these).
+/// Panes in one row/column beyond which `Tab::split` re-balances to equal shares.
+const MAX_HALVED_ROW: usize = 6;
 const MIN_RATIO: f32 = 0.05;
 const MAX_RATIO: f32 = 0.95;
 /// Keyboard resize step as a fraction of the split's extent.
@@ -124,20 +126,22 @@ fn extent(area: PaneRect, dir: SplitDir) -> usize {
 /// Divide `area` into the two child rects of a split.
 fn split_rects(area: PaneRect, dir: SplitDir, ratio: f32) -> (PaneRect, PaneRect) {
     match dir {
+        // Both rects always stay inside `area` (first <= extent - BORDER, second
+        // starts at most at the far edge), even for degenerate / tiny areas.
         SplitDir::Horizontal => {
-            let w1 = ((area.width as f32) * ratio) as usize;
+            let w1 = (((area.width as f32) * ratio) as usize).min(area.width.saturating_sub(BORDER));
             let w2 = area.width.saturating_sub(w1 + BORDER);
             (
                 PaneRect { x: area.x, y: area.y, width: w1, height: area.height },
-                PaneRect { x: area.x + w1 + BORDER, y: area.y, width: w2, height: area.height },
+                PaneRect { x: (area.x + w1 + BORDER).min(area.x + area.width), y: area.y, width: w2, height: area.height },
             )
         }
         SplitDir::Vertical => {
-            let h1 = ((area.height as f32) * ratio) as usize;
+            let h1 = (((area.height as f32) * ratio) as usize).min(area.height.saturating_sub(BORDER));
             let h2 = area.height.saturating_sub(h1 + BORDER);
             (
                 PaneRect { x: area.x, y: area.y, width: area.width, height: h1 },
-                PaneRect { x: area.x, y: area.y + h1 + BORDER, width: area.width, height: h2 },
+                PaneRect { x: area.x, y: (area.y + h1 + BORDER).min(area.y + area.height), width: area.width, height: h2 },
             )
         }
     }
@@ -650,6 +654,13 @@ impl Tab {
         if self.root.split_leaf(target, &mut 0, dir, &mut slot) {
             // The new leaf sits right after the split one in in-order traversal.
             self.active = target + 1;
+            // Unguarded callers can nest splits arbitrarily deep; halving per level
+            // would drive panes to zero width. Past a handful of panes in one row
+            // or column, fall back to equal shares so every pane keeps real size.
+            let crowd = self.root.row_weight(SplitDir::Horizontal).max(self.root.row_weight(SplitDir::Vertical));
+            if crowd > MAX_HALVED_ROW {
+                self.root.equalize();
+            }
         }
     }
 

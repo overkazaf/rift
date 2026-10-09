@@ -74,7 +74,9 @@ pub fn escape(s: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c if (c as u32) < 0x20 || c == '\u{7f}' || c == '\u{2028}' || c == '\u{2029}' => {
+                out.push_str(&format!("\\u{:04x}", c as u32))
+            }
             c => out.push(c),
         }
     }
@@ -264,5 +266,22 @@ mod tests {
     fn escape_round_trips() {
         let s = "a\"b\\c\n\t\u{1}中";
         assert_eq!(Json::parse(&quote(s)).unwrap().as_str(), Some(s));
+    }
+
+    #[test]
+    fn escape_covers_every_control_char() {
+        let all: String = (0u32..0x20).filter_map(char::from_u32).chain(['\u{7f}', '\u{2028}', '\u{2029}']).collect();
+        let q = quote(&all);
+        assert!(q.chars().all(|c| (c as u32) >= 0x20 && c != '\u{7f}' && c != '\u{2028}' && c != '\u{2029}'), "{q}");
+        assert_eq!(Json::parse(&q).unwrap().as_str(), Some(all.as_str()));
+    }
+
+    #[test]
+    fn cjk_emoji_and_surrogates_decode() {
+        let j = Json::parse(r#"{"a":"\u4e2d\u6587 \ud83d\ude00 \u00e9","b":"\ud83d x","c":"direct 中😀"}"#).unwrap();
+        assert_eq!(j.get("a").unwrap().as_str(), Some("中文 😀 é"));
+        assert_eq!(j.get("b").unwrap().as_str(), Some("\u{fffd} x")); // lone surrogate
+        assert_eq!(j.get("c").unwrap().as_str(), Some("direct 中😀"));
+        assert_eq!(Json::parse(&quote("中文😀")).unwrap().as_str(), Some("中文😀"));
     }
 }

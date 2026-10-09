@@ -430,8 +430,8 @@ pub fn output_text(t: &Terminal, first: usize, last: usize) -> String {
     for line in first..=last.min(total.saturating_sub(1)) {
         let row = if line < sb { t.scrollback.get(line) } else { t.grid.get(line - sb) };
         let Some(row) = row else { break };
-        let seg: String = row.iter().filter(|c| c.c != '\0').map(|c| c.c).collect();
-        let wrapped = row.last().map_or(false, |c| c.c != ' ' && c.c != '\0') && line != last;
+        let seg: String = crate::terminal::grid::cells_text(row);
+        let wrapped = row.last().map_or(false, |c| c.wrap) && line != last;
         if wrapped {
             out.push_str(&seg);
         } else {
@@ -457,7 +457,8 @@ mod tests {
                 row[i].c = c;
             }
         };
-        put(&mut t.grid[0], "abcd"); // full row: soft wrap into next
+        put(&mut t.grid[0], "abcd"); // full row that soft-wrapped into the next
+        t.grid[0][3].wrap = true;
         put(&mut t.grid[1], "ef");
         let txt = output_text(&t, 0, 2);
         assert_eq!(txt, "abcdef");

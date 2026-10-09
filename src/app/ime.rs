@@ -43,6 +43,10 @@ pub fn handle_ime(app: &mut App, ime: Ime) {
 
 /// Route committed IME text to the topmost text-accepting overlay, or the PTY.
 fn commit_text(app: &mut App, text: &str) {
+    // A pending confirmation (consent / paste / host key) swallows all text.
+    if app.confirm.visible() {
+        return;
+    }
     // The inline tab-rename field takes IME commits first.
     if super::tabs::insert_text(app, text) {
         return;

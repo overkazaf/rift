@@ -1,4 +1,5 @@
 mod ime;
+pub mod keymap;
 mod lifecycle;
 pub mod mouse;
 mod overlays;
@@ -54,6 +55,8 @@ pub struct App {
     pub wm: WindowManager,
     pub renderer: Renderer,
     pub modifiers: ModifiersState,
+    /// Rift's own keybindings (defaults + `[keybindings]`).
+    pub keymap: keymap::Keymap,
     pub recorder: Option<Recorder>,
     pub prefs: Preferences,
     pub welcome: Welcome,
@@ -72,6 +75,12 @@ pub struct App {
     pub cursor_x: usize,
     pub cursor_y: usize,
     pub ssh_connecting: Option<SshConnecting>,
+    /// Confirmation modal queue: cloud-AI consent, multi-line paste, SSH host keys.
+    pub confirm: crate::ui::confirm::ConfirmModal,
+    /// The cloud-AI consent prompt has been considered this run.
+    pub consent_checked: bool,
+    /// OSC 52 "blocked" toasts already shown this run: (read, oversized write, write).
+    pub osc52_warned: (bool, bool, bool),
     pub timewarp: TimeWarp,
     pub timewarp_browser: TimeWarpBrowser,
     pub hud: Hud,
@@ -139,6 +148,8 @@ pub struct App {
 pub struct SshConnecting {
     pub rx: std::sync::mpsc::Receiver<Result<SshPty, String>>,
     pub req: SshConnectRequest,
+    /// Unknown-host-key questions from the connection thread.
+    pub prompts: std::sync::mpsc::Receiver<crate::network::ssh::session::HostKeyPrompt>,
 }
 
 impl App {
@@ -153,11 +164,13 @@ impl App {
         // scrollback) if one was saved on a prior exit.
         crate::tools::session::restore_session(&mut wm);
 
+        let keymap = keymap::Keymap::build(&config.input.keybindings);
         Self {
             config,
             wm,
             renderer,
             modifiers: ModifiersState::empty(),
+            keymap,
             recorder: None,
             prefs,
             welcome,
@@ -175,6 +188,9 @@ impl App {
             cursor_x: 0,
             cursor_y: 0,
             ssh_connecting: None,
+            confirm: crate::ui::confirm::ConfirmModal::new(),
+            consent_checked: false,
+            osc52_warned: (false, false, false),
             timewarp: TimeWarp::new(500),
             timewarp_browser: TimeWarpBrowser::new(),
             hud: Hud::new(),
@@ -353,6 +369,7 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => lifecycle::redraw(self),
             WindowEvent::Resized(size) => lifecycle::handle_resize(self, size.width, size.height),
             WindowEvent::ModifiersChanged(mods) => {
+                crate::input::note_modifiers(&mods);
                 let was_super = self.modifiers.super_key();
                 self.modifiers = mods.state();
                 if was_super != self.modifiers.super_key() {
@@ -434,6 +451,16 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {
+                // Confirmation modal is modal for the mouse too.
+                if self.confirm.visible() {
+                    if state == ElementState::Pressed && button == MouseButton::Left {
+                        if let Some((req, choice)) = self.confirm.click(self.cursor_x, self.cursor_y) {
+                            crate::ui::confirm::resolve(self, req, choice);
+                        }
+                    }
+                    self.request_redraw();
+                    return;
+                }
                 // Command palette is modal for the mouse: click runs/closes.
                 if self.command_palette.visible {
                     if state == ElementState::Pressed && button == MouseButton::Left {
@@ -569,14 +596,7 @@ impl ApplicationHandler for App {
                             let seq = format!("\x1b[<1;{};{}M", col + 1, row + 1);
                             self.wm.active_pane_mut().write(seq.as_bytes());
                         } else if let Some(text) = selection::paste_from_clipboard() {
-                            let pane = self.wm.active_pane_mut();
-                            if pane.terminal.bracketed_paste {
-                                pane.write(b"\x1b[200~");
-                                pane.write(text.as_bytes());
-                                pane.write(b"\x1b[201~");
-                            } else {
-                                pane.write(text.as_bytes());
-                            }
+                            mouse::paste_text(self, &text);
                         }
                     }
                     _ => {}
@@ -631,6 +651,8 @@ impl ApplicationHandler for App {
                         }
                     }
                     shortcuts::handle_key(self, &event, event_loop);
+                } else {
+                    shortcuts::handle_key_release(self, &event);
                 }
             }
             _ => {}

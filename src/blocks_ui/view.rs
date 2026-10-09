@@ -168,7 +168,7 @@ fn placeholder_cells(text: &str, cols: usize) -> Vec<Cell> {
     let mut cells = vec![Cell::default(); cols];
     let attrs = Attrs { dim: true, italic: true, ..Attrs::default() };
     for (i, c) in text.chars().take(cols).enumerate() {
-        cells[i] = Cell { c, fg: Color::Default, bg: Color::Default, attrs };
+        cells[i] = Cell { c, fg: Color::Default, bg: Color::Default, attrs, ..Cell::default() };
     }
     cells
 }
