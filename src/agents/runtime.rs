@@ -73,15 +73,15 @@ pub enum Launch {
 
 /// Width reserved for the Mission Control dock (0 when hidden).
 pub fn dock_w(app: &App, win_w: usize) -> usize {
-    if !app.agents_ui.visible || !app.config.agents.enabled || app.browser_visible() {
+    if !app.win.agents_ui.visible || !app.config.agents.enabled || app.browser_visible() {
         0
     } else {
-        ui::dock_width_pref(win_w, app.renderer.cell_width(), app.config.agents.dock_cols)
+        ui::dock_width_pref(win_w, app.win.renderer.cell_width(), app.config.agents.dock_cols)
     }
 }
 
 fn win_size(app: &App) -> (usize, usize) {
-    app.window.as_ref().map_or((800, 600), |w| {
+    app.win.window.as_ref().map_or((800, 600), |w| {
         let s = w.inner_size();
         (s.width as usize, s.height as usize)
     })
@@ -92,9 +92,9 @@ pub(super) fn dock_rect(app: &App) -> Option<Rect> {
     if dock_w(app, w) == 0 {
         return None;
     }
-    let ch = app.renderer.cell_height();
-    let hud = if app.hud_visible { ch * 3 + 20 } else { 0 };
-    ui::dock_rect_pref(w, h, app.tab_bar_height(), hud, app.renderer.cell_width(), app.config.agents.dock_cols)
+    let ch = app.win.renderer.cell_height();
+    let hud = if app.win.hud_visible { ch * 3 + 20 } else { 0 };
+    ui::dock_rect_pref(w, h, app.tab_bar_height(), hud, app.win.renderer.cell_width(), app.config.agents.dock_cols)
 }
 
 pub fn contains(app: &App, x: usize, y: usize) -> bool {
@@ -137,15 +137,9 @@ pub(crate) fn screen_lines(t: &Terminal) -> Vec<String> {
     t.grid[from..].iter().map(|row| crate::terminal::grid::cells_text(row)).collect()
 }
 
-/// Is the user looking at this pane right now?
+/// Is the user looking at this pane right now (any window)?
 fn pane_seen(app: &App, uid: usize) -> bool {
-    if !app.window_focused {
-        return false;
-    }
-    match app.wm.locate_pane(uid) {
-        Some((ti, pi)) => ti == app.wm.active_tab && (!app.wm.tabs[ti].is_zoomed() || pi == app.wm.tabs[ti].active),
-        None => false,
-    }
+    app.pane_visible_to_user(uid)
 }
 
 /// Route OSC 9 / 777 notifications of a pane to its agent session. Returns true
@@ -181,30 +175,37 @@ pub fn poll(app: &mut App, wake_at: &mut Instant) {
 
     let mut alive = Vec::new();
     let mut scan_soon = false;
-    for (ti, tab) in app.wm.tabs.iter().enumerate() {
-        for pane in tab.panes() {
-            alive.push(pane.id);
-            let obs = pane_obs(ti, pane);
-            app.agents.observe_pane(&obs, &mut || probe_pane(pane), now);
-            // Remember how the agent was started: "restart" re-runs it.
-            if let Some(c) = obs.running_cmd.as_deref().filter(|c| detect::detect_from_command(c).is_some()) {
-                app.agents_rt.console.note_launch(pane.id, c);
-            }
-            if app.agents.wants_scan(pane.id, pane.act.bytes, now) {
-                let lines = screen_lines(&pane.terminal);
-                app.agents.observe_screen(pane.id, &lines, pane.act.bytes, now);
-            } else if app.agents.scan_pending(pane.id, pane.act.bytes) {
-                scan_soon = true;
+    // Panes of every window (their ids are globally unique).
+    for ws in std::iter::once(&app.win).chain(app.parked.values()) {
+        for (ti, tab) in ws.wm.tabs.iter().enumerate() {
+            for pane in tab.panes() {
+                alive.push(pane.id);
+                let obs = pane_obs(ti, pane);
+                app.agents.observe_pane(&obs, &mut || probe_pane(pane), now);
+                // Remember how the agent was started: "restart" re-runs it.
+                if let Some(c) = obs.running_cmd.as_deref().filter(|c| detect::detect_from_command(c).is_some()) {
+                    app.agents_rt.console.note_launch(pane.id, c);
+                }
+                if app.agents.wants_scan(pane.id, pane.act.bytes, now) {
+                    let lines = screen_lines(&pane.terminal);
+                    app.agents.observe_screen(pane.id, &lines, pane.act.bytes, now);
+                } else if app.agents.scan_pending(pane.id, pane.act.bytes) {
+                    scan_soon = true;
+                }
             }
         }
     }
     {
-        let wm = &app.wm;
+        let (active, parked) = (&app.win, &app.parked);
         for ev in &hooks {
             app.agents.observe_hook(
                 ev,
-                &|id| wm.locate_pane(id).is_some(),
-                &|id| wm.locate_pane(id).and_then(|(ti, pi)| wm.tabs[ti].pane(pi).map(|p| pane_obs(ti, p))),
+                &|id| crate::app::window_ops::wm_in(active, parked, id).is_some(),
+                &|id| {
+                    let wm = crate::app::window_ops::wm_in(active, parked, id)?;
+                    let (ti, pi) = wm.locate_pane(id)?;
+                    wm.tabs[ti].pane(pi).map(|p| pane_obs(ti, p))
+                },
                 now,
             );
         }
@@ -221,7 +222,7 @@ pub fn poll(app: &mut App, wake_at: &mut Instant) {
     update_badge(app);
     console::refresh(app, now);
     super::autopilot::tick(app, now);
-    if let Some(d) = app.agents_ui.auto.next_deadline() {
+    if let Some(d) = app.win.agents_ui.auto.next_deadline() {
         *wake_at = (*wake_at).min(d);
     }
     if app.agents_rt.console.checking() {
@@ -245,7 +246,7 @@ pub fn poll(app: &mut App, wake_at: &mut Instant) {
 /// Does the agent UI need frames (pulsing pills, badges)?
 pub fn animating(app: &App) -> bool {
     app.agents.enabled()
-        && ((app.agents_ui.visible && app.agents.animating()) || app.agents.attention_count() > 0 || (app.agents_ui.visible && app.agents_ui.auto.any_pending()))
+        && ((app.win.agents_ui.visible && app.agents.animating()) || app.agents.attention_count() > 0 || (app.win.agents_ui.visible && app.win.agents_ui.auto.any_pending()))
 }
 
 fn notify_events(app: &mut App, now: Instant) {
@@ -304,7 +305,7 @@ pub fn draw(
     }
     let t = renderer.start_time.elapsed().as_secs_f32();
     let tbh = content_area.y;
-    ui::draw_tab_badges(buf, w, h, &mut renderer.font, &renderer.theme, tbh, reg, wm.tab_count(), t);
+    ui::draw_tab_badges(buf, w, h, &mut renderer.font, &renderer.theme, tbh, reg, wm.window_id(), wm.tab_count(), t);
     if let Some(d) = dock {
         dock::draw_dock(buf, w, h, &mut renderer.font, &renderer.theme, d, reg, ui_state, now, t, preedit);
     }
@@ -329,9 +330,9 @@ pub fn current_dock_rect(app: &App) -> Option<Rect> {
 
 /// Show / hide the dock and re-flow the terminal.
 pub fn toggle_dock(app: &mut App) {
-    app.agents_ui.toggle();
-    if app.agents_ui.visible {
-        app.agents_ui.selected = app.agents_ui.selected.or_else(|| app.agents.sessions().first().map(|s| s.pane_uid));
+    app.win.agents_ui.toggle();
+    if app.win.agents_ui.visible {
+        app.win.agents_ui.selected = app.win.agents_ui.selected.or_else(|| app.agents.sessions().first().map(|s| s.pane_uid));
     }
     crate::app::shortcuts::resize_from_window(app);
     app.request_redraw();
@@ -339,22 +340,29 @@ pub fn toggle_dock(app: &mut App) {
 
 /// Focus the pane of agent `uid` (switching tabs).
 pub fn jump(app: &mut App, uid: usize) {
-    if crate::app::panes::focus_pane_uid(app, uid) {
-        app.agents_ui.selected = Some(uid);
-        app.agents_ui.focused = false;
+    // The pane may live in another window: that window is raised and focused.
+    if app.reveal_pane(uid) {
+        // The keyboard goes back to the terminal in the window we jumped from
+        // and in the one that now shows the pane, which also selects the card.
+        app.win.agents_ui.focused = false;
+        let win = crate::app::windows::pane_window(uid);
+        if let Some(ws) = app.window_state_mut(win) {
+            ws.agents_ui.selected = Some(uid);
+            ws.agents_ui.focused = false;
+        }
     } else {
-        app.blocks_ui.show_toast("That agent's pane is gone");
+        app.win.blocks_ui.show_toast("That agent's pane is gone");
     }
     app.request_redraw();
 }
 
 /// Jump to the next agent waiting for the user (cycling).
 pub fn next_attention(app: &mut App) {
-    let current = Some(app.wm.active_pane().id);
+    let current = Some(app.win.wm.active_pane().id);
     match app.agents.next_attention(current) {
         Some(uid) => jump(app, uid),
         None => {
-            app.blocks_ui.show_toast("No agent needs you right now");
+            app.win.blocks_ui.show_toast("No agent needs you right now");
             app.request_redraw();
         }
     }
@@ -392,17 +400,17 @@ pub fn ime_rect(app: &App) -> Option<(usize, usize, usize, usize)> {
 }
 
 pub fn on_wheel(app: &mut App, delta: MouseScrollDelta) -> bool {
-    if !dock_rect(app).is_some_and(|d| d.contains(app.cursor_x, app.cursor_y)) {
+    if !dock_rect(app).is_some_and(|d| d.contains(app.win.cursor_x, app.win.cursor_y)) {
         return false;
     }
     let y = match delta {
         MouseScrollDelta::LineDelta(_, y) => y as f64,
-        MouseScrollDelta::PixelDelta(p) => p.y / app.renderer.cell_height().max(1) as f64 / 3.0,
+        MouseScrollDelta::PixelDelta(p) => p.y / app.win.renderer.cell_height().max(1) as f64 / 3.0,
     };
     let steps = if y > 0.0 { -1isize } else if y < 0.0 { 1 } else { 0 };
     // The drawing clamps to what the card heights allow.
     let max = app.agents.sessions().len().saturating_sub(1);
-    app.agents_ui.scroll = (app.agents_ui.scroll as isize + steps).clamp(0, max as isize) as usize;
+    app.win.agents_ui.scroll = (app.win.agents_ui.scroll as isize + steps).clamp(0, max as isize) as usize;
     app.request_redraw();
     true
 }
@@ -428,7 +436,7 @@ pub fn default_agent(app: &mut App) -> Option<AgentKind> {
 }
 
 pub(crate) fn active_cwd(app: &App) -> PathBuf {
-    let p = app.wm.active_pane();
+    let p = app.win.wm.active_pane();
     let cwd = match p.pty {
         PtyKind::Ssh(_) => None,
         _ => p.terminal.cwd.clone(),
@@ -461,7 +469,7 @@ fn flush_pending(app: &mut App, now: Instant) {
     let mut gave_up = false;
     for p in std::mem::take(&mut app.agents_rt.pending) {
         let age = now.duration_since(p.since);
-        let Some(pane) = app.wm.pane_by_id_mut(p.uid) else { continue };
+        let Some(pane) = app.pane_mut(p.uid) else { continue };
         let at_prompt = pane.terminal.at_shell_prompt() || matches!(pane.pty.shell_and_foreground(), Some((shell, fg)) if shell == fg);
         if p.strict {
             if at_prompt && age >= Duration::from_millis(300) {
@@ -479,7 +487,7 @@ fn flush_pending(app: &mut App, now: Instant) {
     }
     app.agents_rt.pending = keep;
     if gave_up {
-        app.blocks_ui.show_toast("Restart cancelled: the agent did not exit");
+        app.win.blocks_ui.show_toast("Restart cancelled: the agent did not exit");
         app.request_redraw();
     }
 }
@@ -495,20 +503,20 @@ fn dir_label(dir: &Path) -> String {
 /// (used to open the policy file in `$EDITOR`).
 pub fn open_command_tab(app: &mut App, dir: &Path, title: &str, cmd: String) -> usize {
     let (c, r) = pane_dims(app);
-    let uid = app.wm.new_tab_in(c, r, dir.to_str(), Some(title));
+    let uid = app.win.wm.new_tab_in(c, r, dir.to_str(), Some(title));
     queue_cmd(app, uid, cmd);
     uid
 }
 
 fn pane_dims(app: &App) -> (usize, usize) {
-    let p = app.wm.active_pane();
+    let p = app.win.wm.active_pane();
     (p.terminal.cols, p.terminal.rows)
 }
 
 fn open_tab(app: &mut App, kind: AgentKind, dir: &Path, label: &str) -> usize {
     let (c, r) = pane_dims(app);
     let title = launch::tab_title(kind, label);
-    let uid = app.wm.new_tab_in(c, r, dir.to_str(), Some(&title));
+    let uid = app.win.wm.new_tab_in(c, r, dir.to_str(), Some(&title));
     queue_command(app, uid, kind);
     uid
 }
@@ -527,7 +535,7 @@ pub fn launch(app: &mut App, l: Launch) {
             if git::repo_info(&active_cwd(app)).is_some() {
                 start_worktrees(app, kind, target);
             } else {
-                app.blocks_ui.show_toast("Not a git repository: the agents will share this directory");
+                app.win.blocks_ui.show_toast("Not a git repository: the agents will share this directory");
                 let dir = active_cwd(app);
                 let label = dir_label(&dir);
                 let slots = vec![(dir, label); target.count()];
@@ -540,11 +548,12 @@ pub fn launch(app: &mut App, l: Launch) {
 fn start_worktrees(app: &mut App, kind: AgentKind, target: Target) {
     let dir = active_cwd(app);
     let Some(info) = git::repo_info(&dir) else {
-        app.blocks_ui.show_toast("Not inside a git repository: cannot create a worktree");
+        app.win.blocks_ui.show_toast("Not inside a git repository: cannot create a worktree");
         app.request_redraw();
         return;
     };
-    let job = launch::start_job(info.root, info.name, kind, target);
+    let mut job = launch::start_job(info.root, info.name, kind, target);
+    job.origin = app.win.id;
     app.agents_rt.jobs.push(job);
     app.request_redraw();
 }
@@ -560,27 +569,34 @@ fn finish_jobs(app: &mut App) {
             }
             Ok(res) => {
                 let job = app.agents_rt.jobs.remove(i);
-                match res {
-                    Ok(plans) => {
-                        let slots: Vec<(PathBuf, String)> = plans.iter().map(|p| (p.path.clone(), p.branch.clone())).collect();
-                        match job.target {
-                            Target::Tab => {
-                                if let Some((dir, branch)) = slots.first() {
-                                    open_tab(app, job.kind, dir, branch);
-                                    app.blocks_ui.show_toast(format!("Created {}", plans[0].shell_command().replace("git worktree add ", "worktree ")));
-                                }
-                            }
-                            Target::Grid { cols, rows } => build_grid(app, job.kind, cols, rows, slots),
-                        }
-                        crate::app::panes::after_layout_change(app);
-                    }
-                    Err(e) => {
-                        log::error!("agent worktree: {e}");
-                        app.blocks_ui.show_toast(format!("Worktree failed: {e}"));
-                        app.request_redraw();
+                // The tab / grid opens in the window the launch came from
+                // (or the current one if that window was closed meanwhile).
+                let origin = if app.windows.contains(job.origin) { job.origin } else { app.win.id };
+                app.with_window(origin, |app| finish_job(app, job, res));
+            }
+        }
+    }
+}
+
+fn finish_job(app: &mut App, job: launch::Job, res: Result<Vec<launch::WorktreePlan>, String>) {
+    match res {
+        Ok(plans) => {
+            let slots: Vec<(PathBuf, String)> = plans.iter().map(|p| (p.path.clone(), p.branch.clone())).collect();
+            match job.target {
+                Target::Tab => {
+                    if let Some((dir, branch)) = slots.first() {
+                        open_tab(app, job.kind, dir, branch);
+                        app.win.blocks_ui.show_toast(format!("Created {}", plans[0].shell_command().replace("git worktree add ", "worktree ")));
                     }
                 }
+                Target::Grid { cols, rows } => build_grid(app, job.kind, cols, rows, slots),
             }
+            crate::app::panes::after_layout_change(app);
+        }
+        Err(e) => {
+            log::error!("agent worktree: {e}");
+            app.win.blocks_ui.show_toast(format!("Worktree failed: {e}"));
+            app.request_redraw();
         }
     }
 }
@@ -609,7 +625,7 @@ pub fn open_grid(app: &mut App, title: &str, cols: usize, rows: usize, slots: &[
         return (Vec::new(), false);
     }
     let (c, r) = pane_dims(app);
-    let first = app.wm.new_tab_in(c, r, slots[0].dir.to_str(), Some(title));
+    let first = app.win.wm.new_tab_in(c, r, slots[0].dir.to_str(), Some(title));
     let mut panes = vec![first];
     let mut columns: Vec<Vec<usize>> = vec![vec![first]];
     let mut refused = false;
@@ -626,7 +642,7 @@ pub fn open_grid(app: &mut App, title: &str, cols: usize, rows: usize, slots: &[
             GridStep::NewRow { col } => (columns.get(col).and_then(|c| c.last()).copied(), SplitDir::Vertical),
         };
         let Some(target) = target else { break };
-        match app.wm.split_pane_in(target, dir, area, min, cwd.as_deref()) {
+        match app.win.wm.split_pane_in(target, dir, area, min, cwd.as_deref()) {
             Some(id) => {
                 match step {
                     GridStep::NewColumn => columns.push(vec![id]),
@@ -654,7 +670,7 @@ pub fn open_grid(app: &mut App, title: &str, cols: usize, rows: usize, slots: &[
 pub fn open_slot_tab(app: &mut App, slot: &Slot) -> usize {
     let (c, r) = pane_dims(app);
     let title = launch::tab_title(slot.kind, &slot.label);
-    let uid = app.wm.new_tab_in(c, r, slot.dir.to_str(), Some(&title));
+    let uid = app.win.wm.new_tab_in(c, r, slot.dir.to_str(), Some(&title));
     queue_cmd(app, uid, slot.cmd.clone());
     uid
 }
@@ -665,7 +681,7 @@ fn build_grid(app: &mut App, kind: AgentKind, cols: usize, rows: usize, slots: V
     let slots: Vec<Slot> = slots.into_iter().map(|(dir, label)| Slot::plain(dir, label, kind)).collect();
     let (_, refused) = open_grid(app, &title, cols, rows, &slots);
     if refused {
-        app.blocks_ui.show_toast("Window too small for the whole grid: extra agents opened in tabs");
+        app.win.blocks_ui.show_toast("Window too small for the whole grid: extra agents opened in tabs");
     }
 }
 

@@ -11,6 +11,10 @@ use muda::{
 pub enum MenuAction {
     NewTab,
     CloseTab,
+    /// File > New Window: another window with its own tabs and panes.
+    NewWindow,
+    /// File > Close Window (the last window quits the app).
+    CloseWindow,
     SshConnect,
     ToggleFullScreen,
     ZoomIn,
@@ -124,17 +128,26 @@ impl AppMenuBar {
         let file_menu = Submenu::new("File", true);
         let new_tab = MenuItem::new("New Tab", true, accel("CmdOrCtrl+Shift+T"));
         let close_tab = MenuItem::new("Close Tab", true, accel("CmdOrCtrl+Shift+W"));
+        // Shortcut shown in the label only: Cmd+N is also the chat composer's
+        // "new chat" while it has focus, so the OS menu must not swallow it.
+        let new_window = MenuItem::new(if cfg!(target_os = "macos") { "New Window  \u{2318}N" } else { "New Window" }, true, None::<Accelerator>);
+        let close_window = MenuItem::new(if cfg!(target_os = "macos") { "Close Window  \u{2325}\u{2318}W" } else { "Close Window" }, true, None::<Accelerator>);
         let ssh = MenuItem::new("SSH Connect...", true, accel("CmdOrCtrl+Shift+S"));
         let rec = MenuItem::new("Toggle Recording", true, accel("CmdOrCtrl+Shift+R"));
 
         actions.insert(new_tab.id().clone(), MenuAction::NewTab);
         actions.insert(close_tab.id().clone(), MenuAction::CloseTab);
+        actions.insert(new_window.id().clone(), MenuAction::NewWindow);
+        actions.insert(close_window.id().clone(), MenuAction::CloseWindow);
         actions.insert(ssh.id().clone(), MenuAction::SshConnect);
         actions.insert(rec.id().clone(), MenuAction::Recording);
 
         let _ = file_menu.append_items(&[
+            &new_window,
             &new_tab,
+            &PredefinedMenuItem::separator(),
             &close_tab,
+            &close_window,
             &PredefinedMenuItem::separator(),
             &ssh,
             &PredefinedMenuItem::separator(),

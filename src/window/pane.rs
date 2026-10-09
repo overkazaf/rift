@@ -232,22 +232,6 @@ const ECHO_WINDOW: Duration = Duration::from_millis(150);
 const ECHO_MAX_BYTES: usize = 8192;
 
 impl Pane {
-    pub fn new(id: usize, cols: usize, rows: usize, proxy: EventLoopProxy<()>) -> Self {
-        Self {
-            id,
-            terminal: Terminal::new(cols, rows),
-            pty: PtyKind::Local(Pty::spawn_with_env(cols as u16, rows as u16, proxy, None, &[("RIFT_PANE_ID", id.to_string())])),
-            vt_parser: vte::Parser::new(),
-            recorder: None,
-            label: None,
-            backlog: false,
-            carry: Vec::new(),
-            carry_pos: 0,
-            exited: None,
-            act: PaneActivity::default(),
-        }
-    }
-
     /// Local pane whose shell starts in `cwd` (when it is an existing directory).
     pub fn new_in(id: usize, cols: usize, rows: usize, proxy: EventLoopProxy<()>, cwd: Option<&str>) -> Self {
         Self {

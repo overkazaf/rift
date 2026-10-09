@@ -21,10 +21,38 @@ const MAX_SCROLLBACK_LINES: usize = 500;
 /// once the live grid has been scanned with no luck.
 const CWD_SCROLLBACK_SCAN: usize = 100;
 
+/// One window's tabs. Also the whole legacy (single-window) session file.
 pub struct SessionState {
     pub tabs: Vec<TabState>,
     pub active_tab: usize,
     pub timestamp: u64,
+}
+
+/// Position and size of a window in logical (DPI independent) pixels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Geometry {
+    pub x: i32,
+    pub y: i32,
+    pub w: u32,
+    pub h: u32,
+}
+
+/// A saved window: its tabs plus where it sat on screen.
+pub struct WindowSession {
+    pub geometry: Option<Geometry>,
+    pub state: SessionState,
+}
+
+/// The whole session file: every window, in creation order.
+///
+/// On disk the FIRST window keeps the legacy top-level keys (`tabs`,
+/// `active_tab`, `timestamp`) so older builds still restore it; its
+/// `geometry` sits beside them. Further windows are listed under `windows`.
+/// Files written by older builds simply have no `windows` / `geometry`.
+pub struct SessionFile {
+    pub windows: Vec<WindowSession>,
+    /// Index into `windows` of the window that had focus.
+    pub focused: usize,
 }
 
 pub struct TabState {
@@ -51,6 +79,31 @@ pub fn save_session(wm: &WindowManager) -> Result<(), String> {
 /// Like [`save_session`], also storing each tab's task queues
 /// (`queues[tab]` = (in-order pane index, queue) pairs).
 pub fn save_session_with(wm: &WindowManager, queues: &[Vec<(usize, TaskQueue)>]) -> Result<(), String> {
+    write_session_file(&SessionFile { windows: vec![WindowSession { geometry: None, state: snapshot(wm, queues) }], focused: 0 })
+}
+
+/// Save every window (`windows` in creation order, `focused` indexing it).
+pub fn save_windows(windows: Vec<WindowSession>, focused: usize) -> Result<(), String> {
+    if windows.is_empty() {
+        return Ok(());
+    }
+    let focused = focused.min(windows.len() - 1);
+    write_session_file(&SessionFile { windows, focused })
+}
+
+fn write_session_file(file: &SessionFile) -> Result<(), String> {
+    let path = session_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
+    }
+    std::fs::write(&path, file.to_json()).map_err(|e| format!("write {}: {e}", path.display()))?;
+    let tabs: usize = file.windows.iter().map(|w| w.state.tabs.len()).sum();
+    log::info!("Session saved: {} window(s), {tabs} tab(s) -> {}", file.windows.len(), path.display());
+    Ok(())
+}
+
+/// Capture one window manager (`queues[tab]` = task queues by in-order pane index).
+pub fn snapshot(wm: &WindowManager, queues: &[Vec<(usize, TaskQueue)>]) -> SessionState {
     let tabs: Vec<TabState> = wm.tabs.iter().enumerate().map(|(ti, tab)| {
         let terminal = &tab.active_pane().terminal;
         TabState {
@@ -69,31 +122,29 @@ pub fn save_session_with(wm: &WindowManager, queues: &[Vec<(usize, TaskQueue)>])
         }
     }).collect();
 
-    let state = SessionState {
+    SessionState {
         tabs,
         active_tab: wm.active_tab,
         timestamp: now_secs(),
-    };
-
-    let path = session_path();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
     }
-    std::fs::write(&path, state.to_json()).map_err(|e| format!("write {}: {e}", path.display()))?;
-    log::info!("Session saved: {} tab(s) -> {}", state.tabs.len(), path.display());
-    Ok(())
 }
 
-/// Read back a previously saved session, if any. Returns `None` if there is
-/// no session file, or if it fails to parse (treated as "no session" rather
-/// than a hard error, since a corrupt session should never block startup).
+/// Read back a previously saved session's FIRST window, if any (the whole
+/// legacy session). Returns `None` if there is no session file, or if it fails
+/// to parse (treated as "no session" rather than a hard error, since a
+/// corrupt session should never block startup).
 pub fn load_session() -> Option<SessionState> {
+    load_session_file().and_then(|f| f.windows.into_iter().next()).map(|w| w.state)
+}
+
+/// Read back every saved window.
+pub fn load_session_file() -> Option<SessionFile> {
     let path = session_path();
     let content = std::fs::read_to_string(&path).ok()?;
-    match SessionState::from_json(&content) {
-        Some(state) => {
-            log::info!("Session loaded: {} tab(s) from {}", state.tabs.len(), path.display());
-            Some(state)
+    match SessionFile::from_json(&content) {
+        Some(file) => {
+            log::info!("Session loaded: {} window(s) from {}", file.windows.len(), path.display());
+            Some(file)
         }
         None => {
             log::warn!("Session file at {} is malformed, ignoring", path.display());
@@ -113,12 +164,22 @@ pub fn clear_session() {
 }
 
 /// Apply a previously saved session onto a freshly constructed
-/// [`WindowManager`] (which starts with exactly one tab/pane running a
-/// brand new shell). Creates additional tabs as needed, restores titles
-/// and scrollback, and best-effort `cd`s each shell back to its previous
-/// working directory. A no-op if there is nothing to restore.
+/// [`WindowManager`] (the first window of the session). See [`restore_window`].
 pub fn restore_session(wm: &mut WindowManager) -> Vec<(usize, TaskQueue)> {
-    let Some(state) = load_session() else { return Vec::new() };
+    let Some(file) = load_session_file() else { return Vec::new() };
+    match file.windows.first() {
+        Some(w) => restore_window(wm, w),
+        None => Vec::new(),
+    }
+}
+
+/// Apply one saved window onto a freshly constructed [`WindowManager`] (which
+/// starts with exactly one tab/pane running a brand new shell). Creates
+/// additional tabs as needed, restores titles and scrollback, and best-effort
+/// `cd`s each shell back to its previous working directory. A no-op if there
+/// is nothing to restore.
+pub fn restore_window(wm: &mut WindowManager, window: &WindowSession) -> Vec<(usize, TaskQueue)> {
+    let state = &window.state;
     if state.tabs.is_empty() {
         return Vec::new();
     }
@@ -138,7 +199,7 @@ pub fn restore_session(wm: &mut WindowManager) -> Vec<(usize, TaskQueue)> {
     let last = wm.tabs.len() - 1;
     wm.active_tab = state.active_tab.min(last);
     wm.renumber_tabs();
-    log::info!("Session restored: {} tab(s)", wm.tabs.len());
+    log::info!("Window restored: {} tab(s)", wm.tabs.len());
     state.tabs.iter().enumerate().flat_map(|(ti, t)| queues_to_panes(wm, ti, t)).collect()
 }
 
@@ -342,53 +403,51 @@ fn now_secs() -> u64 {
 // comment for why this is hand-rolled instead of pulling in `serde_json`.
 
 impl SessionState {
+    /// JSON of a single-window session (the legacy file format).
+    #[allow(dead_code)]
     fn to_json(&self) -> String {
-        let mut s = String::new();
-        s.push_str("{\n");
-        s.push_str(&format!("  \"active_tab\": {},\n", self.active_tab));
-        s.push_str(&format!("  \"timestamp\": {},\n", self.timestamp));
-        s.push_str("  \"tabs\": [\n");
-        for (i, tab) in self.tabs.iter().enumerate() {
-            s.push_str("    {\n");
-            s.push_str(&format!("      \"title\": \"{}\",\n", json_escape(&tab.title)));
-            s.push_str(&format!("      \"working_dir\": \"{}\",\n", json_escape(&tab.working_dir)));
-            s.push_str("      \"scrollback\": [\n");
-            for (j, line) in tab.scrollback.iter().enumerate() {
-                s.push_str("        \"");
-                s.push_str(&json_escape(line));
-                s.push('"');
-                if j + 1 < tab.scrollback.len() { s.push(','); }
-                s.push('\n');
-            }
-            s.push_str("      ]");
-            if !tab.queues.is_empty() {
-                s.push_str(",\n      \"queues\": [");
-                for (k, (leaf, q)) in tab.queues.iter().enumerate() {
-                    if k > 0 {
-                        s.push_str(", ");
-                    }
-                    s.push_str(&format!("{{\"pane\": {leaf}, \"paused\": {}, \"tasks\": [", q.paused));
-                    for (j, t) in q.tasks.iter().enumerate() {
-                        if j > 0 {
-                            s.push_str(", ");
-                        }
-                        s.push_str(&format!("\"{}\"", json_escape(t)));
-                    }
-                    s.push_str("]}");
-                }
-                s.push(']');
-            }
-            if let Some(layout) = &tab.layout {
-                s.push_str(&format!(",\n      \"active_pane\": {},\n      \"layout\": ", tab.active_pane));
-                layout_to_json(layout, &mut s);
-            }
-            s.push_str("\n    }");
-            if i + 1 < self.tabs.len() { s.push(','); }
-            s.push('\n');
+        file_json(self, &[])
+    }
+
+    #[allow(dead_code)]
+    fn from_json(input: &str) -> Option<Self> {
+        SessionFile::from_json(input)?.windows.into_iter().next().map(|w| w.state)
+    }
+}
+
+/// Top-level object: window 0's legacy keys (`active_tab`, `timestamp`,
+/// `tabs`), followed by the pre-rendered `extra` members.
+fn file_json(first: &SessionState, extra: &[String]) -> String {
+    let mut s = String::new();
+    s.push_str("{\n");
+    s.push_str(&format!("  \"active_tab\": {},\n", first.active_tab));
+    s.push_str(&format!("  \"timestamp\": {},\n", first.timestamp));
+    s.push_str("  \"tabs\": [\n");
+    tabs_to_json(&first.tabs, &mut s);
+    s.push_str("  ]");
+    for member in extra {
+        s.push_str(",\n  ");
+        s.push_str(member);
+    }
+    s.push_str("\n}\n");
+    s
+}
+
+impl SessionFile {
+    fn to_json(&self) -> String {
+        let Some((first, rest)) = self.windows.split_first() else { return "{}\n".to_string() };
+        let mut extra = Vec::new();
+        if let Some(g) = &first.geometry {
+            extra.push(format!("\"geometry\": {}", geometry_json(g)));
         }
-        s.push_str("  ]\n");
-        s.push_str("}\n");
-        s
+        if self.focused > 0 && self.focused < self.windows.len() {
+            extra.push(format!("\"focused_window\": {}", self.focused));
+        }
+        if !rest.is_empty() {
+            let objs: Vec<String> = rest.iter().map(extra_window_json).collect();
+            extra.push(format!("\"windows\": [\n{}\n  ]", objs.join(",\n")));
+        }
+        file_json(&first.state, &extra)
     }
 
     fn from_json(input: &str) -> Option<Self> {
@@ -396,27 +455,117 @@ impl SessionState {
         let value = p.parse_value()?;
         let obj = value.as_object()?;
 
-        let active_tab = obj_get(obj, "active_tab").and_then(JsonValue::as_u64)? as usize;
-        let timestamp = obj_get(obj, "timestamp").and_then(JsonValue::as_u64)?;
-        let tabs_val = obj_get(obj, "tabs").and_then(JsonValue::as_array)?;
-
-        let mut tabs = Vec::with_capacity(tabs_val.len());
-        for t in tabs_val {
-            let tobj = t.as_object()?;
-            let title = obj_get(tobj, "title").and_then(JsonValue::as_str).unwrap_or_default().to_string();
-            let working_dir = obj_get(tobj, "working_dir").and_then(JsonValue::as_str).unwrap_or("~").to_string();
-            let scrollback = obj_get(tobj, "scrollback")
-                .and_then(JsonValue::as_array)
-                .map(|arr| arr.iter().filter_map(JsonValue::as_str).map(str::to_string).collect::<Vec<String>>())
-                .unwrap_or_default();
-            let layout = obj_get(tobj, "layout").and_then(|v| layout_from_json(v, 0));
-            let active_pane = obj_get(tobj, "active_pane").and_then(JsonValue::as_u64).unwrap_or(0) as usize;
-            let queues = obj_get(tobj, "queues").and_then(JsonValue::as_array).map(queues_from_json).unwrap_or_default();
-            tabs.push(TabState { title, working_dir, scrollback, layout, active_pane, queues });
+        // Window 0: the legacy top-level keys.
+        let mut windows = vec![window_from_json(obj)?];
+        // Further windows (absent in legacy files; damaged entries are skipped).
+        if let Some(list) = obj_get(obj, "windows").and_then(JsonValue::as_array) {
+            for w in list {
+                if let Some(ws) = w.as_object().and_then(window_from_json) {
+                    windows.push(ws);
+                }
+            }
         }
-
-        Some(SessionState { tabs, active_tab, timestamp })
+        let focused = obj_get(obj, "focused_window").and_then(JsonValue::as_u64).unwrap_or(0) as usize;
+        Some(SessionFile { focused: focused.min(windows.len() - 1), windows })
     }
+}
+
+/// An entry of the `windows` array (every window after the first).
+fn extra_window_json(w: &WindowSession) -> String {
+    let mut s = String::from("    {\n");
+    if let Some(g) = &w.geometry {
+        s.push_str(&format!("      \"geometry\": {},\n", geometry_json(g)));
+    }
+    s.push_str(&format!("      \"active_tab\": {},\n", w.state.active_tab));
+    s.push_str(&format!("      \"timestamp\": {},\n", w.state.timestamp));
+    s.push_str("      \"tabs\": [\n");
+    tabs_to_json(&w.state.tabs, &mut s);
+    s.push_str("      ]\n    }");
+    s
+}
+
+fn geometry_json(g: &Geometry) -> String {
+    format!("{{\"x\": {}, \"y\": {}, \"w\": {}, \"h\": {}}}", g.x, g.y, g.w, g.h)
+}
+
+fn geometry_from_json(v: &JsonValue) -> Option<Geometry> {
+    let o = v.as_object()?;
+    let num = |k: &str| match obj_get(o, k) {
+        Some(JsonValue::Num(n)) if n.is_finite() => Some(*n),
+        _ => None,
+    };
+    let (w, h) = (num("w")?, num("h")?);
+    (w >= 1.0 && h >= 1.0).then(|| Geometry {
+        x: num("x").unwrap_or(0.0) as i32,
+        y: num("y").unwrap_or(0.0) as i32,
+        w: w as u32,
+        h: h as u32,
+    })
+}
+
+fn tabs_to_json(tabs: &[TabState], s: &mut String) {
+    for (i, tab) in tabs.iter().enumerate() {
+        s.push_str("    {\n");
+        s.push_str(&format!("      \"title\": \"{}\",\n", json_escape(&tab.title)));
+        s.push_str(&format!("      \"working_dir\": \"{}\",\n", json_escape(&tab.working_dir)));
+        s.push_str("      \"scrollback\": [\n");
+        for (j, line) in tab.scrollback.iter().enumerate() {
+            s.push_str("        \"");
+            s.push_str(&json_escape(line));
+            s.push('"');
+            if j + 1 < tab.scrollback.len() { s.push(','); }
+            s.push('\n');
+        }
+        s.push_str("      ]");
+        if !tab.queues.is_empty() {
+            s.push_str(",\n      \"queues\": [");
+            for (k, (leaf, q)) in tab.queues.iter().enumerate() {
+                if k > 0 {
+                    s.push_str(", ");
+                }
+                s.push_str(&format!("{{\"pane\": {leaf}, \"paused\": {}, \"tasks\": [", q.paused));
+                for (j, t) in q.tasks.iter().enumerate() {
+                    if j > 0 {
+                        s.push_str(", ");
+                    }
+                    s.push_str(&format!("\"{}\"", json_escape(t)));
+                }
+                s.push_str("]}");
+            }
+            s.push(']');
+        }
+        if let Some(layout) = &tab.layout {
+            s.push_str(&format!(",\n      \"active_pane\": {},\n      \"layout\": ", tab.active_pane));
+            layout_to_json(layout, s);
+        }
+        s.push_str("\n    }");
+        if i + 1 < tabs.len() { s.push(','); }
+        s.push('\n');
+    }
+}
+
+/// One window object (`active_tab`, `timestamp`, `tabs`, optional `geometry`).
+fn window_from_json(obj: &[(String, JsonValue)]) -> Option<WindowSession> {
+    let active_tab = obj_get(obj, "active_tab").and_then(JsonValue::as_u64)? as usize;
+    let timestamp = obj_get(obj, "timestamp").and_then(JsonValue::as_u64).unwrap_or(0);
+    let tabs_val = obj_get(obj, "tabs").and_then(JsonValue::as_array)?;
+
+    let mut tabs = Vec::with_capacity(tabs_val.len());
+    for t in tabs_val {
+        let tobj = t.as_object()?;
+        let title = obj_get(tobj, "title").and_then(JsonValue::as_str).unwrap_or_default().to_string();
+        let working_dir = obj_get(tobj, "working_dir").and_then(JsonValue::as_str).unwrap_or("~").to_string();
+        let scrollback = obj_get(tobj, "scrollback")
+            .and_then(JsonValue::as_array)
+            .map(|arr| arr.iter().filter_map(JsonValue::as_str).map(str::to_string).collect::<Vec<String>>())
+            .unwrap_or_default();
+        let layout = obj_get(tobj, "layout").and_then(|v| layout_from_json(v, 0));
+        let active_pane = obj_get(tobj, "active_pane").and_then(JsonValue::as_u64).unwrap_or(0) as usize;
+        let queues = obj_get(tobj, "queues").and_then(JsonValue::as_array).map(queues_from_json).unwrap_or_default();
+        tabs.push(TabState { title, working_dir, scrollback, layout, active_pane, queues });
+    }
+    let geometry = obj_get(obj, "geometry").and_then(geometry_from_json);
+    Some(WindowSession { geometry, state: SessionState { tabs, active_tab, timestamp } })
 }
 
 fn queues_from_json(items: &[JsonValue]) -> Vec<(usize, TaskQueue)> {
@@ -853,5 +1002,128 @@ mod tests {
         assert_eq!(mapped[0].0, ids[1]);
         assert_eq!(mapped[0].1.tasks, ["x"]);
         assert!(queues_to_panes(&wm, 5, &st).is_empty());
+    }
+
+    // ── multiple windows ──
+
+    fn tab(title: &str, cwd: &str) -> TabState {
+        TabState { title: title.into(), working_dir: cwd.into(), scrollback: vec![], layout: None, active_pane: 0, queues: Vec::new() }
+    }
+
+    fn two_window_file() -> SessionFile {
+        SessionFile {
+            windows: vec![
+                WindowSession {
+                    geometry: Some(Geometry { x: 40, y: 60, w: 900, h: 700 }),
+                    state: SessionState { tabs: vec![tab("main", "/a"), tab("logs", "/var/log")], active_tab: 1, timestamp: 5 },
+                },
+                WindowSession {
+                    geometry: Some(Geometry { x: -300, y: 20, w: 640, h: 480 }),
+                    state: SessionState { tabs: vec![tab("second \"win\"", "/b")], active_tab: 0, timestamp: 5 },
+                },
+            ],
+            focused: 1,
+        }
+    }
+
+    #[test]
+    fn two_windows_round_trip_with_geometry_and_focus() {
+        let file = two_window_file();
+        let back = SessionFile::from_json(&file.to_json()).expect("parses");
+        assert_eq!(back.windows.len(), 2);
+        assert_eq!(back.focused, 1);
+        assert_eq!(back.windows[0].geometry, Some(Geometry { x: 40, y: 60, w: 900, h: 700 }));
+        assert_eq!(back.windows[1].geometry, Some(Geometry { x: -300, y: 20, w: 640, h: 480 }));
+        assert_eq!(back.windows[0].state.active_tab, 1);
+        let titles: Vec<&str> = back.windows[0].state.tabs.iter().map(|t| t.title.as_str()).collect();
+        assert_eq!(titles, ["main", "logs"]);
+        assert_eq!(back.windows[1].state.tabs[0].title, "second \"win\"");
+        assert_eq!(back.windows[1].state.tabs[0].working_dir, "/b");
+    }
+
+    #[test]
+    fn split_layouts_survive_in_a_second_window() {
+        let layout = PaneNode::Split { dir: SplitDir::Vertical, ratio: 0.4, first: leaf(Some("/x")), second: leaf(Some("/y")) };
+        let mut file = two_window_file();
+        file.windows[1].state.tabs[0].layout = Some(layout);
+        file.windows[1].state.tabs[0].active_pane = 1;
+        let back = SessionFile::from_json(&file.to_json()).unwrap();
+        let t = &back.windows[1].state.tabs[0];
+        assert_eq!(t.active_pane, 1);
+        assert_eq!(count_leaves(t.layout.as_ref().expect("layout")), 2);
+    }
+
+    #[test]
+    fn legacy_single_window_files_load_as_one_window() {
+        let old = r#"{"active_tab":1,"timestamp":1,"tabs":[{"title":"a","working_dir":"~","scrollback":[]},{"title":"b","working_dir":"/x","scrollback":[]}]}"#;
+        let f = SessionFile::from_json(old).expect("parses");
+        assert_eq!(f.windows.len(), 1);
+        assert_eq!(f.focused, 0);
+        assert!(f.windows[0].geometry.is_none());
+        assert_eq!(f.windows[0].state.tabs.len(), 2);
+        assert_eq!(f.windows[0].state.active_tab, 1);
+    }
+
+    #[test]
+    fn a_single_window_file_is_byte_compatible_with_the_legacy_format() {
+        let one = SessionFile { windows: vec![two_window_file().windows.remove(1)], focused: 0 };
+        let mut no_geo = one;
+        no_geo.windows[0].geometry = None;
+        let json = no_geo.to_json();
+        assert_eq!(json, no_geo.windows[0].state.to_json());
+        assert!(!json.contains("windows") && !json.contains("geometry") && !json.contains("focused"));
+    }
+
+    #[test]
+    fn first_window_keeps_the_legacy_top_level_keys() {
+        // An older build only reads active_tab / timestamp / tabs of the top level
+        // and ignores everything else: it must find window 0 there.
+        let json = two_window_file().to_json();
+        let legacy = SessionState::from_json(&json).expect("legacy reader parses");
+        assert_eq!(legacy.tabs.len(), 2);
+        assert_eq!(legacy.active_tab, 1);
+        let v = JsonParser::new(&json).parse_value().unwrap();
+        let o = v.as_object().unwrap();
+        assert!(obj_get(o, "tabs").is_some() && obj_get(o, "active_tab").is_some() && obj_get(o, "windows").is_some());
+    }
+
+    #[test]
+    fn damaged_extra_windows_are_skipped_not_fatal() {
+        let json = r#"{"active_tab":0,"timestamp":1,"tabs":[{"title":"a","working_dir":"~","scrollback":[]}],
+            "focused_window": 9,
+            "windows":[{"tabs":"nope"},{"active_tab":0,"timestamp":1,"geometry":{"w":0,"h":0},"tabs":[{"title":"ok","working_dir":"~","scrollback":[]}]}]}"#;
+        let f = SessionFile::from_json(json).expect("parses");
+        assert_eq!(f.windows.len(), 2);
+        assert_eq!(f.windows[1].state.tabs[0].title, "ok");
+        assert!(f.windows[1].geometry.is_none(), "zero-sized geometry is ignored");
+        assert_eq!(f.focused, 1, "focused index is clamped");
+    }
+
+    #[test]
+    fn each_window_restores_into_its_own_manager_with_distinct_pane_ids() {
+        let file = two_window_file();
+        let mut w0 = WindowManager::headless_for_window(80, 24, 0);
+        let mut w1 = WindowManager::headless_for_window(80, 24, 1);
+        restore_window(&mut w0, &file.windows[0]);
+        restore_window(&mut w1, &file.windows[1]);
+        assert_eq!(w0.tabs.len(), 2);
+        assert_eq!(w0.active_tab, 1);
+        assert_eq!(w1.tabs.len(), 1);
+        let ids0: Vec<usize> = w0.tabs.iter().flat_map(|t| t.panes()).map(|p| p.id).collect();
+        let ids1: Vec<usize> = w1.tabs.iter().flat_map(|t| t.panes()).map(|p| p.id).collect();
+        assert!(ids0.iter().all(|i| !ids1.contains(i)), "{ids0:?} vs {ids1:?}");
+        assert!(ids0.iter().all(|i| crate::app::windows::pane_window(*i) == 0));
+        assert!(ids1.iter().all(|i| crate::app::windows::pane_window(*i) == 1));
+    }
+
+    #[test]
+    fn snapshot_of_a_manager_matches_what_restore_expects() {
+        let mut wm = WindowManager::headless_for_window(80, 24, 3);
+        wm.new_tab(80, 24);
+        wm.rename_tab(1, "work");
+        let st = snapshot(&wm, &[]);
+        assert_eq!(st.tabs.len(), 2);
+        assert_eq!(st.tabs[1].title, "work");
+        assert_eq!(st.active_tab, 1);
     }
 }

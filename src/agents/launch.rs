@@ -250,6 +250,8 @@ pub struct Job {
     pub started: Instant,
     /// "Creating worktree rift-claude-1..." for the progress toast.
     pub label: String,
+    /// Window the launch was started from; its tab / grid opens there.
+    pub origin: u64,
 }
 
 pub fn start_job(repo_root: PathBuf, repo_name: String, kind: AgentKind, target: Target) -> Job {
@@ -264,7 +266,7 @@ pub fn start_job(repo_root: PathBuf, repo_name: String, kind: AgentKind, target:
         let _ = tx.send(create_worktrees(&repo_root, &repo_name, kind, n));
         crate::wake::wake();
     });
-    Job { rx, kind, target, started: Instant::now(), label }
+    Job { rx, kind, target, started: Instant::now(), label, origin: 0 }
 }
 
 #[cfg(test)]

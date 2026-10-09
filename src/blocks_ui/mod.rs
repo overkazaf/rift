@@ -92,26 +92,26 @@ pub fn pane_geom(t: &Terminal) -> Option<PaneGeom> {
 }
 
 fn modal_open(app: &App) -> bool {
-    app.prefs.visible
-        || app.welcome.visible
-        || app.ssh_dialog.visible
-        || app.compare_view.visible
-        || app.command_palette.visible
-        || app.search.visible
-        || app.file_manager.visible
-        || app.git_panel.visible
-        || app.cicd.visible
-        || app.heatmap.visible
-        || app.docker.visible
-        || app.network_monitor.visible
-        || app.process_tree.visible
+    app.win.prefs.visible
+        || app.win.welcome.visible
+        || app.win.ssh_dialog.visible
+        || app.win.compare_view.visible
+        || app.win.command_palette.visible
+        || app.win.search.visible
+        || app.win.file_manager.visible
+        || app.win.git_panel.visible
+        || app.win.cicd.visible
+        || app.win.heatmap.visible
+        || app.win.docker.visible
+        || app.win.network_monitor.visible
+        || app.win.process_tree.visible
         || app.mcp.overlay.visible
-        || app.agents_ui.policy_log.visible
-        || app.system_info.visible
-        || app.port_dashboard.visible
-        || app.regex_playground.visible
-        || app.history.visible
-        || app.timewarp_browser.active
+        || app.win.agents_ui.policy_log.visible
+        || app.win.system_info.visible
+        || app.win.port_dashboard.visible
+        || app.win.regex_playground.visible
+        || app.win.history.visible
+        || app.win.timewarp_browser.active
 }
 
 /// What is under the mouse.
@@ -128,21 +128,21 @@ fn hit_test(app: &App) -> Option<Hit> {
     if modal_open(app) {
         return None;
     }
-    let (px, py) = (app.cursor_x, app.cursor_y);
+    let (px, py) = (app.win.cursor_x, app.win.cursor_y);
     let area = app.content_area();
-    let tab = app.wm.active_tab().pane_at(area, px, py)?;
-    let rect = app.wm.pane_layouts(area).into_iter().find(|(i, _, _)| *i == tab).map(|(_, r, _)| r)?;
+    let tab = app.win.wm.active_tab().pane_at(area, px, py)?;
+    let rect = app.win.wm.pane_layouts(area).into_iter().find(|(i, _, _)| *i == tab).map(|(_, r, _)| r)?;
     if px < rect.x || px >= rect.x + rect.width {
         return None;
     }
-    let pane = app.wm.active_tab().pane(tab)?;
+    let pane = app.win.wm.active_tab().pane(tab)?;
     let t = &pane.terminal;
-    if t.mouse_mode != crate::terminal::MouseMode::None && !app.modifiers.shift_key() {
+    if t.mouse_mode != crate::terminal::MouseMode::None && !app.win.modifiers.shift_key() {
         return None;
     }
     let geom = pane_geom(t)?;
-    let cw = app.renderer.cell_width().max(1);
-    let ch = app.renderer.cell_height().max(1);
+    let cw = app.win.renderer.cell_width().max(1);
+    let ch = app.win.renderer.cell_height().max(1);
     let (row, span) = view::span_at_y(&geom.spans, py, rect.y, ch, geom.view.len())?;
     let block = t.blocks.get(span.block)?;
     let collapsed = block.collapsed;
@@ -150,7 +150,7 @@ fn hit_test(app: &App) -> Option<Hit> {
     let button = tb.button_at(px, py);
     let gutter_w = (cw / 2).max(8);
     Some(Hit {
-        tab: app.wm.active_tab,
+        tab: app.win.wm.active_tab,
         pane: tab,
         span,
         in_view_folded: matches!(geom.view[row], ViewRow::Folded { .. }),
@@ -164,13 +164,13 @@ fn hit_test(app: &App) -> Option<Hit> {
 pub fn on_mouse_move(app: &mut App) -> bool {
     let hit = hit_test(app);
     let new = hit.as_ref().map(|h| Hover { tab: h.tab, pane: h.pane, block: h.span.block, button: h.button });
-    if new != app.blocks_ui.hover {
-        app.blocks_ui.hover = new;
+    if new != app.win.blocks_ui.hover {
+        app.win.blocks_ui.hover = new;
         app.request_redraw();
     }
     let interactive = hit.as_ref().map_or(false, |h| h.button.is_some() || h.in_gutter || h.in_view_folded);
     if interactive {
-        if let Some(w) = &app.window {
+        if let Some(w) = &app.win.window {
             w.set_cursor(winit::window::CursorIcon::Pointer);
         }
     }
@@ -180,7 +180,7 @@ pub fn on_mouse_move(app: &mut App) -> bool {
 /// Left mouse press. Returns true if the click was consumed.
 pub fn on_click(app: &mut App) -> bool {
     let Some(hit) = hit_test(app) else {
-        if app.blocks_ui.selected.take().is_some() {
+        if app.win.blocks_ui.selected.take().is_some() {
             app.request_redraw();
         }
         return false;
@@ -193,8 +193,8 @@ pub fn on_click(app: &mut App) -> bool {
     }
     if hit.in_gutter {
         let key = (tab, pane, block);
-        app.blocks_ui.selected = if app.blocks_ui.selected == Some(key) { None } else { Some(key) };
-        app.selection.clear();
+        app.win.blocks_ui.selected = if app.win.blocks_ui.selected == Some(key) { None } else { Some(key) };
+        app.win.selection.clear();
         app.request_redraw();
         return true;
     }
@@ -203,7 +203,7 @@ pub fn on_click(app: &mut App) -> bool {
         app.request_redraw();
         return true;
     }
-    if app.blocks_ui.selected.take().is_some() {
+    if app.win.blocks_ui.selected.take().is_some() {
         app.request_redraw();
     }
     false
@@ -211,7 +211,7 @@ pub fn on_click(app: &mut App) -> bool {
 
 /// Keyboard shortcuts. Call before the generic Cmd+C handling.
 pub fn on_key(app: &mut App, event: &KeyEvent) -> bool {
-    let m = app.modifiers;
+    let m = app.win.modifiers;
     if !m.super_key() || m.control_key() || m.alt_key() || modal_open(app) {
         return false;
     }
@@ -227,8 +227,8 @@ pub fn on_key(app: &mut App, event: &KeyEvent) -> bool {
                     }
                     None => false,
                 }
-            } else if let (Some((tab, pane, block)), false) = (app.blocks_ui.selected, app.selection.active) {
-                if tab == app.wm.active_tab {
+            } else if let (Some((tab, pane, block)), false) = (app.win.blocks_ui.selected, app.win.selection.active) {
+                if tab == app.win.wm.active_tab {
                     copy_output(app, pane, block);
                     true
                 } else {
@@ -245,7 +245,7 @@ pub fn on_key(app: &mut App, event: &KeyEvent) -> bool {
 /// Redraw scheduling: pulsing/live-duration frames while a block runs and
 /// toast expiry. Lowers `wake_at` when it needs to be woken.
 pub fn tick(app: &mut App, wake_at: &mut Instant) {
-    let ui = &mut app.blocks_ui;
+    let ui = &mut app.win.blocks_ui;
     if let Some((_, t)) = &ui.toast {
         let end = *t + TOAST_TTL;
         if Instant::now() >= end {
@@ -255,23 +255,23 @@ pub fn tick(app: &mut App, wake_at: &mut Instant) {
             *wake_at = (*wake_at).min(end);
         }
     }
-    let running = app.wm.active_tab().panes().iter().any(|p| {
+    let running = app.win.wm.active_tab().panes().iter().any(|p| {
         !p.terminal.is_alt_screen() && p.terminal.blocks.running_osc_elapsed_ms().is_some()
     });
     if running {
-        let next = app.blocks_ui.last_anim + ANIM_INTERVAL;
+        let next = app.win.blocks_ui.last_anim + ANIM_INTERVAL;
         if Instant::now() >= next {
-            app.blocks_ui.last_anim = Instant::now();
+            app.win.blocks_ui.last_anim = Instant::now();
             app.request_redraw();
         }
-        *wake_at = (*wake_at).min(app.blocks_ui.last_anim + ANIM_INTERVAL);
+        *wake_at = (*wake_at).min(app.win.blocks_ui.last_anim + ANIM_INTERVAL);
     }
 }
 
 // ── Navigation ──
 
 fn jump_block(app: &mut App, dir: i32) -> bool {
-    let t = &mut app.wm.active_pane_mut().terminal;
+    let t = &mut app.win.wm.active_pane_mut().terminal;
     if t.is_alt_screen() || !t.blocks.osc_seen() || t.blocks.blocks().is_empty() {
         return false;
     }
@@ -300,19 +300,19 @@ fn jump_block(app: &mut App, dir: i32) -> bool {
 /// Block targeted by block-level shortcuts: selected, else hovered, else the
 /// last finished block of the active pane. Returns (pane idx, block idx).
 fn target_block(app: &App) -> Option<(usize, usize)> {
-    let tab = app.wm.active_tab;
-    if let Some((t, p, b)) = app.blocks_ui.selected {
+    let tab = app.win.wm.active_tab;
+    if let Some((t, p, b)) = app.win.blocks_ui.selected {
         if t == tab {
             return Some((p, b));
         }
     }
-    if let Some(h) = app.blocks_ui.hover {
-        if h.tab == tab && app.cursor_y >= app.tab_bar_height() {
+    if let Some(h) = app.win.blocks_ui.hover {
+        if h.tab == tab && app.win.cursor_y >= app.tab_bar_height() {
             return Some((h.pane, h.block));
         }
     }
-    let p = app.wm.active_tab().active;
-    let t = &app.wm.active_pane().terminal;
+    let p = app.win.wm.active_tab().active;
+    let t = &app.win.wm.active_pane().terminal;
     t.blocks.blocks().len().checked_sub(1).map(|b| (p, b))
 }
 
@@ -340,7 +340,7 @@ impl BlockInfo {
 }
 
 fn block_info(app: &App, pane: usize, block: usize) -> Option<(BlockInfo, String)> {
-    let t = &app.wm.active_tab().pane(pane)?.terminal;
+    let t = &app.win.wm.active_tab().pane(pane)?.terminal;
     let b = t.blocks.get(block)?;
     let info = BlockInfo::of(b);
     let out = output_text(t, info.output_start, info.output_end);
@@ -350,32 +350,32 @@ fn block_info(app: &App, pane: usize, block: usize) -> Option<(BlockInfo, String
 fn run_button(app: &mut App, pane: usize, block: usize, btn: Button) {
     match btn {
         Button::CopyCmd => {
-            let cmd = app.wm.active_tab().pane(pane)
+            let cmd = app.win.wm.active_tab().pane(pane)
                 .and_then(|p| p.terminal.blocks.get(block).map(|b| b.command.clone()));
             match cmd {
                 Some(c) if !c.is_empty() => {
                     crate::window::selection::copy_to_clipboard(&c);
-                    app.blocks_ui.show_toast("Copied command");
+                    app.win.blocks_ui.show_toast("Copied command");
                 }
-                _ => app.blocks_ui.show_toast("No command text"),
+                _ => app.win.blocks_ui.show_toast("No command text"),
             }
         }
         Button::CopyOutput => copy_output(app, pane, block),
         Button::AskAi => ask_ai_about_block(app, pane, block),
         Button::Rerun => {
-            let cmd = app.wm.active_tab().pane(pane).and_then(|p| {
+            let cmd = app.win.wm.active_tab().pane(pane).and_then(|p| {
                 p.terminal.blocks.get(block).filter(|b| !b.running).map(|b| b.command.clone())
             });
             if let Some(cmd) = cmd.filter(|c| !c.is_empty()) {
-                if let Some(p) = app.wm.active_tab_mut().pane_mut(pane) {
+                if let Some(p) = app.win.wm.active_tab_mut().pane_mut(pane) {
                     p.terminal.scroll_to_bottom();
                     p.write(format!("{cmd}\r").as_bytes());
                 }
-                app.blocks_ui.show_toast("Rerunning command");
+                app.win.blocks_ui.show_toast("Rerunning command");
             }
         }
         Button::Collapse => {
-            if let Some(p) = app.wm.active_tab_mut().pane_mut(pane) {
+            if let Some(p) = app.win.wm.active_tab_mut().pane_mut(pane) {
                 p.terminal.blocks.toggle_collapse(block);
             }
         }
@@ -385,12 +385,12 @@ fn run_button(app: &mut App, pane: usize, block: usize, btn: Button) {
 fn copy_output(app: &mut App, pane: usize, block: usize) {
     let Some((_, out)) = block_info(app, pane, block) else { return };
     if out.is_empty() {
-        app.blocks_ui.show_toast("No output to copy");
+        app.win.blocks_ui.show_toast("No output to copy");
         return;
     }
     let n = out.lines().count();
     crate::window::selection::copy_to_clipboard(&out);
-    app.blocks_ui.show_toast(format!("Copied output \u{00B7} {n} line{}", if n == 1 { "" } else { "s" }));
+    app.win.blocks_ui.show_toast(format!("Copied output \u{00B7} {n} line{}", if n == 1 { "" } else { "s" }));
     app.request_redraw();
 }
 
@@ -407,7 +407,7 @@ pub fn ask_ai_about_block(app: &mut App, pane: usize, block: usize) {
         info.exit_code.map_or(String::new(), |c| format!(" (exit {c})")),
     );
     let failed = info.exit_code.is_some_and(|c| c != 0);
-    let cwd = app.wm.active_tab().pane(pane).and_then(|p| p.terminal.cwd.clone());
+    let cwd = app.win.wm.active_tab().pane(pane).and_then(|p| p.terminal.cwd.clone());
     let req = AskRequest::new("", if failed { Intent::Fix } else { Intent::Explain })
         .with(ContextItem::Block {
             command: info.command.clone(),

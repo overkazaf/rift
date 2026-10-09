@@ -93,13 +93,7 @@ fn main() {
         config.llm.provider, config.llm.model, config.llm.enabled
     );
 
-    let font_path = config::resolve_font_path(&config);
-    let theme = config.theme.clone();
-    let mut renderer = renderer::Renderer::new(&font_path, config.font_size, theme);
-    renderer.set_bold_is_bright(config.bold_is_bright);
-    renderer.opacity = config.opacity;
-    renderer.shader.set_intensity(config.effect_intensity);
-    renderer.shader.set_effect(config.effect);
+    let renderer = app::lifecycle::build_renderer(&config);
 
     let event_loop = EventLoop::new().unwrap();
     let proxy = event_loop.create_proxy();
@@ -143,6 +137,7 @@ fn print_help() {
     println!("  (see --list-keybindings for the full table; override in [keybindings])");
     println!("  {mk}+D              Split vertical (left/right)");
     println!("  {mk}+Shift+D        Split horizontal (up/down)");
+    println!("  {mk}+N              New window (same directory)");
     println!("  {mk}+Shift+T        New tab");
     println!("  {mk}+Shift+W        Close pane/tab");
     println!("  {mk}+Shift+[/]      Switch tabs");

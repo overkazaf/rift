@@ -4,7 +4,6 @@
 //! All geometry lives in `window::tab`; this module only wires it to the app.
 
 use winit::event::KeyEvent;
-use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{Key, NamedKey};
 
 use super::App;
@@ -21,7 +20,7 @@ fn browser_has_focus(_app: &App) -> bool {
 }
 
 pub fn min_size(app: &App) -> MinSize {
-    MinSize::from_cells(app.renderer.cell_width(), app.renderer.cell_height())
+    MinSize::from_cells(app.win.renderer.cell_width(), app.win.renderer.cell_height())
 }
 
 fn arrow(key: &Key) -> Option<Direction> {
@@ -36,7 +35,7 @@ fn arrow(key: &Key) -> Option<Direction> {
 
 /// Map a key press to a pane command. Returns None for unrelated keys.
 fn shortcut_cmd(app: &App, event: &KeyEvent) -> Option<PaneCmd> {
-    let m = app.modifiers;
+    let m = app.win.modifiers;
     let (sup, ctrl, alt, shift) = (m.super_key(), m.control_key(), m.alt_key(), m.shift_key());
 
     if let Some(d) = arrow(&event.logical_key) {
@@ -49,7 +48,7 @@ fn shortcut_cmd(app: &App, event: &KeyEvent) -> Option<PaneCmd> {
         } else if alt && !sup && !ctrl && !shift && !super::shortcuts::app_owns_keys(app) {
             // Plain Alt+Arrow keeps switching panes, but only when there is a
             // pane that way; otherwise the shell keeps its word-jump.
-            let tab = app.wm.active_tab();
+            let tab = app.win.wm.active_tab();
             tab.neighbor(app.content_area(), d).map(|_| PaneCmd::Focus(d))
         } else {
             None
@@ -77,50 +76,50 @@ fn shortcut_cmd(app: &App, event: &KeyEvent) -> Option<PaneCmd> {
 }
 
 /// Handle a pane shortcut. Returns true when the key was consumed.
-pub fn try_pane_shortcut(app: &mut App, event: &KeyEvent, event_loop: &ActiveEventLoop) -> bool {
+pub fn try_pane_shortcut(app: &mut App, event: &KeyEvent) -> bool {
     let Some(cmd) = shortcut_cmd(app, event) else { return false };
     // One-shot actions should not auto-repeat.
     let repeatable = matches!(cmd, PaneCmd::Resize(_) | PaneCmd::Focus(_));
     if event.repeat && !repeatable {
         return true;
     }
-    run_pane_cmd(app, cmd, event_loop);
+    run_pane_cmd(app, cmd);
     true
 }
 
 /// Focus pane `idx` of the active tab, sending focus in/out reports and
 /// dropping any selection. No-op when it is already focused.
 pub fn focus_pane_idx(app: &mut App, idx: usize) {
-    let old = app.wm.active_tab().active;
-    if old == idx || idx >= app.wm.active_tab().pane_count() {
+    let old = app.win.wm.active_tab().active;
+    if old == idx || idx >= app.win.wm.active_tab().pane_count() {
         return;
     }
     notify_focus(app, old, idx);
-    app.wm.active_tab_mut().focus_pane(idx);
-    app.selection.clear();
+    app.win.wm.active_tab_mut().focus_pane(idx);
+    app.win.selection.clear();
 }
 
 /// Make pane `uid` (by stable id) the active pane, switching tabs if needed.
 /// Sends focus reports like any other focus change.
 pub fn focus_pane_uid(app: &mut App, uid: usize) -> bool {
-    let Some((ti, pi)) = app.wm.locate_pane(uid) else { return false };
-    if ti != app.wm.active_tab {
+    let Some((ti, pi)) = app.win.wm.locate_pane(uid) else { return false };
+    if ti != app.win.wm.active_tab {
         // Leaving a tab: the pane that was focused loses focus, the target gains it.
-        let old_tab = app.wm.active_tab;
-        let old = app.wm.tabs[old_tab].active;
-        if let Some(p) = app.wm.tabs[old_tab].pane_mut(old) {
+        let old_tab = app.win.wm.active_tab;
+        let old = app.win.wm.tabs[old_tab].active;
+        if let Some(p) = app.win.wm.tabs[old_tab].pane_mut(old) {
             if p.terminal.focus_reporting {
                 p.write(b"\x1b[O");
             }
         }
-        app.wm.switch_tab(ti);
-        app.wm.tabs[ti].focus_pane(pi);
-        if let Some(p) = app.wm.tabs[ti].pane_mut(pi) {
+        app.win.wm.switch_tab(ti);
+        app.win.wm.tabs[ti].focus_pane(pi);
+        if let Some(p) = app.win.wm.tabs[ti].pane_mut(pi) {
             if p.terminal.focus_reporting {
                 p.write(b"\x1b[I");
             }
         }
-        app.selection.clear();
+        app.win.selection.clear();
     } else {
         focus_pane_idx(app, pi);
     }
@@ -139,7 +138,7 @@ pub fn after_layout_change(app: &mut App) {
 
 /// Send CSI O / CSI I to the panes losing / gaining focus (DECSET 1004).
 fn notify_focus(app: &mut App, old: usize, new: usize) {
-    let tab = app.wm.active_tab_mut();
+    let tab = app.win.wm.active_tab_mut();
     if let Some(p) = tab.pane_mut(old) {
         if p.terminal.focus_reporting {
             p.write(b"\x1b[O");
@@ -153,58 +152,56 @@ fn notify_focus(app: &mut App, old: usize, new: usize) {
 }
 
 /// Execute a pane command from any entry point (keyboard, menu, palette).
-pub fn run_pane_cmd(app: &mut App, cmd: PaneCmd, event_loop: &ActiveEventLoop) {
+pub fn run_pane_cmd(app: &mut App, cmd: PaneCmd) {
     let area = app.content_area();
     let min = min_size(app);
-    let old_active = app.wm.active_tab().active;
-    let old_tab = app.wm.active_tab;
+    let old_active = app.win.wm.active_tab().active;
+    let old_tab = app.win.wm.active_tab;
 
     match cmd {
         PaneCmd::SplitRight => {
-            app.wm.split_active(SplitDir::Horizontal, area, min);
+            app.win.wm.split_active(SplitDir::Horizontal, area, min);
         }
         PaneCmd::SplitDown => {
-            app.wm.split_active(SplitDir::Vertical, area, min);
+            app.win.wm.split_active(SplitDir::Vertical, area, min);
         }
         PaneCmd::ClosePane => {
-            if app.wm.close_current() {
-                event_loop.exit();
-            }
+            super::window_ops::close_active_pane(app);
         }
         PaneCmd::Zoom => {
-            let on = app.wm.active_tab_mut().toggle_zoom();
+            let on = app.win.wm.active_tab_mut().toggle_zoom();
             log::info!("Pane zoom: {}", if on { "on" } else { "off" });
         }
         PaneCmd::Equalize => {
-            let tab = app.wm.active_tab_mut();
+            let tab = app.win.wm.active_tab_mut();
             tab.unzoom();
             tab.equalize();
         }
         PaneCmd::Focus(d) => {
-            app.wm.active_tab_mut().focus_dir(area, d);
+            app.win.wm.active_tab_mut().focus_dir(area, d);
         }
         PaneCmd::Swap(d) => {
-            app.wm.active_tab_mut().swap_dir(area, d);
+            app.win.wm.active_tab_mut().swap_dir(area, d);
         }
         PaneCmd::Resize(d) => {
-            app.wm.active_tab_mut().resize_dir(area, d, min);
+            app.win.wm.active_tab_mut().resize_dir(area, d, min);
         }
-        PaneCmd::FocusNext => app.wm.focus_next_pane(),
-        PaneCmd::FocusPrev => app.wm.focus_prev_pane(),
+        PaneCmd::FocusNext => app.win.wm.focus_next_pane(),
+        PaneCmd::FocusPrev => app.win.wm.focus_prev_pane(),
     }
 
     // Focus reports for pure focus moves within the same tab.
-    if app.wm.active_tab == old_tab && matches!(cmd, PaneCmd::Focus(_) | PaneCmd::FocusNext | PaneCmd::FocusPrev) {
-        let new_active = app.wm.active_tab().active;
+    if app.win.wm.active_tab == old_tab && matches!(cmd, PaneCmd::Focus(_) | PaneCmd::FocusNext | PaneCmd::FocusPrev) {
+        let new_active = app.win.wm.active_tab().active;
         if new_active != old_active {
             notify_focus(app, old_active, new_active);
         }
     }
     if new_selection_stale(cmd) {
-        app.selection.clear();
+        app.win.selection.clear();
     }
 
-    if let Some(win) = &app.window {
+    if let Some(win) = &app.win.window {
         let s = win.inner_size();
         super::lifecycle::handle_resize(app, s.width, s.height);
     }
@@ -222,13 +219,13 @@ fn new_selection_stale(cmd: PaneCmd) -> bool {
 pub fn register_border_click(app: &mut App, border: usize) -> bool {
     let now = std::time::Instant::now();
     let is_double = matches!(
-        app.last_border_click,
+        app.win.last_border_click,
         Some((t, b)) if b == border && now.duration_since(t).as_millis() <= DOUBLE_CLICK_MS
     );
     if is_double {
-        app.last_border_click = None;
-        if app.wm.active_tab_mut().equalize_border(border) {
-            if let Some(win) = &app.window {
+        app.win.last_border_click = None;
+        if app.win.wm.active_tab_mut().equalize_border(border) {
+            if let Some(win) = &app.win.window {
                 let s = win.inner_size();
                 super::lifecycle::handle_resize(app, s.width, s.height);
             }
@@ -236,7 +233,7 @@ pub fn register_border_click(app: &mut App, border: usize) -> bool {
             return true;
         }
     } else {
-        app.last_border_click = Some((now, border));
+        app.win.last_border_click = Some((now, border));
     }
     false
 }

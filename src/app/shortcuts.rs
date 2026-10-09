@@ -21,15 +21,17 @@ use super::overlays;
 /// refused with a log message instead of silently doing nothing.
 pub fn set_effect(app: &mut App, kind: Option<EffectKind>) {
     if let Some(k) = kind {
-        if !app.renderer.shader.supports(k) {
+        if !app.win.renderer.shader.supports(k) {
             log::warn!("Effect '{}' needs the GPU renderer (cargo build --features gpu); not applied", k.name());
             return;
         }
     }
-    app.renderer.shader.set_effect(kind);
+    for ws in app.all_window_states_mut() {
+        ws.renderer.shader.set_effect(kind);
+    }
     app.config.effect = kind;
     crate::config::toml::save_config(&app.config);
-    app.request_redraw();
+    app.request_redraw_all();
 }
 
 /// Ctrl+Shift+= / Ctrl+Shift+-: change `effect_intensity` by `delta` and persist.
@@ -37,10 +39,12 @@ pub fn adjust_effect_intensity(app: &mut App, delta: f32) {
     let v = ((app.config.effect_intensity + delta) * 10.0).round() / 10.0;
     let v = v.clamp(0.0, 1.0);
     app.config.effect_intensity = v;
-    app.renderer.shader.set_intensity(v);
+    for ws in app.all_window_states_mut() {
+        ws.renderer.shader.set_intensity(v);
+    }
     log::info!("Effect intensity: {v:.1}");
     crate::config::toml::save_config(&app.config);
-    app.request_redraw();
+    app.request_redraw_all();
 }
 
 // ── Key routing helpers ──
@@ -48,12 +52,12 @@ pub fn adjust_effect_intensity(app: &mut App, delta: f32) {
 /// True while the foreground program owns the keyboard: alternate screen
 /// (vim, tmux, less...), kitty keyboard protocol enabled, or mouse reporting on.
 pub fn app_owns_keys(app: &App) -> bool {
-    let t = &app.wm.active_pane().terminal;
+    let t = &app.win.wm.active_pane().terminal;
     t.is_alt_screen() || t.kitty_keyboard_flags() != 0 || t.mouse_mode != crate::terminal::MouseMode::None
 }
 
 fn encode_opts(app: &App) -> input::EncodeOpts {
-    let t = &app.wm.active_pane().terminal;
+    let t = &app.win.wm.active_pane().terminal;
     input::EncodeOpts {
         app_cursor: t.app_cursor_keys,
         app_keypad: t.app_keypad(),
@@ -74,16 +78,16 @@ pub fn handle_key_release(app: &mut App, event: &KeyEvent) {
     if opts.kitty_flags & 2 == 0 {
         return;
     }
-    if let Some(bytes) = input::encode_key(event, app.modifiers, &opts) {
-        if let Some(rec) = &mut app.recorder {
+    if let Some(bytes) = input::encode_key(event, app.win.modifiers, &opts) {
+        if let Some(rec) = &mut app.win.recorder {
             rec.record_input(&bytes);
         }
-        if app.broadcast {
-            for pane in app.wm.active_tab_mut().panes_mut() {
+        if app.win.broadcast {
+            for pane in app.win.wm.active_tab_mut().panes_mut() {
                 pane.write(&bytes);
             }
         } else {
-            app.wm.active_pane_mut().write(&bytes);
+            app.win.wm.active_pane_mut().write(&bytes);
         }
     }
 }
@@ -97,32 +101,34 @@ fn run_action(app: &mut App, action: Action, event: &KeyEvent, event_loop: &Acti
     }
     match action {
         Copy => {
-            if app.selection.active {
+            if app.win.selection.active {
                 if super::mouse::copy_selection(app) {
                     log::info!("Copied selection");
                 }
-                app.selection.clear();
+                app.win.selection.clear();
                 app.request_redraw();
             }
         }
         Paste => super::mouse::paste_clipboard(app),
         SelectAll => super::mouse::select_all(app),
-        SplitRight => super::panes::run_pane_cmd(app, PaneCmd::SplitRight, event_loop),
-        SplitDown => super::panes::run_pane_cmd(app, PaneCmd::SplitDown, event_loop),
+        SplitRight => super::panes::run_pane_cmd(app, PaneCmd::SplitRight),
+        SplitDown => super::panes::run_pane_cmd(app, PaneCmd::SplitDown),
         Search => handle_menu_action(app, MenuAction::Find, event_loop),
         CommandPalette => {
             super::overlays::open_command_palette(app);
             app.request_redraw();
         }
         HistorySearch => {
-            app.history.toggle();
+            app.win.history.toggle();
             app.request_redraw();
         }
         Autocomplete => trigger_autocomplete(app),
         NewTab => handle_menu_action(app, MenuAction::NewTab, event_loop),
         CloseTab => handle_menu_action(app, MenuAction::CloseTab, event_loop),
+        NewWindow => handle_menu_action(app, MenuAction::NewWindow, event_loop),
+        CloseWindow => handle_menu_action(app, MenuAction::CloseWindow, event_loop),
         PrevTab | NextTab => {
-            if action == PrevTab { app.wm.prev_tab() } else { app.wm.next_tab() }
+            if action == PrevTab { app.win.wm.prev_tab() } else { app.win.wm.next_tab() }
             sync_webview_for_tab(app);
             app.update_title();
             app.request_redraw();
@@ -152,7 +158,7 @@ fn run_action(app: &mut App, action: Action, event: &KeyEvent, event_loop: &Acti
             if !app.observer.enabled {
                 app.observer.toggle();
             }
-            app.observer_summary = Some(app.observer.generate_summary());
+            app.win.observer_summary = Some(app.observer.generate_summary());
             app.request_redraw();
         }
         ZoomIn => zoom_font(app, 1.0),
@@ -178,9 +184,9 @@ fn run_action(app: &mut App, action: Action, event: &KeyEvent, event_loop: &Acti
 pub fn handle_key(app: &mut App, event: &KeyEvent, event_loop: &ActiveEventLoop) {
     // While an IME composition is in progress, text-producing keys belong to the
     // IME (they arrive via Ime::Commit); never also encode them to the PTY/overlays.
-    if !app.ime_preedit.is_empty()
-        && !app.modifiers.super_key()
-        && !app.modifiers.control_key()
+    if !app.win.ime_preedit.is_empty()
+        && !app.win.modifiers.super_key()
+        && !app.win.modifiers.control_key()
         && matches!(&event.logical_key, Key::Character(_) | Key::Named(NamedKey::Space))
     {
         return;
@@ -209,7 +215,7 @@ pub fn handle_key(app: &mut App, event: &KeyEvent, event_loop: &ActiveEventLoop)
     // 2. Rift keybindings (src/app/keymap.rs). Ctrl/Alt chords fall through to the
     //    program while it owns the keyboard (alt screen / kitty keyboard / mouse
     //    reporting) unless the action is Essential (clipboard, tabs).
-    if let Some((action, chord)) = app.keymap.lookup_event(event, app.modifiers) {
+    if let Some((action, chord)) = app.keymap.lookup_event(event, app.win.modifiers) {
         let guard = super::keymap::ACTIONS.iter().find(|d| d.action == action).map(|d| d.guard);
         let blocked = chord.is_program_chord()
             && guard == Some(super::keymap::Guard::Passthrough)
@@ -221,13 +227,13 @@ pub fn handle_key(app: &mut App, event: &KeyEvent, event_loop: &ActiveEventLoop)
 
     // 2a. Legacy Ctrl+Space autocomplete: only at a shell prompt (OSC 133) and never
     //     while a program owns the keyboard; everywhere else Ctrl+Space is NUL.
-    if app.modifiers.control_key()
-        && !app.modifiers.shift_key()
-        && !app.modifiers.alt_key()
-        && !app.modifiers.super_key()
+    if app.win.modifiers.control_key()
+        && !app.win.modifiers.shift_key()
+        && !app.win.modifiers.alt_key()
+        && !app.win.modifiers.super_key()
         && matches!(event.logical_key, Key::Named(NamedKey::Space))
         && !app_owns_keys(app)
-        && app.wm.active_pane().terminal.at_shell_prompt()
+        && app.win.wm.active_pane().terminal.at_shell_prompt()
     {
         if !event.repeat {
             trigger_autocomplete(app);
@@ -236,41 +242,41 @@ pub fn handle_key(app: &mut App, event: &KeyEvent, event_loop: &ActiveEventLoop)
     }
 
     // Clear selection on any typing
-    if app.selection.active && !app.modifiers.shift_key() && !app.modifiers.super_key() {
+    if app.win.selection.active && !app.win.modifiers.shift_key() && !app.win.modifiers.super_key() {
         if matches!(event.logical_key, Key::Character(_)) {
-            app.selection.clear();
+            app.win.selection.clear();
             app.request_redraw();
         }
     }
 
     // 2b. Pane management (focus / resize / swap / zoom / equalize / close)
-    if super::panes::try_pane_shortcut(app, event, event_loop) {
+    if super::panes::try_pane_shortcut(app, event) {
         return;
     }
 
     // 5. Shift+PageUp/PageDown — scrollback navigation
-    if app.modifiers.shift_key() && !app.modifiers.control_key() && !app.wm.active_pane().terminal.is_alt_screen() {
+    if app.win.modifiers.shift_key() && !app.win.modifiers.control_key() && !app.win.wm.active_pane().terminal.is_alt_screen() {
         match event.logical_key {
             Key::Named(NamedKey::PageUp) => {
-                let rows = app.wm.active_pane().terminal.rows;
-                app.wm.active_pane_mut().terminal.scroll_view_up(rows / 2);
+                let rows = app.win.wm.active_pane().terminal.rows;
+                app.win.wm.active_pane_mut().terminal.scroll_view_up(rows / 2);
                 app.request_redraw();
                 return;
             }
             Key::Named(NamedKey::PageDown) => {
-                let rows = app.wm.active_pane().terminal.rows;
-                app.wm.active_pane_mut().terminal.scroll_view_down(rows / 2);
+                let rows = app.win.wm.active_pane().terminal.rows;
+                app.win.wm.active_pane_mut().terminal.scroll_view_down(rows / 2);
                 app.request_redraw();
                 return;
             }
             Key::Named(NamedKey::Home) => {
-                let total = app.wm.active_pane().terminal.scrollback_len();
-                app.wm.active_pane_mut().terminal.scroll_view_up(total);
+                let total = app.win.wm.active_pane().terminal.scrollback_len();
+                app.win.wm.active_pane_mut().terminal.scroll_view_up(total);
                 app.request_redraw();
                 return;
             }
             Key::Named(NamedKey::End) => {
-                app.wm.active_pane_mut().terminal.scroll_to_bottom();
+                app.win.wm.active_pane_mut().terminal.scroll_to_bottom();
                 app.request_redraw();
                 return;
             }
@@ -282,14 +288,12 @@ pub fn handle_key(app: &mut App, event: &KeyEvent, event_loop: &ActiveEventLoop)
 
     // 7. Normal input → active pane (or broadcast to all panes)
     let opts = encode_opts(app);
-    if let Some(bytes) = input::encode_key(event, app.modifiers, &opts) {
+    if let Some(bytes) = input::encode_key(event, app.win.modifiers, &opts) {
         input::note_forwarded(event.physical_key, true);
         // The shell behind this pane exited ("[process exited N]" is on screen):
         // Enter closes the pane/tab instead of typing into a dead PTY.
-        if (bytes == b"\r" || bytes == b"\x1b[13u") && app.wm.active_pane().exited.is_some() {
-            if app.wm.close_current() {
-                event_loop.exit();
-            }
+        if (bytes == b"\r" || bytes == b"\x1b[13u") && app.win.wm.active_pane().exited.is_some() {
+            super::window_ops::close_active_pane(app);
             app.update_title();
             return;
         }
@@ -304,7 +308,7 @@ pub fn handle_key(app: &mut App, event: &KeyEvent, event_loop: &ActiveEventLoop)
             // is integrated (never while a command runs, at a non-prompt, or
             // in the alternate screen), screen scraping only without OSC 133.
             let (cmd_opt, scrollback_line) = {
-                let term = &app.wm.active_pane().terminal;
+                let term = &app.win.wm.active_pane().terminal;
                 let row = term.cursor_row.min(term.grid.len().saturating_sub(1));
                 (term.pending_command_line(), term.scrollback.len() + row)
             };
@@ -317,9 +321,9 @@ pub fn handle_key(app: &mut App, event: &KeyEvent, event_loop: &ActiveEventLoop)
                 // buffer of its own), so they're already sitting uncommitted
                 // in the shell's line editor — confirming later just needs
                 // to submit that buffer (see overlays::handle_exec_preview).
-                if let Some(preview) = ExecPreview::check_for_enter(&cmd, app.wm.active_pane().terminal.cwd.as_deref()) {
-                    app.exec_preview = preview;
-                    app.exec_preview.visible = true;
+                if let Some(preview) = ExecPreview::check_for_enter(&cmd, app.win.wm.active_pane().terminal.cwd.as_deref()) {
+                    app.win.exec_preview = preview;
+                    app.win.exec_preview.visible = true;
                     app.request_redraw();
                     return;
                 }
@@ -328,8 +332,8 @@ pub fn handle_key(app: &mut App, event: &KeyEvent, event_loop: &ActiveEventLoop)
                     app.observer.on_command(&cmd);
                 }
                 // Exact OSC 133 blocks live on the terminal; heuristic is fallback only.
-                if !app.wm.active_pane().terminal.blocks.osc_seen() {
-                    app.blocks.on_input(&cmd, scrollback_line);
+                if !app.win.wm.active_pane().terminal.blocks.osc_seen() {
+                    app.win.blocks.on_input(&cmd, scrollback_line);
                 }
                 if app.audit.enabled {
                     app.audit.log_command(&cmd, 0);
@@ -338,26 +342,26 @@ pub fn handle_key(app: &mut App, event: &KeyEvent, event_loop: &ActiveEventLoop)
                 // (`teaching.on_submit`); otherwise on demand, see MenuAction::TeachingMode.
                 if crate::ai::consent::allowed(app) {
                     let config = app.llm.config.clone();
-                    app.teaching.on_submit(&cmd, &config);
+                    app.win.teaching.on_submit(&cmd, &config);
                 }
             }
         }
 
-        if let Some(rec) = &mut app.recorder {
+        if let Some(rec) = &mut app.win.recorder {
             rec.record_input(&bytes);
         }
-        if app.broadcast {
-            let tab = app.wm.active_tab_mut();
+        if app.win.broadcast {
+            let tab = app.win.wm.active_tab_mut();
             for pane in tab.panes_mut() {
                 pane.write(&bytes);
             }
         } else {
-            app.wm.active_pane_mut().write(&bytes);
+            app.win.wm.active_pane_mut().write(&bytes);
         }
 
         // Immediately poll PTY for echo — eliminates 1-2 frame latency
-        if app.wm.process_all_output() {
-            app.wm.flush_all_responses();
+        if app.win.wm.process_all_output() {
+            app.win.wm.flush_all_responses();
         }
         app.request_redraw();
     }
@@ -366,7 +370,7 @@ pub fn handle_key(app: &mut App, event: &KeyEvent, event_loop: &ActiveEventLoop)
 // ── Mouse ──
 
 pub fn handle_click(app: &mut App, event_loop: &ActiveEventLoop) {
-    let y = app.cursor_y;
+    let y = app.win.cursor_y;
     let tbh = app.tab_bar_height();
 
     if y < tbh {
@@ -381,17 +385,19 @@ pub fn handle_menu_action(app: &mut App, action: MenuAction, event_loop: &Active
     match action {
         MenuAction::NewTab => {
             let (c, r) = pane_size(app);
-            app.wm.new_tab(c, r);
+            app.win.wm.new_tab(c, r);
             sync_webview_for_tab(app);
             app.update_title();
         }
         MenuAction::CloseTab => {
-            if app.wm.close_current() { event_loop.exit(); }
+            super::window_ops::close_active_pane(app);
             app.update_title();
         }
-        MenuAction::SshConnect => app.ssh_dialog.toggle(),
+        MenuAction::NewWindow => super::window_ops::new_window(app, event_loop),
+        MenuAction::CloseWindow => super::window_ops::request_close_active(app, event_loop),
+        MenuAction::SshConnect => app.win.ssh_dialog.toggle(),
         MenuAction::ToggleFullScreen => {
-            if let Some(w) = &app.window {
+            if let Some(w) = &app.win.window {
                 let fs = w.fullscreen().is_some();
                 w.set_fullscreen(if fs { None } else {
                     Some(winit::window::Fullscreen::Borderless(None))
@@ -401,9 +407,9 @@ pub fn handle_menu_action(app: &mut App, action: MenuAction, event_loop: &Active
         MenuAction::ZoomIn => zoom_font(app, 1.0),
         MenuAction::ZoomOut => zoom_font(app, -1.0),
         MenuAction::ZoomReset => reset_font(app),
-        MenuAction::SplitH => super::panes::run_pane_cmd(app, PaneCmd::SplitRight, event_loop),
-        MenuAction::SplitV => super::panes::run_pane_cmd(app, PaneCmd::SplitDown, event_loop),
-        MenuAction::Pane(cmd) => super::panes::run_pane_cmd(app, cmd, event_loop),
+        MenuAction::SplitH => super::panes::run_pane_cmd(app, PaneCmd::SplitRight),
+        MenuAction::SplitV => super::panes::run_pane_cmd(app, PaneCmd::SplitDown),
+        MenuAction::Pane(cmd) => super::panes::run_pane_cmd(app, cmd),
         MenuAction::Recording => app.toggle_recording(),
         // Effects
         MenuAction::CrtEffect => set_effect(app, Some(EffectKind::Crt)),
@@ -414,30 +420,30 @@ pub fn handle_menu_action(app: &mut App, action: MenuAction, event_loop: &Active
         MenuAction::HologramEffect => set_effect(app, Some(EffectKind::Hologram)),
         MenuAction::NoEffect => set_effect(app, None),
         // UI panels
-        MenuAction::Preferences => app.prefs.toggle(),
-        MenuAction::Welcome => app.welcome.toggle(),
+        MenuAction::Preferences => app.win.prefs.toggle(),
+        MenuAction::Welcome => app.win.welcome.toggle(),
         MenuAction::UiGallery => crate::ui::kit::gallery::toggle(),
         MenuAction::WebView => crate::network::browser::toggle(app),
         MenuAction::Browser(cmd) => crate::network::browser::run_command(app, cmd),
         MenuAction::ClearBuffer => super::mouse::clear_buffer(app),
         MenuAction::Find => {
-            app.search.toggle();
-            if app.search.visible {
-                let pane = app.wm.active_pane();
-                app.search.search(&pane.terminal.scrollback, &pane.terminal.grid);
+            app.win.search.toggle();
+            if app.win.search.visible {
+                let pane = app.win.wm.active_pane();
+                app.win.search.search(&pane.terminal.scrollback, &pane.terminal.grid);
             }
         }
         // Tools
-        MenuAction::FileManager => app.file_manager.toggle(),
-        MenuAction::GitPanel => app.git_panel.toggle(),
-        MenuAction::DockerPanel => app.docker.toggle(),
-        MenuAction::CicdPanel => app.cicd.toggle(),
-        MenuAction::NetworkMonitor => app.network_monitor.toggle(),
-        MenuAction::ProcessTree => app.process_tree.toggle(),
-        MenuAction::SystemInfo => app.system_info.toggle(),
-        MenuAction::PortDashboard => app.port_dashboard.toggle(),
-        MenuAction::RegexPlayground => app.regex_playground.toggle(),
-        MenuAction::Heatmap => app.heatmap.toggle(),
+        MenuAction::FileManager => app.win.file_manager.toggle(),
+        MenuAction::GitPanel => app.win.git_panel.toggle(),
+        MenuAction::DockerPanel => app.win.docker.toggle(),
+        MenuAction::CicdPanel => app.win.cicd.toggle(),
+        MenuAction::NetworkMonitor => app.win.network_monitor.toggle(),
+        MenuAction::ProcessTree => app.win.process_tree.toggle(),
+        MenuAction::SystemInfo => app.win.system_info.toggle(),
+        MenuAction::PortDashboard => app.win.port_dashboard.toggle(),
+        MenuAction::RegexPlayground => app.win.regex_playground.toggle(),
+        MenuAction::Heatmap => app.win.heatmap.toggle(),
         MenuAction::SecretMask => app.secret_mask.toggle(),
         MenuAction::AuditLog => app.audit.toggle(),
         MenuAction::ReviewChanges => crate::review::open_changes(app),
@@ -445,14 +451,14 @@ pub fn handle_menu_action(app: &mut App, action: MenuAction, event_loop: &Active
         MenuAction::TeachingMode => {
             // While on, using the shortcut again with a command typed at the prompt
             // explains that command (before it runs); with an empty prompt it toggles off.
-            let typed = if app.teaching.enabled { app.wm.active_pane().terminal.typed_input() } else { None };
+            let typed = if app.win.teaching.enabled { app.win.wm.active_pane().terminal.typed_input() } else { None };
             match typed.filter(|t| !t.trim().is_empty()) {
                 Some(cmd) if crate::ai::consent::allowed(app) => {
                     let config = app.llm.config.clone();
-                    app.teaching.explain_now(&cmd, &config);
+                    app.win.teaching.explain_now(&cmd, &config);
                 }
                 Some(_) => {}
-                None => app.teaching.toggle(),
+                None => app.win.teaching.toggle(),
             }
         }
         // AI
@@ -475,39 +481,39 @@ pub fn handle_menu_action(app: &mut App, action: MenuAction, event_loop: &Active
             crate::ai::inline::set_nl_hash(app, on);
         }
         MenuAction::AdvisorMode => {
-            app.advisor.toggle();
-            log::info!("Advisor: {}", if app.advisor.enabled { "enabled" } else { "disabled" });
+            app.win.advisor.toggle();
+            log::info!("Advisor: {}", if app.win.advisor.enabled { "enabled" } else { "disabled" });
         }
         // Terminal
         MenuAction::HudToggle => {
-            app.hud_visible = !app.hud_visible;
-            if app.hud_visible { app.hud.update(); }
+            app.win.hud_visible = !app.win.hud_visible;
+            if app.win.hud_visible { app.win.hud.update(); }
             resize_from_window(app);
         }
         MenuAction::TimeWarp => {
-            if app.timewarp_browser.active {
-                app.timewarp_browser.exit();
+            if app.win.timewarp_browser.active {
+                app.win.timewarp_browser.exit();
             } else {
-                app.timewarp_browser.enter();
+                app.win.timewarp_browser.enter();
             }
         }
         MenuAction::BroadcastToggle => {
-            app.broadcast = !app.broadcast;
+            app.win.broadcast = !app.win.broadcast;
             app.update_title();
         }
         MenuAction::CompareOutput => {
-            let panes = app.wm.active_tab().panes();
-            app.compare_view.collect_and_compare(&panes);
+            let panes = app.win.wm.active_tab().panes();
+            app.win.compare_view.collect_and_compare(&panes);
         }
         MenuAction::AgentMissionControl => crate::agents::runtime::toggle_dock(app),
         MenuAction::AgentNextAttention => crate::agents::runtime::next_attention(app),
         MenuAction::AgentNew => {
             super::overlays::open_command_palette(app);
-            app.command_palette.set_query("agent ");
+            app.win.command_palette.set_query("agent ");
         }
         MenuAction::AgentLayout2x2 => match crate::agents::runtime::default_agent(app) {
             Some(kind) => crate::agents::runtime::launch(app, crate::agents::runtime::Launch::Layout { kind, cols: 2, rows: 2 }),
-            None => app.blocks_ui.show_toast("No agent CLI found (claude, codex, gemini, opencode, aider, cursor-agent)"),
+            None => app.win.blocks_ui.show_toast("No agent CLI found (claude, codex, gemini, opencode, aider, cursor-agent)"),
         },
     }
     app.request_redraw();
@@ -516,13 +522,13 @@ pub fn handle_menu_action(app: &mut App, action: MenuAction, event_loop: &Active
 // ── SSH connect (non-blocking) ──
 
 pub fn do_ssh_connect(app: &mut App, req: SshConnectRequest) {
-    if app.ssh_connecting.is_some() {
+    if app.win.ssh_connecting.is_some() {
         log::warn!("SSH: already connecting, ignoring");
         return;
     }
 
-    let cols = app.wm.active_pane().terminal.cols as u16;
-    let rows = app.wm.active_pane().terminal.rows as u16;
+    let cols = app.win.wm.active_pane().terminal.cols as u16;
+    let rows = app.win.wm.active_pane().terminal.rows as u16;
 
     let config = SshConfig {
         host: req.host.clone(),
@@ -532,11 +538,11 @@ pub fn do_ssh_connect(app: &mut App, req: SshConnectRequest) {
     };
 
     log::info!("SSH: connecting to {}@{}:{} (background)...", req.user, req.host, req.port);
-    if let Some(w) = &app.window {
+    if let Some(w) = &app.win.window {
         w.set_title(&format!("rift — connecting to {}...", req.host));
     }
 
-    let proxy = app.wm.get_proxy();
+    let proxy = app.win.wm.get_proxy();
     let proxy2 = proxy.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     let (prompt_tx, prompt_rx) = std::sync::mpsc::channel();
@@ -547,7 +553,7 @@ pub fn do_ssh_connect(app: &mut App, req: SshConnectRequest) {
         let _ = proxy.send_event(());
     });
 
-    app.ssh_connecting = Some(SshConnecting { rx, req, prompts: prompt_rx });
+    app.win.ssh_connecting = Some(SshConnecting { rx, req, prompts: prompt_rx });
 }
 
 // ── WebView ──
@@ -559,26 +565,26 @@ pub fn open_webview(app: &mut App, url: &str) {
 // ── Private helpers ──
 
 pub(super) fn sync_webview_for_tab(app: &mut App) {
-    if let Some(wv) = &mut app.webview {
-        let should_show = app.webview_tab == Some(app.wm.active_tab);
+    if let Some(wv) = &mut app.win.webview {
+        let should_show = app.win.webview_tab == Some(app.win.wm.active_tab);
         if wv.visible != should_show {
             wv.set_visible(should_show);
             if !should_show {
                 wv.focus_parent();
-                app.browser.editing = false;
-                app.browser.focused = false;
+                app.win.browser.editing = false;
+                app.win.browser.focused = false;
             }
             resize_from_window(app);
             crate::network::browser::apply_bounds(app);
             if !should_show {
-                if let Some(w) = &app.window { w.focus_window(); }
+                if let Some(w) = &app.win.window { w.focus_window(); }
             }
         }
     }
 }
 
 fn trigger_autocomplete(app: &mut App) {
-    let terminal = &app.wm.active_pane().terminal;
+    let terminal = &app.win.wm.active_pane().terminal;
     let row = terminal.cursor_row;
     let col = terminal.cursor_col;
     let line: String = terminal.grid[row]
@@ -589,18 +595,18 @@ fn trigger_autocomplete(app: &mut App) {
         .trim_start()
         .to_string();
     if !line.is_empty() {
-        app.autocomplete.update(&line);
+        app.win.autocomplete.update(&line);
         app.request_redraw();
     }
 }
 
 fn pane_size(app: &App) -> (usize, usize) {
-    let p = app.wm.active_pane();
+    let p = app.win.wm.active_pane();
     (p.terminal.cols, p.terminal.rows)
 }
 
 pub fn resize_from_window(app: &mut App) {
-    if let Some(win) = &app.window {
+    if let Some(win) = &app.win.window {
         let s = win.inner_size();
         super::lifecycle::handle_resize(app, s.width, s.height);
     }
@@ -617,14 +623,17 @@ fn reset_font(app: &mut App) {
 }
 
 pub(super) fn reinit_font_from_config(app: &mut App) {
-    if let Some(window) = &app.window {
-        let scale = window.scale_factor();
-        let physical = app.config.font_size * scale as f32;
-        let font_path = crate::config::resolve_font_path(&app.config);
-        app.renderer.reinit_font(&font_path, physical);
-        let size = window.inner_size();
-        super::lifecycle::handle_resize(app, size.width, size.height);
-        app.request_redraw();
-        log::info!("Font size: {}px ({}px physical)", app.config.font_size, physical);
-    }
+    // Every window re-rasterizes at its own display scale.
+    app.each_window(|app| {
+        if let Some(window) = &app.win.window {
+            let scale = window.scale_factor();
+            let physical = app.config.font_size * scale as f32;
+            let font_path = crate::config::resolve_font_path(&app.config);
+            app.win.renderer.reinit_font(&font_path, physical);
+            let size = window.inner_size();
+            super::lifecycle::handle_resize(app, size.width, size.height);
+            app.request_redraw();
+        }
+    });
+    log::info!("Font size: {}px", app.config.font_size);
 }

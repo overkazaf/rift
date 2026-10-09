@@ -19,19 +19,19 @@ use super::App;
 pub fn handle_ime(app: &mut App, ime: Ime) {
     match ime {
         Ime::Enabled | Ime::Disabled => {
-            if !app.ime_preedit.is_empty() {
-                app.ime_preedit.clear();
+            if !app.win.ime_preedit.is_empty() {
+                app.win.ime_preedit.clear();
                 app.request_redraw();
             }
         }
         Ime::Preedit(text, _cursor) => {
-            if app.ime_preedit != text {
-                app.ime_preedit = text;
+            if app.win.ime_preedit != text {
+                app.win.ime_preedit = text;
                 app.request_redraw();
             }
         }
         Ime::Commit(text) => {
-            app.ime_preedit.clear();
+            app.win.ime_preedit.clear();
             if text.is_empty() {
                 app.request_redraw();
                 return;
@@ -44,7 +44,7 @@ pub fn handle_ime(app: &mut App, ime: Ime) {
 /// Route committed IME text to the topmost text-accepting overlay, or the PTY.
 fn commit_text(app: &mut App, text: &str) {
     // A pending confirmation (consent / paste / host key) swallows all text.
-    if app.confirm.visible() {
+    if app.win.confirm.visible() {
         return;
     }
     // The inline tab-rename field takes IME commits first.
@@ -62,56 +62,56 @@ fn commit_text(app: &mut App, text: &str) {
         return;
     }
     // Modal overlays that sit above everything and take no free text: drop input.
-    if app.exec_preview.visible
-        || app.timewarp_browser.active
-        || app.welcome.visible
-        || app.prefs.visible
-        || app.compare_view.visible
-        || app.observer_summary.is_some()
+    if app.win.exec_preview.visible
+        || app.win.timewarp_browser.active
+        || app.win.welcome.visible
+        || app.win.prefs.visible
+        || app.win.compare_view.visible
+        || app.win.observer_summary.is_some()
     {
         return;
     }
 
-    if app.browser.editing {
-        app.browser.field.insert_str(text);
-    } else if app.ssh_dialog.visible {
+    if app.win.browser.editing {
+        app.win.browser.field.insert_str(text);
+    } else if app.win.ssh_dialog.visible {
         for c in text.chars() {
-            let _ = app.ssh_dialog.handle_key(SshDialogKey::Char(c));
+            let _ = app.win.ssh_dialog.handle_key(SshDialogKey::Char(c));
         }
-    } else if app.webview_dialog.visible {
+    } else if app.win.webview_dialog.visible {
         for c in text.chars() {
-            let _ = app.webview_dialog.handle_key(WvDialogKey::Char(c));
+            let _ = app.win.webview_dialog.handle_key(WvDialogKey::Char(c));
         }
-    } else if app.command_palette.visible {
+    } else if app.win.command_palette.visible {
         for c in text.chars() {
-            let _ = app.command_palette.handle_key(PaletteKey::Char(c));
+            let _ = app.win.command_palette.handle_key(PaletteKey::Char(c));
         }
-    } else if app.search.visible {
+    } else if app.win.search.visible {
         let mut update = false;
         for c in text.chars() {
-            if let Some(SearchAction::UpdateSearch) = app.search.handle_key(SearchKey::Char(c)) {
+            if let Some(SearchAction::UpdateSearch) = app.win.search.handle_key(SearchKey::Char(c)) {
                 update = true;
             }
         }
         if update {
-            let pane = app.wm.active_pane();
-            app.search.search(&pane.terminal.scrollback, &pane.terminal.grid);
+            let pane = app.win.wm.active_pane();
+            app.win.search.search(&pane.terminal.scrollback, &pane.terminal.grid);
         }
-    } else if app.regex_playground.visible {
+    } else if app.win.regex_playground.visible {
         for c in text.chars() {
-            app.regex_playground.handle_key(RegexKey::Char(c));
+            app.win.regex_playground.handle_key(RegexKey::Char(c));
         }
-    } else if app.chat.focused {
+    } else if app.win.chat.focused {
         crate::ai::chat::insert_text(app, text);
-    } else if app.history.visible {
+    } else if app.win.history.visible {
         for c in text.chars() {
-            if let Some(action) = app.history.handle_key(HistoryKey::Char(c)) {
+            if let Some(action) = app.win.history.handle_key(HistoryKey::Char(c)) {
                 match action {
                     HistoryAction::Execute(cmd) => {
-                        app.wm.active_pane_mut().write(format!("{cmd}\n").as_bytes());
+                        app.win.wm.active_pane_mut().write(format!("{cmd}\n").as_bytes());
                     }
                     HistoryAction::Insert(cmd) => {
-                        app.wm.active_pane_mut().write(cmd.as_bytes());
+                        app.win.wm.active_pane_mut().write(cmd.as_bytes());
                     }
                 }
             }
@@ -123,40 +123,40 @@ fn commit_text(app: &mut App, text: &str) {
         // The Mission Control dock's reply composer took it.
     } else {
         let bytes = text.as_bytes();
-        if let Some(rec) = &mut app.recorder {
+        if let Some(rec) = &mut app.win.recorder {
             rec.record_input(bytes);
         }
-        if app.selection.active {
-            app.selection.clear();
+        if app.win.selection.active {
+            app.win.selection.clear();
         }
-        if app.broadcast {
-            for pane in app.wm.active_tab_mut().panes_mut() {
+        if app.win.broadcast {
+            for pane in app.win.wm.active_tab_mut().panes_mut() {
                 pane.write(bytes);
             }
         } else {
-            app.wm.active_pane_mut().write(bytes);
+            app.win.wm.active_pane_mut().write(bytes);
         }
-        if app.wm.process_all_output() {
-            app.wm.flush_all_responses();
+        if app.win.wm.process_all_output() {
+            app.win.wm.flush_all_responses();
         }
     }
     app.request_redraw();
 }
 
 fn other_panel_visible(app: &App) -> bool {
-    app.file_manager.visible
-        || app.git_panel.visible
-        || app.cicd.visible
-        || app.heatmap.visible
-        || app.docker.visible
-        || app.network_monitor.visible
-        || app.process_tree.visible
+    app.win.file_manager.visible
+        || app.win.git_panel.visible
+        || app.win.cicd.visible
+        || app.win.heatmap.visible
+        || app.win.docker.visible
+        || app.win.network_monitor.visible
+        || app.win.process_tree.visible
         || app.mcp.overlay.visible
-        || app.agents_ui.policy_log.visible
+        || app.win.agents_ui.policy_log.visible
         || app.review.ui.visible
         || app.workflows.overlay_visible()
-        || app.system_info.visible
-        || app.port_dashboard.visible
+        || app.win.system_info.visible
+        || app.win.port_dashboard.visible
 }
 
 /// Pixel rect (x, y, w, h) of the active pane's cursor cell.

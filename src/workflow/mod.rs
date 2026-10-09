@@ -388,8 +388,7 @@ impl Workflows {
 // ───────────────────────────── agent events ─────────────────────────────
 
 fn screen_tail(app: &App, uid: usize, n: usize) -> Vec<String> {
-    let Some((ti, pi)) = app.wm.locate_pane(uid) else { return Vec::new() };
-    let Some(pane) = app.wm.tabs[ti].pane(pi) else { return Vec::new() };
+    let Some(pane) = app.pane_ref(uid) else { return Vec::new() };
     let t = &pane.terminal;
     let mut rows: Vec<String> = t.grid.iter().map(|r| crate::terminal::grid::cells_text(r)).collect();
     let need = n.saturating_sub(rows.len());
@@ -406,7 +405,7 @@ fn screen_tail(app: &App, uid: usize, n: usize) -> Vec<String> {
 fn metrics_of(app: &App, uid: usize, kind: AgentKind) -> (Option<f64>, Option<u64>) {
     let lines = screen_tail(app, uid, 40);
     let fresh = metrics::parse_screen(Some(kind), &lines);
-    let m = match app.agents_ui.info.get(&uid) {
+    let m = match app.win.agents_ui.info.get(&uid) {
         Some(i) => metrics::merge(&i.metrics, &fresh),
         None => fresh,
     };
@@ -522,7 +521,7 @@ pub fn poll(app: &mut App, wake_at: &mut Instant) {
     poll_ranges(app, now);
     check_gone(app, now);
     if let Some(id) = app.workflows.open_compare {
-        if !app.confirm.visible() && !app.exec_preview.visible {
+        if !app.win.confirm.visible() && !app.win.exec_preview.visible {
             app.workflows.open_compare = None;
             actions::open_compare(app, id);
             changed = true;
@@ -551,7 +550,7 @@ fn flush_pending(app: &mut App, now: Instant, changed: &mut bool) {
     }
     let mut keep = Vec::new();
     for p in std::mem::take(&mut app.workflows.pending) {
-        if app.wm.locate_pane(p.uid).is_none() {
+        if !app.pane_exists(p.uid) {
             continue; // the pane is gone
         }
         let (state, age) = match app.agents.session(p.uid) {
@@ -561,7 +560,7 @@ fn flush_pending(app: &mut App, now: Instant, changed: &mut bool) {
         match deliver::readiness(state, age, now.saturating_duration_since(p.since)) {
             Ready::Wait => keep.push(p),
             Ready::GiveUp => {
-                app.blocks_ui.show_toast("A workflow prompt could not be delivered: the agent never became ready");
+                app.win.blocks_ui.show_toast("A workflow prompt could not be delivered: the agent never became ready");
                 *changed = true;
                 on_delivery_failed(app, &p);
             }
@@ -633,7 +632,7 @@ fn poll_queues(app: &mut App, now: Instant, wake_at: &mut Instant) -> bool {
             if let Some(task) = task {
                 let left = app.workflows.queues.get(&c.uid).map_or(0, |q| q.len());
                 app.workflows.pending.push(PendingSend { uid: c.uid, text: task, since: now, tag: SendTag::Queue });
-                app.blocks_ui.show_toast(format!("Sent the next queued task ({left} left)"));
+                app.win.blocks_ui.show_toast(format!("Sent the next queued task ({left} left)"));
             }
             return true;
         }
@@ -706,7 +705,7 @@ fn check_gone(app: &mut App, now: Instant) {
         .iter()
         .filter(|r| !r.is_finished())
         .flat_map(|r| r.panes())
-        .filter(|uid| app.wm.locate_pane(*uid).is_none())
+        .filter(|uid| !app.pane_exists(*uid))
         .collect();
     for uid in missing {
         gone(app, uid, now);
@@ -723,7 +722,7 @@ pub fn cancel_countdown(app: &mut App) -> bool {
         q.paused = true;
     }
     app.workflows.armed.remove(&c.uid);
-    app.blocks_ui.show_toast("Queue paused: the next task was not sent");
+    app.win.blocks_ui.show_toast("Queue paused: the next task was not sent");
     app.request_redraw();
     true
 }
@@ -731,7 +730,7 @@ pub fn cancel_countdown(app: &mut App) -> bool {
 /// Dock `t`: open the queue editor for an agent.
 pub fn open_queue(app: &mut App, uid: usize) {
     let Some(s) = app.agents.session(uid) else {
-        app.blocks_ui.show_toast("That agent's pane is gone");
+        app.win.blocks_ui.show_toast("That agent's pane is gone");
         return;
     };
     let title = format!("{} \u{b7} {}", s.title, s.place());
@@ -748,13 +747,13 @@ pub fn open_queue(app: &mut App, uid: usize) {
 pub fn forward_feedback(app: &mut App, uid: usize) {
     let ids: Vec<u64> = app.workflows.runs.iter().filter(|r| matches!(r, Run::Review(rr) if rr.sm.panes().contains(&uid))).map(|r| r.id()).collect();
     let Some(&id) = ids.last() else {
-        app.blocks_ui.show_toast("No reviewer feedback to forward");
+        app.win.blocks_ui.show_toast("No reviewer feedback to forward");
         return;
     };
     let cmds = match app.workflows.run_mut(id) {
         Some(Run::Review(r)) if r.sm.phase == review_loop::Phase::Feedback => r.sm.on_event(review_loop::Ev::Forward),
         _ => {
-            app.blocks_ui.show_toast("No reviewer feedback to forward");
+            app.win.blocks_ui.show_toast("No reviewer feedback to forward");
             return;
         }
     };
@@ -773,7 +772,7 @@ pub fn stop(app: &mut App, uid: Option<usize>) {
         .map(|r| r.id())
         .collect();
     if ids.is_empty() {
-        app.blocks_ui.show_toast("No loop is running");
+        app.win.blocks_ui.show_toast("No loop is running");
         return;
     }
     for id in &ids {
@@ -789,7 +788,7 @@ pub fn stop(app: &mut App, uid: Option<usize>) {
         let panes: Vec<usize> = app.workflows.runs.iter().find(|r| r.id() == *id).map(|r| r.panes()).unwrap_or_default();
         app.workflows.pending.retain(|p| !panes.contains(&p.uid));
     }
-    app.blocks_ui.show_toast(format!("Stopped {} workflow{}", ids.len(), if ids.len() == 1 { "" } else { "s" }));
+    app.win.blocks_ui.show_toast(format!("Stopped {} workflow{}", ids.len(), if ids.len() == 1 { "" } else { "s" }));
     app.request_redraw();
 }
 
@@ -809,14 +808,14 @@ pub fn run_command(app: &mut App, cmd: WorkflowCmd) {
         WorkflowCmd::BestOfN => open_best_of_n(app),
         WorkflowCmd::Template(name) => open_template(app, &name),
         WorkflowCmd::Queue => {
-            let uid = app.agents_ui.selected.filter(|u| app.agents.session(*u).is_some()).or_else(|| {
-                let active = app.wm.active_pane().id;
+            let uid = app.win.agents_ui.selected.filter(|u| app.agents.session(*u).is_some()).or_else(|| {
+                let active = app.win.wm.active_pane().id;
                 app.agents.session(active).map(|_| active)
             });
             match uid {
                 Some(uid) => open_queue(app, uid),
                 None => {
-                    app.blocks_ui.show_toast("Select an agent first: focus its pane or pick its card in Mission Control");
+                    app.win.blocks_ui.show_toast("Select an agent first: focus its pane or pick its card in Mission Control");
                     app.request_redraw();
                 }
             }
@@ -824,7 +823,7 @@ pub fn run_command(app: &mut App, cmd: WorkflowCmd) {
         WorkflowCmd::Compare => match app.workflows.latest_ready_best() {
             Some(id) => actions::open_compare(app, id),
             None => {
-                app.blocks_ui.show_toast("No finished best-of-N run to compare yet");
+                app.win.blocks_ui.show_toast("No finished best-of-N run to compare yet");
                 app.request_redraw();
             }
         },
@@ -886,7 +885,7 @@ fn apply_queue_act(app: &mut App, uid: usize, act: ui::QueueAct) {
         A::None | A::Close => {}
         A::Add(text) => {
             if !wf.queue_mut(uid).push(&text) {
-                app.blocks_ui.show_toast("Queue is full or the task is empty");
+                app.win.blocks_ui.show_toast("Queue is full or the task is empty");
             } else if app.agents.session(uid).is_some_and(|s| s.state == AgentState::Idle) && !app.workflows.managed(uid) {
                 // An idle agent takes it right away (after the countdown).
                 app.workflows.armed.insert(uid);
@@ -921,7 +920,7 @@ pub fn on_click(app: &mut App) -> bool {
     if !app.workflows.ui.visible() {
         return false;
     }
-    let (x, y) = (app.cursor_x, app.cursor_y);
+    let (x, y) = (app.win.cursor_x, app.win.cursor_y);
     if let Some(mut st) = app.workflows.ui.compare.take() {
         let act = st.click(x, y);
         let id = st.run;

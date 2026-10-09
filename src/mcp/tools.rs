@@ -334,18 +334,62 @@ fn red1(s: &str) -> String {
 
 // ---- read-only implementations -------------------------------------------------
 
+/// One window as MCP sees it. Pane ids are unique across windows.
+#[derive(Clone, Copy)]
+pub struct WinView<'a> {
+    /// Stable window id (0 for the first window).
+    pub id: u64,
+    /// The window the OS has focused.
+    pub focused: bool,
+    pub wm: &'a WindowManager,
+}
+
+impl<'a> WinView<'a> {
+    /// A single-window view (headless / tests).
+    #[allow(dead_code)]
+    pub fn only(wm: &'a WindowManager) -> Self {
+        Self { id: wm.window_id(), focused: true, wm }
+    }
+}
+
+/// The window manager holding `pane_id`; the first window when none does
+/// (so "no such pane" errors come out of the normal lookup).
+fn wm_of<'a>(wins: &[WinView<'a>], pane_id: usize) -> &'a WindowManager {
+    wins.iter().find(|w| locate(w.wm, pane_id).is_some()).or_else(|| wins.first()).map(|w| w.wm).expect("at least one window")
+}
+
+#[cfg(test)]
 pub fn list_panes(wm: &WindowManager) -> Reply {
+    list_panes_all(&[WinView::only(wm)])
+}
+
+/// Panes of every window (`window` says which); `active_tab` is the focused window's.
+pub fn list_panes_all(wins: &[WinView]) -> Reply {
     let mut items = Vec::new();
+    let mut active_tab = 0;
+    for win in wins {
+        let wm = win.wm;
+        if win.focused {
+            active_tab = wm.active_tab;
+        }
+        list_window_panes(win, &mut items);
+    }
+    Reply::ok(format!(r#"{{"panes":[{}],"active_tab":{}}}"#, items.join(","), active_tab))
+}
+
+fn list_window_panes(win: &WinView, items: &mut Vec<String>) {
+    let wm = win.wm;
     for (ti, tab) in wm.tabs.iter().enumerate() {
         for (pi, p) in tab.panes().iter().enumerate() {
             let t = &p.terminal;
-            let focused = ti == wm.active_tab && pi == tab.active;
+            let focused = win.focused && ti == wm.active_tab && pi == tab.active;
             let cwd = t.cwd.as_deref().map(red1);
             let title = p.title().map(red1);
             let running = running_command(t).map(|c| red1(&c));
             items.push(format!(
-                r#"{{"id":{},"tab":{},"tab_title":{},"title":{},"cwd":{},"running_command":{},"cols":{},"rows":{},"focused":{},"alt_screen":{},"exited":{},"agent":null}}"#,
+                r#"{{"id":{},"window":{},"tab":{},"tab_title":{},"title":{},"cwd":{},"running_command":{},"cols":{},"rows":{},"focused":{},"alt_screen":{},"exited":{},"agent":null}}"#,
                 p.id,
+                win.id,
                 ti,
                 quote(&red1(&tab.title)),
                 jopt(title.as_deref()),
@@ -359,7 +403,6 @@ pub fn list_panes(wm: &WindowManager) -> Reply {
             ));
         }
     }
-    Reply::ok(format!(r#"{{"panes":[{}],"active_tab":{}}}"#, items.join(","), wm.active_tab))
 }
 
 fn row_text(t: &Terminal, abs: usize) -> String {
@@ -530,9 +573,14 @@ pub fn search_scrollback(wm: &WindowManager, pane_id: usize, query: &str, limit:
     ))
 }
 
+#[cfg(test)]
 pub fn list_resources(wm: &WindowManager) -> Reply {
+    list_resources_all(&[WinView::only(wm)])
+}
+
+pub fn list_resources_all(wins: &[WinView]) -> Reply {
     let mut items = Vec::new();
-    for tab in &wm.tabs {
+    for tab in wins.iter().flat_map(|w| &w.wm.tabs) {
         for p in tab.panes() {
             let title = p.title().map(red1).unwrap_or_else(|| red1(&tab.title));
             for (kind, mime, label) in [("screen", "text/plain", "screen"), ("blocks", "application/json", "command blocks")] {
@@ -561,17 +609,17 @@ pub fn read_resource(wm: &WindowManager, pane_id: usize, kind: ResourceKind) -> 
 }
 
 /// Everything answerable without UI interaction.
-pub fn answer_read(wm: &WindowManager, req: &AppRequest) -> Option<Reply> {
+pub fn answer_read(wins: &[WinView], req: &AppRequest) -> Option<Reply> {
     Some(match req {
-        AppRequest::ListPanes => list_panes(wm),
-        AppRequest::ReadPane { pane_id, lines, include_scrollback } => read_pane(wm, *pane_id, *lines, *include_scrollback),
-        AppRequest::ListBlocks { pane_id, limit } => list_blocks(wm, *pane_id, *limit),
-        AppRequest::ReadBlock { pane_id, block_index } => read_block(wm, *pane_id, *block_index),
+        AppRequest::ListPanes => list_panes_all(wins),
+        AppRequest::ReadPane { pane_id, lines, include_scrollback } => read_pane(wm_of(wins, *pane_id), *pane_id, *lines, *include_scrollback),
+        AppRequest::ListBlocks { pane_id, limit } => list_blocks(wm_of(wins, *pane_id), *pane_id, *limit),
+        AppRequest::ReadBlock { pane_id, block_index } => read_block(wm_of(wins, *pane_id), *pane_id, *block_index),
         AppRequest::SearchScrollback { pane_id, query, limit, context } => {
-            search_scrollback(wm, *pane_id, query, *limit, *context)
+            search_scrollback(wm_of(wins, *pane_id), *pane_id, query, *limit, *context)
         }
-        AppRequest::ListResources => list_resources(wm),
-        AppRequest::ReadResource { pane_id, kind } => read_resource(wm, *pane_id, *kind),
+        AppRequest::ListResources => list_resources_all(wins),
+        AppRequest::ReadResource { pane_id, kind } => read_resource(wm_of(wins, *pane_id), *pane_id, *kind),
         AppRequest::RunCommand { .. } => return None,
     })
 }
@@ -648,6 +696,55 @@ mod tests {
         assert_eq!(p.get("focused").and_then(Json::as_bool), Some(true));
         assert_eq!(p.get("agent"), Some(&Json::Null));
         assert_eq!(p.get("cols").and_then(Json::as_f64), Some(80.0));
+    }
+
+    fn wm_in_window(win: u64, bytes: &[u8]) -> WindowManager {
+        let mut wm = WindowManager::headless_for_window(80, 10, win);
+        let id = wm.tabs[0].active_pane().id;
+        wm.pane_by_id_mut(id).unwrap().feed(bytes);
+        wm
+    }
+
+    #[test]
+    fn list_panes_spans_windows_with_unique_ids_and_one_focused_pane() {
+        let w0 = wm_in_window(0, b"zero");
+        let w1 = wm_in_window(1, b"one");
+        let views = [WinView { id: 0, focused: false, wm: &w0 }, WinView { id: 1, focused: true, wm: &w1 }];
+        let j = json(&list_panes_all(&views));
+        let panes = j.get("panes").unwrap();
+        let (a, b) = (panes.idx(0).unwrap(), panes.idx(1).unwrap());
+        assert_ne!(a.get("id").and_then(Json::as_f64), b.get("id").and_then(Json::as_f64));
+        assert_eq!(a.get("window").and_then(Json::as_f64), Some(0.0));
+        assert_eq!(b.get("window").and_then(Json::as_f64), Some(1.0));
+        // Only the focused window's active pane is "focused".
+        assert_eq!(a.get("focused").and_then(Json::as_bool), Some(false));
+        assert_eq!(b.get("focused").and_then(Json::as_bool), Some(true));
+        assert!(panes.idx(2).is_none());
+    }
+
+    #[test]
+    fn pane_requests_reach_the_window_that_owns_the_pane() {
+        let w0 = wm_in_window(0, b"alpha");
+        let w1 = wm_in_window(1, b"beta");
+        let views = [WinView { id: 0, focused: true, wm: &w0 }, WinView { id: 1, focused: false, wm: &w1 }];
+        let id1 = w1.tabs[0].active_pane().id;
+        let r = answer_read(&views, &AppRequest::ReadPane { pane_id: id1, lines: 5, include_scrollback: false }).unwrap();
+        assert_eq!(json(&r).get("text").and_then(Json::as_str), Some("beta"));
+        let r = answer_read(&views, &AppRequest::ReadPane { pane_id: 0, lines: 5, include_scrollback: false }).unwrap();
+        assert_eq!(json(&r).get("text").and_then(Json::as_str), Some("alpha"));
+        let gone = answer_read(&views, &AppRequest::ReadPane { pane_id: 424242, lines: 5, include_scrollback: false }).unwrap();
+        assert!(gone.is_error);
+    }
+
+    #[test]
+    fn resources_list_every_windows_panes() {
+        let w0 = wm_in_window(0, b"a");
+        let w1 = wm_in_window(1, b"b");
+        let views = [WinView::only(&w0), WinView { id: 1, focused: false, wm: &w1 }];
+        let r = list_resources_all(&views);
+        let j = json(&r);
+        // two panes x (screen + blocks)
+        assert!(j.idx(3).is_some() && j.idx(4).is_none(), "{}", r.text);
     }
 
     #[test]

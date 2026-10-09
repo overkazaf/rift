@@ -31,7 +31,7 @@ pub(crate) fn templates(app: &mut App) -> Vec<Template> {
     if loaded.warnings != app.workflows.warned {
         if let Some(first) = loaded.warnings.first() {
             log::warn!("workflows.toml: {}", loaded.warnings.join("; "));
-            app.blocks_ui.show_toast(format!("workflows.toml: {first}{}", if loaded.warnings.len() > 1 { format!(" (+{} more)", loaded.warnings.len() - 1) } else { String::new() }));
+            app.win.blocks_ui.show_toast(format!("workflows.toml: {first}{}", if loaded.warnings.len() > 1 { format!(" (+{} more)", loaded.warnings.len() - 1) } else { String::new() }));
         }
         app.workflows.warned = loaded.warnings.clone();
     }
@@ -50,7 +50,7 @@ pub fn open_template(app: &mut App, name: &str) {
     match all.into_iter().find(|t| t.name.eq_ignore_ascii_case(name)) {
         Some(t) => open_with(app, t),
         None => {
-            app.blocks_ui.show_toast(format!("No workflow called \"{name}\""));
+            app.win.blocks_ui.show_toast(format!("No workflow called \"{name}\""));
             app.request_redraw();
         }
     }
@@ -59,14 +59,14 @@ pub fn open_template(app: &mut App, name: &str) {
 fn open_with(app: &mut App, tpl: Template) {
     let installed = runtime::installed(app);
     if installed.is_empty() {
-        app.blocks_ui.show_toast("No agent CLI found on PATH (claude, codex, gemini, opencode, aider, cursor-agent)");
+        app.win.blocks_ui.show_toast("No agent CLI found on PATH (claude, codex, gemini, opencode, aider, cursor-agent)");
         app.request_redraw();
         return;
     }
     let cwd = runtime::active_cwd(app);
     let info = git::repo_info(&cwd);
     if matches!(tpl.strategy, Strategy::BestOf | Strategy::WriteReview) && info.is_none() {
-        app.blocks_ui.show_toast("This workflow needs a git repository: cd into one first");
+        app.win.blocks_ui.show_toast("This workflow needs a git repository: cd into one first");
         app.request_redraw();
         return;
     }
@@ -198,7 +198,7 @@ fn finish_best_of(app: &mut App, id: u64, ctx: StartCtx, prep: Prep) {
     let title = format!("best of {n} \u{b7} {}", prep.slug);
     let (uids, refused) = runtime::open_grid(app, &title, cols, rows, &slots);
     if refused {
-        app.blocks_ui.show_toast("Window too small for the whole grid: extra candidates opened in tabs");
+        app.win.blocks_ui.show_toast("Window too small for the whole grid: extra candidates opened in tabs");
     }
     sm.on_event(bestof::Ev::Opened(uids.clone()));
     for ((uid, arg), prompt) in uids.iter().zip(&as_arg).zip(&prompts) {
@@ -210,7 +210,7 @@ fn finish_best_of(app: &mut App, id: u64, ctx: StartCtx, prep: Prep) {
     }
     app.workflows.runs.push(Run::Best(BestRun { parsed: (0..n).map(|_| None).collect(), sm, busy: None, message: None }));
     let arg_n = as_arg.iter().filter(|a| **a).count();
-    app.blocks_ui.show_toast(format!(
+    app.win.blocks_ui.show_toast(format!(
         "Best of {n}: {} worktree{} created{}",
         n,
         if n == 1 { "" } else { "s" },
@@ -232,7 +232,7 @@ fn finish_write_review(app: &mut App, id: u64, ctx: StartCtx, prep: Prep) {
     let title = format!("write & review \u{b7} {branch}");
     let (uids, _) = runtime::open_grid(app, &title, 2, 1, &slots);
     if uids.len() < 2 {
-        app.blocks_ui.show_toast("Could not open both panes");
+        app.win.blocks_ui.show_toast("Could not open both panes");
         return;
     }
     let mut sm = WriteReview::new(id, &spec.task, uids[0], uids[1], spec.rounds, spec.tpl.auto_forward);
@@ -242,7 +242,7 @@ fn finish_write_review(app: &mut App, id: u64, ctx: StartCtx, prep: Prep) {
         app.workflows.pending.push(PendingSend { uid: uids[0], text: prompt, since: Instant::now(), tag: SendTag::Writer { run: id } });
     }
     app.workflows.runs.push(Run::Review(ReviewRun { sm, waiting_range: None }));
-    app.blocks_ui.show_toast(format!("Write & Review started: {} writes, {} reviews (up to {} rounds)", spec.kinds[0].name(), spec.kinds[1].name(), spec.rounds));
+    app.win.blocks_ui.show_toast(format!("Write & Review started: {} writes, {} reviews (up to {} rounds)", spec.kinds[0].name(), spec.kinds[1].name(), spec.rounds));
 }
 
 fn finish_fix_tests(app: &mut App, id: u64, ctx: StartCtx, prep: Prep) {
@@ -256,7 +256,7 @@ fn finish_fix_tests(app: &mut App, id: u64, ctx: StartCtx, prep: Prep) {
     let sm = FixTests::new(id, uid, &task, &spec.test, spec.rounds);
     app.workflows.runs.push(Run::Fix(FixRun { sm, dir: dir.clone() }));
     spawn_tests(app, id);
-    app.blocks_ui.show_toast(format!("Running `{}` first\u{2026}", spec.test));
+    app.win.blocks_ui.show_toast(format!("Running `{}` first\u{2026}", spec.test));
 }
 
 fn finish_single(app: &mut App, ctx: StartCtx, prep: Prep) {
@@ -286,7 +286,7 @@ pub(crate) fn run_review_cmds(app: &mut App, id: u64, cmds: Vec<review_loop::Cmd
             review_loop::Cmd::SendWriter(text) => app.workflows.pending.push(PendingSend { uid: writer, text, since: Instant::now(), tag: SendTag::Writer { run: id } }),
             review_loop::Cmd::Finish(o) => {
                 app.workflows.pending.retain(|p| p.uid != writer && p.uid != reviewer);
-                app.blocks_ui.show_toast(format!("Write & Review {}", o.label()));
+                app.win.blocks_ui.show_toast(format!("Write & Review {}", o.label()));
             }
         }
     }
@@ -304,7 +304,7 @@ pub(crate) fn run_fix_cmds(app: &mut App, id: u64, cmds: Vec<fixtests::Cmd>) {
             fixtests::Cmd::Send(text) => app.workflows.pending.push(PendingSend { uid: pane, text, since: Instant::now(), tag: SendTag::Fixer { run: id } }),
             fixtests::Cmd::Finish(o) => {
                 app.workflows.pending.retain(|p| p.uid != pane);
-                app.blocks_ui.show_toast(format!("Fix tests: {}", o.label()));
+                app.win.blocks_ui.show_toast(format!("Fix tests: {}", o.label()));
             }
         }
     }
@@ -337,7 +337,7 @@ pub(crate) fn on_prepared(app: &mut App, id: u64, result: Result<Prep, String>) 
         Ok(prep) => finish_start(app, id, ctx, prep),
         Err(e) => {
             log::error!("workflow start: {e}");
-            app.blocks_ui.show_toast(format!("Workflow failed to start: {e}"));
+            app.win.blocks_ui.show_toast(format!("Workflow failed to start: {e}"));
             app.request_redraw();
         }
     }

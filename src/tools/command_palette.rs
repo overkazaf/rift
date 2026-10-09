@@ -358,6 +358,7 @@ pub fn shell_quote_path(p: &str) -> String {
 pub enum Category {
     Panes,
     Tabs,
+    Windows,
     Tools,
     Ai,
     Agents,
@@ -368,9 +369,10 @@ pub enum Category {
 }
 
 impl Category {
-    const ORDER: [Category; 9] = [
+    const ORDER: [Category; 10] = [
         Category::Panes,
         Category::Tabs,
+        Category::Windows,
         Category::Tools,
         Category::Ai,
         Category::Agents,
@@ -384,6 +386,7 @@ impl Category {
         match self {
             Category::Panes => "Panes",
             Category::Tabs => "Tabs",
+            Category::Windows => "Windows",
             Category::Tools => "Tools",
             Category::Ai => "AI",
             Category::Agents => "Agents",
@@ -399,6 +402,7 @@ impl Category {
         match self {
             Category::Panes => '#',
             Category::Tabs => '+',
+            Category::Windows => '^',
             Category::Tools => '*',
             Category::Ai => '@',
             Category::Agents => '!',
@@ -1463,6 +1467,10 @@ fn catalog() -> Vec<PaletteItem> {
     // Tabs
     v.push(entry("New Tab", Tabs, s("Shift+T"), Menu(MenuAction::NewTab)));
     v.push(entry("Close Tab", Tabs, s("Shift+W"), Menu(MenuAction::CloseTab)));
+    // Windows
+    v.push(entry("New Window", Windows, s("N"), Menu(MenuAction::NewWindow)));
+    v.push(entry("Close Window", Windows, s("Alt+W"), Menu(MenuAction::CloseWindow)));
+
     v.push(entry("Next Tab", Tabs, Some("Ctrl+Tab".into()), PaletteAction::NextTab));
     v.push(entry("Previous Tab", Tabs, Some("Ctrl+Shift+Tab".into()), PaletteAction::PrevTab));
 
@@ -2147,7 +2155,7 @@ mod tests {
     #[allow(dead_code)]
     fn exhaustive(m: MenuAction) {
         match m {
-            MenuAction::NewTab | MenuAction::CloseTab | MenuAction::SshConnect | MenuAction::ToggleFullScreen
+            MenuAction::NewTab | MenuAction::CloseTab | MenuAction::NewWindow | MenuAction::CloseWindow | MenuAction::SshConnect | MenuAction::ToggleFullScreen
             | MenuAction::ZoomIn | MenuAction::ZoomOut | MenuAction::ZoomReset | MenuAction::SplitH
             | MenuAction::SplitV | MenuAction::Recording | MenuAction::CrtEffect | MenuAction::GlitchEffect
             | MenuAction::NeonEffect | MenuAction::MatrixEffect | MenuAction::AmberEffect
@@ -2172,7 +2180,7 @@ mod tests {
     fn every_menu_action_has_a_palette_entry() {
         use MenuAction as M;
         let mut expected = vec![
-            M::NewTab, M::CloseTab, M::SshConnect, M::ToggleFullScreen, M::ZoomIn, M::ZoomOut, M::ZoomReset,
+            M::NewTab, M::CloseTab, M::NewWindow, M::CloseWindow, M::SshConnect, M::ToggleFullScreen, M::ZoomIn, M::ZoomOut, M::ZoomReset,
             M::SplitH, M::SplitV, M::Recording, M::CrtEffect, M::GlitchEffect, M::NeonEffect, M::MatrixEffect,
             M::AmberEffect, M::HologramEffect, M::NoEffect, M::Preferences, M::Welcome, M::WebView, M::FileManager,
             M::GitPanel, M::DockerPanel, M::CicdPanel, M::NetworkMonitor, M::ProcessTree, M::SystemInfo,
@@ -2204,6 +2212,21 @@ mod tests {
         for m in expected {
             assert!(have.contains(&format!("{m:?}")), "missing palette entry for {m:?}");
         }
+    }
+
+    #[test]
+    fn window_entries_are_searchable_and_dispatch_window_actions() {
+        let mut p = pal();
+        open(&mut p);
+        p.set_query("new window");
+        assert_eq!(names(&p).first().copied(), Some("New Window"));
+        let act = p.handle_key(PaletteKey::Enter);
+        assert!(matches!(act, Some(PaletteAction::Menu(MenuAction::NewWindow))), "{act:?}");
+        open(&mut p);
+        p.set_query("close window");
+        assert_eq!(names(&p).first().copied(), Some("Close Window"));
+        let act = p.handle_key(PaletteKey::Enter);
+        assert!(matches!(act, Some(PaletteAction::Menu(MenuAction::CloseWindow))), "{act:?}");
     }
 
     #[test]

@@ -70,6 +70,8 @@ actions! {
     Autocomplete,   "autocomplete",    "Autocomplete suggestions",           Passthrough, ["cmd+."], ["ctrl+shift+space"];
     NewTab,         "new_tab",         "New tab",                            Essential,   ["mod+shift+t"], ["ctrl+shift+t"];
     CloseTab,       "close_tab",       "Close tab",                          Essential,   ["mod+shift+w"], ["ctrl+shift+w"];
+    NewWindow,      "new_window",      "New window",                         Essential,   ["cmd+n"], ["super+n"];
+    CloseWindow,    "close_window",    "Close window",                       Essential,   ["cmd+alt+w"], ["ctrl+alt+shift+w"];
     PrevTab,        "prev_tab",        "Previous tab",                       Essential,   ["mod+shift+[", "ctrl+shift+tab"], ["ctrl+shift+[", "ctrl+shift+tab"];
     NextTab,        "next_tab",        "Next tab",                           Essential,   ["mod+shift+]", "ctrl+tab"], ["ctrl+shift+]", "ctrl+tab"];
     Preferences,    "preferences",     "Preferences",                        Passthrough, ["mod+shift+,"], ["ctrl+shift+,"];
@@ -467,5 +469,30 @@ mod tests {
         let t = Keymap::default().table();
         assert!(t.contains("history_search"));
         assert!(t.contains("Fixed"));
+    }
+
+    #[test]
+    fn window_actions_are_bound_and_do_not_shadow_tab_chords() {
+        let km = Keymap::default();
+        let (new_win, close_win, close_tab, new_tab) = if cfg!(target_os = "macos") {
+            ("cmd+n", "cmd+alt+w", "cmd+shift+w", "cmd+shift+t")
+        } else {
+            ("super+n", "ctrl+alt+shift+w", "ctrl+shift+w", "ctrl+shift+t")
+        };
+        let at = |s: &str| km.lookup(&Chord::parse(s).unwrap());
+        assert_eq!(at(new_win), Some(Action::NewWindow));
+        assert_eq!(at(close_win), Some(Action::CloseWindow));
+        // Closing the last tab closes the window, but the tab chords stay tab actions.
+        assert_eq!(at(close_tab), Some(Action::CloseTab));
+        assert_eq!(at(new_tab), Some(Action::NewTab));
+        assert!(km.table().contains("new_window") && km.table().contains("close_window"));
+    }
+
+    #[test]
+    fn window_actions_stay_available_while_a_program_owns_the_keyboard() {
+        for name in ["new_window", "close_window"] {
+            let def = ACTIONS.iter().find(|d| d.name == name).expect(name);
+            assert_eq!(def.guard, Guard::Essential, "{name}");
+        }
     }
 }

@@ -466,17 +466,21 @@ macOS bindings. On Linux, the `Cmd+Shift+…` shortcuts use `Ctrl+Shift+…`. Yo
 | `Cmd+Shift+C` | Copy output of the current block |
 | `Cmd+C` (block selected) | Copy that block's output |
 
-**Tabs and panes**
+**Windows, tabs and panes**
+
+Every window has its own tabs, panes and docks; the agent registry, MCP server and workflows are shared by all windows. A new window opens in the focused pane's working directory, closing a window's last tab or pane closes the window (with a confirmation if processes are still running), and closing the last window quits. Open windows, their tabs, splits and positions are restored on the next launch.
 
 | Shortcut | Action |
 |---|---|
+| `Cmd+N` | New window (File → New Window) |
+| `Cmd+Alt+W` | Close window (File → Close Window; the close button does the same) |
 | `Cmd+Shift+T` | New tab |
-| `Cmd+Shift+W` | Close tab |
+| `Cmd+Shift+W` | Close tab (the last tab closes the window) |
 | `Cmd+Shift+[` / `Cmd+Shift+]` | Previous / next tab |
 | `Ctrl+Tab` / `Ctrl+Shift+Tab` | Cycle tabs |
 | `Cmd+D` | Split right |
 | `Cmd+Shift+D` | Split down |
-| `Cmd+W` | Close pane |
+| `Cmd+W` | Close pane (the last pane closes the window) |
 | `Cmd+Shift+Enter` | Zoom pane |
 | `Cmd+Ctrl+=` | Equalize panes |
 | `Cmd+[` / `Cmd+]` | Previous / next pane |

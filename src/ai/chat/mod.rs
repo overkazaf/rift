@@ -245,12 +245,12 @@ impl Default for ChatUi {
 impl App {
     /// Chat dock rectangle in window pixels, when the chat is open.
     pub fn chat_rect(&self) -> Option<Rect> {
-        let (w, h) = self.window.as_ref().map_or((800, 600), |win| {
+        let (w, h) = self.win.window.as_ref().map_or((800, 600), |win| {
             let s = win.inner_size();
             (s.width as usize, s.height as usize)
         });
         let ca = self.content_area();
-        self.chat.dock_rect(w, h, ca.y, h.saturating_sub(ca.y + ca.height))
+        self.win.chat.dock_rect(w, h, ca.y, h.saturating_sub(ca.y + ca.height))
     }
 }
 
@@ -260,10 +260,10 @@ fn relayout(app: &mut App) {
 
 /// Cmd+Shift+A / menu: open+focus, focus, or close.
 pub fn toggle(app: &mut App) {
-    if !app.chat.visible {
+    if !app.win.chat.visible {
         open(app);
-    } else if !app.chat.focused {
-        app.chat.focused = true;
+    } else if !app.win.chat.focused {
+        app.win.chat.focused = true;
         app.request_redraw();
     } else {
         close(app);
@@ -274,16 +274,16 @@ pub fn toggle(app: &mut App) {
 /// would answer a chat message right now.
 pub fn refresh_header(app: &mut App) {
     let cfg = crate::ai::local::routed(app, crate::ai::local::Feature::Chat).unwrap_or_else(|| app.llm.config.clone());
-    app.chat.model = cfg.model.clone();
-    app.chat.local = cfg.enabled.then(|| crate::ai::local::routing::is_local(&cfg));
+    app.win.chat.model = cfg.model.clone();
+    app.win.chat.local = cfg.enabled.then(|| crate::ai::local::routing::is_local(&cfg));
 }
 
 /// Show the sidebar and focus the composer.
 pub fn open(app: &mut App) {
-    let was_visible = app.chat.visible;
+    let was_visible = app.win.chat.visible;
     refresh_header(app);
-    app.chat.visible = true;
-    app.chat.focused = true;
+    app.win.chat.visible = true;
+    app.win.chat.focused = true;
     if !was_visible {
         relayout(app);
     }
@@ -291,16 +291,16 @@ pub fn open(app: &mut App) {
 }
 
 pub fn close(app: &mut App) {
-    if !app.chat.visible {
+    if !app.win.chat.visible {
         return;
     }
-    app.chat.visible = false;
-    app.chat.focused = false;
-    app.chat.divider_drag = false;
-    app.chat.divider_hover = false;
-    app.chat.hover = None;
-    app.chat.frame = Frame::default();
-    app.chat.ime_sent = None;
+    app.win.chat.visible = false;
+    app.win.chat.focused = false;
+    app.win.chat.divider_drag = false;
+    app.win.chat.divider_hover = false;
+    app.win.chat.hover = None;
+    app.win.chat.frame = Frame::default();
+    app.win.chat.ime_sent = None;
     // Streaming keeps running in the background; the answer is still saved.
     relayout(app);
 }
@@ -312,10 +312,10 @@ pub fn handle_request(app: &mut App, req: AskRequest) {
         send(app, req);
     } else {
         let text = if req.question.trim().is_empty() { req.display.clone() } else { req.question.clone() };
-        app.chat.composer.set_text(&text);
-        app.chat.pending_ctx = req.context;
-        app.chat.pending_intent = req.intent;
-        app.chat.focused = true;
+        app.win.chat.composer.set_text(&text);
+        app.win.chat.pending_ctx = req.context;
+        app.win.chat.pending_intent = req.intent;
+        app.win.chat.focused = true;
         app.request_redraw();
     }
 }
@@ -323,16 +323,16 @@ pub fn handle_request(app: &mut App, req: AskRequest) {
 /// Start a new, empty conversation (the old one is already on disk).
 pub fn new_chat(app: &mut App) {
     cancel(app);
-    app.chat.session.save();
-    app.chat.session = ChatSession::new();
-    app.chat.composer.clear();
-    app.chat.pending_ctx.clear();
-    app.chat.pending_intent = Intent::Explain;
-    app.chat.scroll = 0;
-    app.chat.stick = true;
-    app.chat.confirm_run = None;
-    app.chat.advised = None;
-    app.advisor.clear();
+    app.win.chat.session.save();
+    app.win.chat.session = ChatSession::new();
+    app.win.chat.composer.clear();
+    app.win.chat.pending_ctx.clear();
+    app.win.chat.pending_intent = Intent::Explain;
+    app.win.chat.scroll = 0;
+    app.win.chat.stick = true;
+    app.win.chat.confirm_run = None;
+    app.win.chat.advised = None;
+    app.win.advisor.clear();
     app.request_redraw();
 }
 
@@ -341,7 +341,7 @@ pub fn send(app: &mut App, req: AskRequest) {
     // Nothing leaves the machine unless AI is configured or consented to.
     // Chat follows `[ai] chat_provider`; it never falls back across local/cloud.
     let Some(cfg) = crate::ai::local::routed(app, crate::ai::local::Feature::Chat) else {
-        app.chat.set_toast(if crate::ai::consent::allowed(app) {
+        app.win.chat.set_toast(if crate::ai::consent::allowed(app) {
             "No model matches [ai] chat_provider (use \"default\", or pick one via AI: Select Model)"
         } else {
             "AI is off: add [llm] to config.toml or accept the AI prompt"
@@ -350,22 +350,22 @@ pub fn send(app: &mut App, req: AskRequest) {
         return;
     };
     // A new question supersedes an answer that is still streaming.
-    if app.chat.stream.is_some() {
+    if app.win.chat.stream.is_some() {
         cancel(app);
     }
-    app.chat.session.push_user(&req);
-    app.chat.session.push_assistant_placeholder();
-    app.chat.stick = true;
-    app.chat.confirm_run = None;
-    app.chat.advised = None;
-    app.advisor.clear();
+    app.win.chat.session.push_user(&req);
+    app.win.chat.session.push_assistant_placeholder();
+    app.win.chat.stick = true;
+    app.win.chat.confirm_run = None;
+    app.win.chat.advised = None;
+    app.win.advisor.clear();
 
     let intent = req.intent;
-    let history = app.chat.session.history();
-    let cwd = app.wm.active_pane().terminal.cwd.clone();
+    let history = app.win.chat.session.history();
+    let cwd = app.win.wm.active_pane().terminal.cwd.clone();
     let profile = app.llm.profile.summary();
-    let proxy = app.wm.get_proxy();
-    app.chat.stream = Some(stream::spawn(
+    let proxy = app.win.wm.get_proxy();
+    app.win.chat.stream = Some(stream::spawn(
         &cfg,
         move || {
             let mut ctx = crate::ai::context::TermContext::collect();
@@ -377,13 +377,13 @@ pub fn send(app: &mut App, req: AskRequest) {
         },
         proxy,
     ));
-    app.chat.started = Instant::now();
+    app.win.chat.started = Instant::now();
     app.request_redraw();
 }
 
 /// Stop the running stream (Esc / Stop button). Keeps what has arrived.
 pub fn cancel(app: &mut App) {
-    if app.chat.stream.take().is_none() {
+    if app.win.chat.stream.take().is_none() {
         return;
     }
     finish_turn(app, true);
@@ -391,36 +391,36 @@ pub fn cancel(app: &mut App) {
 }
 
 fn submit_composer(app: &mut App) {
-    let text = app.chat.composer.text();
+    let text = app.win.chat.composer.text();
     let q = text.trim().to_string();
-    if q.is_empty() && app.chat.pending_ctx.is_empty() {
+    if q.is_empty() && app.win.chat.pending_ctx.is_empty() {
         return;
     }
-    if app.chat.is_streaming() {
-        app.chat.set_toast("Still answering - press Esc to stop");
+    if app.win.chat.is_streaming() {
+        app.win.chat.set_toast("Still answering - press Esc to stop");
         app.request_redraw();
         return;
     }
-    app.chat.composer.clear();
-    app.chat.comp_top = 0;
-    let mut req = AskRequest::new(q, app.chat.pending_intent);
-    req.context = std::mem::take(&mut app.chat.pending_ctx);
-    app.chat.pending_intent = Intent::Explain;
+    app.win.chat.composer.clear();
+    app.win.chat.comp_top = 0;
+    let mut req = AskRequest::new(q, app.win.chat.pending_intent);
+    req.context = std::mem::take(&mut app.win.chat.pending_ctx);
+    app.win.chat.pending_intent = Intent::Explain;
     send(app, req);
 }
 
 /// Drain streaming events. Returns true when the UI should redraw.
 pub fn poll(app: &mut App) -> bool {
     let mut changed = false;
-    if let Some((_, t)) = &app.chat.toast {
+    if let Some((_, t)) = &app.win.chat.toast {
         if t.elapsed() > Duration::from_millis(TOAST_MS) {
-            app.chat.toast = None;
+            app.win.chat.toast = None;
             changed = true;
         }
     }
     let mut events = Vec::new();
     let mut disconnected = false;
-    if let Some(h) = &app.chat.stream {
+    if let Some(h) = &app.win.chat.stream {
         loop {
             match h.rx.try_recv() {
                 Ok(e) => events.push(e),
@@ -433,28 +433,28 @@ pub fn poll(app: &mut App) -> bool {
         }
     }
     for ev in events {
-        if app.chat.stream.is_none() {
+        if app.win.chat.stream.is_none() {
             break;
         }
         changed = true;
         match ev {
             StreamEvent::Delta(t) => {
-                if let Some(m) = app.chat.session.last_assistant_mut() {
+                if let Some(m) = app.win.chat.session.last_assistant_mut() {
                     m.content.push_str(&t);
                 }
             }
             StreamEvent::Done => {
-                app.chat.stream = None;
+                app.win.chat.stream = None;
                 finish_turn(app, false);
             }
             StreamEvent::Error(e) => {
-                app.chat.stream = None;
+                app.win.chat.stream = None;
                 fail_turn(app, e);
             }
         }
     }
-    if disconnected && app.chat.stream.is_some() {
-        app.chat.stream = None;
+    if disconnected && app.win.chat.stream.is_some() {
+        app.win.chat.stream = None;
         finish_turn(app, false);
         changed = true;
     }
@@ -463,50 +463,50 @@ pub fn poll(app: &mut App) -> bool {
 
 /// Wrap up the assistant message: actions, persistence, Advisor review.
 fn finish_turn(app: &mut App, cancelled: bool) {
-    let empty = app.chat.session.messages.last().is_some_and(|m| m.role == session::Role::Assistant && m.content.is_empty());
+    let empty = app.win.chat.session.messages.last().is_some_and(|m| m.role == session::Role::Assistant && m.content.is_empty());
     if empty {
         // Nothing arrived: drop the placeholder rather than leave a blank bubble.
-        app.chat.session.messages.pop();
-    } else if let Some(m) = app.chat.session.last_assistant_mut() {
+        app.win.chat.session.messages.pop();
+    } else if let Some(m) = app.win.chat.session.last_assistant_mut() {
         m.refresh_actions();
     }
-    app.chat.session.save();
+    app.win.chat.session.save();
     if cancelled {
         return;
     }
-    if app.advisor.enabled {
-        if let Some(cmd) = app.chat.session.last_commands().first().cloned() {
+    if app.win.advisor.enabled {
+        if let Some(cmd) = app.win.chat.session.last_commands().first().cloned() {
             let ctx = crate::ai::context::TermContext::collect();
             let context = format!(
                 "OS: {}, Shell: {}, CWD: {}{}",
                 ctx.os,
                 ctx.shell,
-                app.wm.active_pane().terminal.cwd.clone().unwrap_or(ctx.cwd),
+                app.win.wm.active_pane().terminal.cwd.clone().unwrap_or(ctx.cwd),
                 ctx.git_branch.map(|b| format!(", git branch: {b}")).unwrap_or_default(),
             );
             // The reviewer sees the command, so it follows the chat's routing.
             if let Some(cfg) = crate::ai::local::routed(app, crate::ai::local::Feature::Chat) {
-                app.advisor.review_command(&cmd, &context, &cfg);
-                app.chat.advised = Some(cmd);
+                app.win.advisor.review_command(&cmd, &context, &cfg);
+                app.win.chat.advised = Some(cmd);
             }
         }
     }
 }
 
 fn fail_turn(app: &mut App, err: String) {
-    let partial = app.chat.session.last_assistant_mut().is_some_and(|m| !m.content.is_empty());
+    let partial = app.win.chat.session.last_assistant_mut().is_some_and(|m| !m.content.is_empty());
     if partial {
         // Keep what arrived, but never let a cut-off answer pass as complete.
-        if let Some(m) = app.chat.session.last_assistant_mut() {
+        if let Some(m) = app.win.chat.session.last_assistant_mut() {
             m.incomplete = Some(err.clone());
         }
-        app.chat.set_toast(format!("Answer incomplete: {err}"));
+        app.win.chat.set_toast(format!("Answer incomplete: {err}"));
         finish_turn(app, true);
-    } else if let Some(m) = app.chat.session.last_assistant_mut() {
+    } else if let Some(m) = app.win.chat.session.last_assistant_mut() {
         m.content = err;
         m.error = true;
         m.actions.clear();
-        app.chat.session.save();
+        app.win.chat.session.save();
     }
 }
 
@@ -514,7 +514,7 @@ fn fail_turn(app: &mut App, err: String) {
 
 /// Raw text of code block `block` (0-based among code blocks) of message `msg`.
 fn code_block(app: &App, msg: usize, block: usize) -> Option<(String, String)> {
-    let m = app.chat.session.messages.get(msg)?;
+    let m = app.win.chat.session.messages.get(msg)?;
     markdown::parse_blocks(&m.content)
         .into_iter()
         .filter_map(|b| match b {
@@ -535,8 +535,8 @@ pub fn send_to_terminal(app: &mut App, cmd: &str, run: bool) {
     if lines.is_empty() {
         return;
     }
-    let cwd = app.wm.active_pane().terminal.cwd.clone();
-    let bracketed = app.wm.active_pane().terminal.bracketed_paste;
+    let cwd = app.win.wm.active_pane().terminal.cwd.clone();
+    let bracketed = app.win.wm.active_pane().terminal.bracketed_paste;
     let text = if lines.len() == 1 {
         lines[0].trim().to_string()
     } else if bracketed {
@@ -546,26 +546,26 @@ pub fn send_to_terminal(app: &mut App, cmd: &str, run: bool) {
     };
     let preview = if run { lines.iter().find_map(|l| ExecPreview::check_command_in(l.trim(), cwd.as_deref())) } else { None };
 
-    app.wm.active_pane_mut().write(text.as_bytes());
+    app.win.wm.active_pane_mut().write(text.as_bytes());
     if run {
         match preview {
             Some(mut p) => {
                 p.visible = true;
-                app.exec_preview = p;
+                app.win.exec_preview = p;
             }
             None => {
-                app.wm.active_pane_mut().write(b"\r");
+                app.win.wm.active_pane_mut().write(b"\r");
                 if app.audit.enabled {
                     app.audit.log_command(cmd, 0);
                 }
             }
         }
     }
-    if app.wm.process_all_output() {
-        app.wm.flush_all_responses();
+    if app.win.wm.process_all_output() {
+        app.win.wm.flush_all_responses();
     }
     // Hand the keyboard back so the user sees / edits the result.
-    app.chat.focused = false;
+    app.win.chat.focused = false;
     app.request_redraw();
 }
 
@@ -579,11 +579,11 @@ fn run_block(app: &mut App, msg: usize, block: usize, run: bool) {
         return;
     }
     let multi = cmd.lines().filter(|l| !l.trim().is_empty()).count() > 1;
-    let injected = app.chat.session.turn_injection(msg).is_some();
-    if run && (multi || injected) && app.chat.confirm_run != Some((msg, block)) {
+    let injected = app.win.chat.session.turn_injection(msg).is_some();
+    if run && (multi || injected) && app.win.chat.confirm_run != Some((msg, block)) {
         // First click only arms the button; the block is already on screen.
-        app.chat.confirm_run = Some((msg, block));
-        app.chat.set_toast(if injected {
+        app.win.chat.confirm_run = Some((msg, block));
+        app.win.chat.set_toast(if injected {
             "The terminal text behind this answer looked like a prompt injection: review the command, then click Run again"
         } else {
             "Multi-line block: click Run again to execute all lines"
@@ -591,21 +591,21 @@ fn run_block(app: &mut App, msg: usize, block: usize, run: bool) {
         app.request_redraw();
         return;
     }
-    app.chat.confirm_run = None;
+    app.win.chat.confirm_run = None;
     send_to_terminal(app, &cmd, run);
 }
 
 fn copy_block(app: &mut App, msg: usize, block: usize) {
     if let Some((_, code)) = code_block(app, msg, block) {
         copy_to_clipboard(code.trim_end());
-        app.chat.set_toast("Copied to clipboard");
+        app.win.chat.set_toast("Copied to clipboard");
         app.request_redraw();
     }
 }
 
 /// Index of the last assistant message with a runnable command.
 fn first_command_of_last_answer(app: &App) -> Option<String> {
-    app.chat.session.last_commands().first().cloned()
+    app.win.chat.session.last_commands().first().cloned()
 }
 
 fn activate(app: &mut App, t: Target) {
@@ -615,12 +615,12 @@ fn activate(app: &mut App, t: Target) {
         Target::Send => submit_composer(app),
         Target::Stop => cancel(app),
         Target::ScrollBottom => {
-            app.chat.scroll_to_bottom();
+            app.win.chat.scroll_to_bottom();
             app.request_redraw();
         }
         Target::Example(i) => {
             if let Some((text, intent)) = EXAMPLES.get(i) {
-                if !app.chat.is_streaming() {
+                if !app.win.chat.is_streaming() {
                     send(app, AskRequest::new(*text, *intent));
                 }
             }
@@ -629,8 +629,8 @@ fn activate(app: &mut App, t: Target) {
         Target::Insert(m, b) => run_block(app, m, b, false),
         Target::Copy(m, b) => copy_block(app, m, b),
         Target::ChipX(i) => {
-            if i < app.chat.pending_ctx.len() {
-                app.chat.pending_ctx.remove(i);
+            if i < app.win.chat.pending_ctx.len() {
+                app.win.chat.pending_ctx.remove(i);
                 app.request_redraw();
             }
         }
@@ -644,7 +644,7 @@ fn activate(app: &mut App, t: Target) {
 /// Key handling while the composer has focus. Returns true when consumed;
 /// unhandled Cmd/Ctrl+Shift chords fall through to the global shortcuts.
 pub fn handle_key(app: &mut App, event: &KeyEvent) -> bool {
-    let m = app.modifiers;
+    let m = app.win.modifiers;
     let (cmd, ctrl, alt, shift) = (m.super_key(), m.control_key(), m.alt_key(), m.shift_key());
     let letter = match &event.logical_key {
         Key::Character(s) => s.chars().next().map(|c| c.to_ascii_lowercase()),
@@ -659,10 +659,10 @@ pub fn handle_key(app: &mut App, event: &KeyEvent) -> bool {
 
     match &event.logical_key {
         Key::Named(NamedKey::Escape) => {
-            if app.chat.is_streaming() {
+            if app.win.chat.is_streaming() {
                 cancel(app);
             } else {
-                app.chat.focused = false;
+                app.win.chat.focused = false;
                 app.request_redraw();
             }
             return true;
@@ -673,13 +673,13 @@ pub fn handle_key(app: &mut App, event: &KeyEvent) -> bool {
         Key::Named(NamedKey::Enter) if cmd => {
             match first_command_of_last_answer(app) {
                 // Keyboard shortcut must not bypass the injection confirmation.
-                Some(c) if !shift && app.chat.session.last_turn_injection().is_some() => {
+                Some(c) if !shift && app.win.chat.session.last_turn_injection().is_some() => {
                     send_to_terminal(app, &c, false);
-                    app.chat.set_toast("Possible prompt injection in the context: inserted, not run");
+                    app.win.chat.set_toast("Possible prompt injection in the context: inserted, not run");
                 }
                 Some(c) => send_to_terminal(app, &c, !shift),
                 None => {
-                    app.chat.set_toast("No command in the last answer");
+                    app.win.chat.set_toast("No command in the last answer");
                     app.request_redraw();
                 }
             }
@@ -687,7 +687,7 @@ pub fn handle_key(app: &mut App, event: &KeyEvent) -> bool {
         }
         Key::Named(NamedKey::Enter) => {
             if shift || alt {
-                app.chat.composer.insert_newline();
+                app.win.chat.composer.insert_newline();
             } else {
                 submit_composer(app);
             }
@@ -702,31 +702,31 @@ pub fn handle_key(app: &mut App, event: &KeyEvent) -> bool {
             Some('n') => new_chat(app),
             Some('v') => {
                 if let Some(t) = paste_from_clipboard() {
-                    app.chat.composer.insert_str(&t);
+                    app.win.chat.composer.insert_str(&t);
                 }
             }
             Some('c') => {
-                let text = if app.chat.composer.is_empty() {
-                    app.chat.session.messages.iter().rev().find(|m| m.role == session::Role::Assistant && !m.error).map(|m| m.content.clone()).unwrap_or_default()
+                let text = if app.win.chat.composer.is_empty() {
+                    app.win.chat.session.messages.iter().rev().find(|m| m.role == session::Role::Assistant && !m.error).map(|m| m.content.clone()).unwrap_or_default()
                 } else {
-                    app.chat.composer.text()
+                    app.win.chat.composer.text()
                 };
                 copy_to_clipboard(&text);
             }
             Some('x') => {
-                copy_to_clipboard(&app.chat.composer.text());
-                app.chat.composer.clear();
+                copy_to_clipboard(&app.win.chat.composer.text());
+                app.win.chat.composer.clear();
             }
             Some('a') => {}
             _ => match &event.logical_key {
-                Key::Named(NamedKey::ArrowLeft) => app.chat.composer.home(),
-                Key::Named(NamedKey::ArrowRight) => app.chat.composer.end(),
+                Key::Named(NamedKey::ArrowLeft) => app.win.chat.composer.home(),
+                Key::Named(NamedKey::ArrowRight) => app.win.chat.composer.end(),
                 Key::Named(NamedKey::ArrowUp) => {
-                    app.chat.stick = false;
-                    app.chat.scroll = 0;
+                    app.win.chat.stick = false;
+                    app.win.chat.scroll = 0;
                 }
-                Key::Named(NamedKey::ArrowDown) => app.chat.scroll_to_bottom(),
-                Key::Named(NamedKey::Backspace) => app.chat.composer.delete_to_line_start(),
+                Key::Named(NamedKey::ArrowDown) => app.win.chat.scroll_to_bottom(),
+                Key::Named(NamedKey::Backspace) => app.win.chat.composer.delete_to_line_start(),
                 // Other Cmd chords belong to the app (new tab, palette, ...).
                 _ => return false,
             },
@@ -740,13 +740,13 @@ pub fn handle_key(app: &mut App, event: &KeyEvent) -> bool {
             return false;
         }
         match letter {
-            Some('a') => app.chat.composer.home(),
-            Some('e') => app.chat.composer.end(),
-            Some('k') => app.chat.composer.delete_to_line_end(),
-            Some('u') => app.chat.composer.delete_to_line_start(),
-            Some('w') => app.chat.composer.delete_word_back(),
+            Some('a') => app.win.chat.composer.home(),
+            Some('e') => app.win.chat.composer.end(),
+            Some('k') => app.win.chat.composer.delete_to_line_end(),
+            Some('u') => app.win.chat.composer.delete_to_line_start(),
+            Some('w') => app.win.chat.composer.delete_word_back(),
             Some('c') => {
-                if app.chat.is_streaming() {
+                if app.win.chat.is_streaming() {
                     cancel(app);
                 }
             }
@@ -756,52 +756,52 @@ pub fn handle_key(app: &mut App, event: &KeyEvent) -> bool {
         return true; // never leak Ctrl chords to the shell from the chat
     }
 
-    let page = app.chat.frame.msg_area.h.saturating_sub(app.chat.frame.line_h * 2).max(1) as isize;
-    let line = (app.chat.frame.line_h.max(1) * 3) as isize;
+    let page = app.win.chat.frame.msg_area.h.saturating_sub(app.win.chat.frame.line_h * 2).max(1) as isize;
+    let line = (app.win.chat.frame.line_h.max(1) * 3) as isize;
     match &event.logical_key {
         Key::Named(NamedKey::Backspace) => {
             if alt {
-                app.chat.composer.delete_word_back();
-            } else if app.chat.composer.is_empty() && !app.chat.pending_ctx.is_empty() {
-                app.chat.pending_ctx.pop();
+                app.win.chat.composer.delete_word_back();
+            } else if app.win.chat.composer.is_empty() && !app.win.chat.pending_ctx.is_empty() {
+                app.win.chat.pending_ctx.pop();
             } else {
-                app.chat.composer.backspace();
+                app.win.chat.composer.backspace();
             }
         }
-        Key::Named(NamedKey::Delete) => app.chat.composer.delete(),
+        Key::Named(NamedKey::Delete) => app.win.chat.composer.delete(),
         Key::Named(NamedKey::ArrowLeft) => {
             if alt {
-                app.chat.composer.word_left()
+                app.win.chat.composer.word_left()
             } else {
-                app.chat.composer.left()
+                app.win.chat.composer.left()
             }
         }
         Key::Named(NamedKey::ArrowRight) => {
             if alt {
-                app.chat.composer.word_right()
+                app.win.chat.composer.word_right()
             } else {
-                app.chat.composer.right()
+                app.win.chat.composer.right()
             }
         }
         Key::Named(NamedKey::ArrowUp) => {
-            if !app.chat.composer.move_vertical(false) {
-                app.chat.scroll_by(-line);
+            if !app.win.chat.composer.move_vertical(false) {
+                app.win.chat.scroll_by(-line);
             }
         }
         Key::Named(NamedKey::ArrowDown) => {
-            if !app.chat.composer.move_vertical(true) {
-                app.chat.scroll_by(line);
+            if !app.win.chat.composer.move_vertical(true) {
+                app.win.chat.scroll_by(line);
             }
         }
-        Key::Named(NamedKey::Home) => app.chat.composer.home(),
-        Key::Named(NamedKey::End) => app.chat.composer.end(),
-        Key::Named(NamedKey::PageUp) => app.chat.scroll_by(-page),
-        Key::Named(NamedKey::PageDown) => app.chat.scroll_by(page),
+        Key::Named(NamedKey::Home) => app.win.chat.composer.home(),
+        Key::Named(NamedKey::End) => app.win.chat.composer.end(),
+        Key::Named(NamedKey::PageUp) => app.win.chat.scroll_by(-page),
+        Key::Named(NamedKey::PageDown) => app.win.chat.scroll_by(page),
         Key::Named(NamedKey::Tab) => {}
-        Key::Named(NamedKey::Space) => app.chat.composer.insert_str(" "),
+        Key::Named(NamedKey::Space) => app.win.chat.composer.insert_str(" "),
         Key::Character(s) => {
             let typed = event.text.as_ref().map_or(s.as_str(), |t| t.as_str());
-            app.chat.composer.insert_str(typed);
+            app.win.chat.composer.insert_str(typed);
         }
         _ => return false,
     }
@@ -811,14 +811,14 @@ pub fn handle_key(app: &mut App, event: &KeyEvent) -> bool {
 
 /// IME commit while the chat is focused.
 pub fn insert_text(app: &mut App, text: &str) {
-    app.chat.composer.insert_str(text);
+    app.win.chat.composer.insert_str(text);
     app.request_redraw();
 }
 
 // ── Mouse ─────────────────────────────────────────────────────────────────
 
 fn win_width(app: &App) -> usize {
-    app.window.as_ref().map_or(800, |w| w.inner_size().width as usize).max(1)
+    app.win.window.as_ref().map_or(800, |w| w.inner_size().width as usize).max(1)
 }
 
 fn divider_zone(rect: Rect) -> Rect {
@@ -826,23 +826,23 @@ fn divider_zone(rect: Rect) -> Rect {
 }
 
 fn set_cursor(app: &mut App, icon: Option<CursorIcon>) {
-    if let (Some(w), Some(icon)) = (&app.window, icon) {
+    if let (Some(w), Some(icon)) = (&app.win.window, icon) {
         w.set_cursor(icon);
     }
-    app.chat.cursor_custom = icon.is_some();
+    app.win.chat.cursor_custom = icon.is_some();
 }
 
 /// Mouse move. Returns true when the chat consumed it.
 pub fn on_cursor_moved(app: &mut App) -> bool {
-    if !app.chat.visible {
+    if !app.win.chat.visible {
         return false;
     }
-    let (x, y) = (app.cursor_x, app.cursor_y);
-    if app.chat.divider_drag {
+    let (x, y) = (app.win.cursor_x, app.win.cursor_y);
+    if app.win.chat.divider_drag {
         let win_w = win_width(app);
         let ratio = (win_w.saturating_sub(x) as f32 / win_w as f32).clamp(MIN_RATIO, MAX_RATIO);
-        if (ratio - app.chat.ratio).abs() * win_w as f32 >= 1.0 {
-            app.chat.ratio = ratio;
+        if (ratio - app.win.chat.ratio).abs() * win_w as f32 >= 1.0 {
+            app.win.chat.ratio = ratio;
             relayout(app);
         }
         return true;
@@ -850,11 +850,11 @@ pub fn on_cursor_moved(app: &mut App) -> bool {
     let Some(rect) = app.chat_rect() else { return false };
     let on_div = divider_zone(rect).contains(x, y);
     let inside = rect.contains(x, y);
-    let hover = if inside { app.chat.hit_at(x, y) } else { None };
+    let hover = if inside { app.win.chat.hit_at(x, y) } else { None };
     let mut redraw = false;
-    if hover != app.chat.hover || on_div != app.chat.divider_hover {
-        app.chat.hover = hover;
-        app.chat.divider_hover = on_div;
+    if hover != app.win.chat.hover || on_div != app.win.chat.divider_hover {
+        app.win.chat.hover = hover;
+        app.win.chat.divider_hover = on_div;
         redraw = true;
     }
     if on_div {
@@ -866,9 +866,9 @@ pub fn on_cursor_moved(app: &mut App) -> bool {
             None => CursorIcon::Default,
         };
         set_cursor(app, Some(icon));
-    } else if app.chat.cursor_custom {
+    } else if app.win.chat.cursor_custom {
         set_cursor(app, Some(CursorIcon::Default));
-        app.chat.cursor_custom = false;
+        app.win.chat.cursor_custom = false;
     }
     if redraw {
         app.request_redraw();
@@ -878,26 +878,26 @@ pub fn on_cursor_moved(app: &mut App) -> bool {
 
 /// Left press. Returns true when the chat consumed the click.
 pub fn on_mouse_press(app: &mut App) -> bool {
-    if !app.chat.visible {
+    if !app.win.chat.visible {
         return false;
     }
-    let (x, y) = (app.cursor_x, app.cursor_y);
+    let (x, y) = (app.win.cursor_x, app.win.cursor_y);
     let Some(rect) = app.chat_rect() else { return false };
     if divider_zone(rect).contains(x, y) {
-        app.chat.divider_drag = true;
-        app.chat.focused = true;
+        app.win.chat.divider_drag = true;
+        app.win.chat.focused = true;
         app.request_redraw();
         return true;
     }
     if !rect.contains(x, y) {
-        if app.chat.focused {
-            app.chat.focused = false;
+        if app.win.chat.focused {
+            app.win.chat.focused = false;
             app.request_redraw();
         }
         return false;
     }
-    app.chat.focused = true;
-    match app.chat.hit_at(x, y) {
+    app.win.chat.focused = true;
+    match app.win.chat.hit_at(x, y) {
         Some(Target::Composer) => place_composer_cursor(app, x, y),
         Some(t) => activate(app, t),
         None => {}
@@ -907,8 +907,8 @@ pub fn on_mouse_press(app: &mut App) -> bool {
 }
 
 pub fn on_mouse_release(app: &mut App) -> bool {
-    if app.chat.divider_drag {
-        app.chat.divider_drag = false;
+    if app.win.chat.divider_drag {
+        app.win.chat.divider_drag = false;
         app.request_redraw();
         return true;
     }
@@ -917,31 +917,31 @@ pub fn on_mouse_release(app: &mut App) -> bool {
 
 /// True when the point is over the chat dock (for swallowing other buttons).
 pub fn contains(app: &App, x: usize, y: usize) -> bool {
-    app.chat.visible && app.chat_rect().is_some_and(|r| r.contains(x, y))
+    app.win.chat.visible && app.chat_rect().is_some_and(|r| r.contains(x, y))
 }
 
 /// Wheel over the message list. Returns true when consumed.
 pub fn on_wheel(app: &mut App, delta: MouseScrollDelta) -> bool {
-    if !contains(app, app.cursor_x, app.cursor_y) {
+    if !contains(app, app.win.cursor_x, app.win.cursor_y) {
         return false;
     }
-    let lh = app.chat.frame.line_h.max(1) as f64;
+    let lh = app.win.chat.frame.line_h.max(1) as f64;
     let px = match delta {
         MouseScrollDelta::LineDelta(_, y) => -(y as f64) * lh * 3.0,
         MouseScrollDelta::PixelDelta(p) => -p.y,
     };
-    app.chat.scroll_by(px.round() as isize);
+    app.win.chat.scroll_by(px.round() as isize);
     app.request_redraw();
     true
 }
 
 fn place_composer_cursor(app: &mut App, x: usize, y: usize) {
-    let f = &app.chat.frame;
+    let f = &app.win.chat.frame;
     let (ox, oy) = f.comp_origin;
-    let cw = app.renderer.cell_width().max(1);
-    let row = y.saturating_sub(oy) / f.line_h.max(1) + app.chat.comp_top;
+    let cw = app.win.renderer.cell_width().max(1);
+    let row = y.saturating_sub(oy) / f.line_h.max(1) + app.win.chat.comp_top;
     let col = x.saturating_sub(ox) / cw;
-    let comp = &mut app.chat.composer;
+    let comp = &mut app.win.chat.composer;
     let lines = comp.visual_lines(f.comp_cols.max(1));
     let l = lines[row.min(lines.len() - 1)];
     let mut w = 0;

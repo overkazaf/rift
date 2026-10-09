@@ -82,12 +82,13 @@ impl Default for BrowserUi {
 
 impl App {
     pub fn browser_visible(&self) -> bool {
-        self.webview.as_ref().is_some_and(|wv| wv.visible)
+        self.win.webview.as_ref().is_some_and(|wv| wv.visible)
     }
 
     /// Geometry of the docked/maximized browser regardless of visibility.
     pub fn browser_geometry(&self) -> BrowserLayout {
         let (w, h) = self
+            .win
             .window
             .as_ref()
             .map_or((800, 600), |win| {
@@ -99,18 +100,18 @@ impl App {
 
     /// [`App::browser_geometry`] for a window of `w` x `h` physical pixels.
     pub fn browser_geometry_for(&self, w: usize, h: usize) -> BrowserLayout {
-        let scale = self.window.as_ref().map_or(1.0, |win| win.scale_factor());
+        let scale = self.win.window.as_ref().map_or(1.0, |win| win.scale_factor());
         // The chat dock owns the far right edge; the browser lays out in
         // what is left (terminal | browser | chat).
         BrowserLayout::compute(
-            w - self.chat.dock_w(w).min(w),
+            w - self.win.chat.dock_w(w).min(w),
             h,
             self.tab_bar_height(),
-            self.renderer.cell_width(),
-            self.renderer.cell_height(),
+            self.win.renderer.cell_width(),
+            self.win.renderer.cell_height(),
             scale,
-            self.browser.ratio,
-            self.webview_maximized,
+            self.win.browser.ratio,
+            self.win.webview_maximized,
         )
     }
 
@@ -141,7 +142,7 @@ impl App {
 
 /// Push the layout's page bounds to the native webview.
 pub fn apply_bounds(app: &App) {
-    if let (Some(wv), Some(l)) = (&app.webview, app.browser_layout()) {
+    if let (Some(wv), Some(l)) = (&app.win.webview, app.browser_layout()) {
         wv.set_bounds(l.web_logical());
     }
 }
@@ -156,22 +157,22 @@ pub fn relayout(app: &mut App) {
 /// Open `input` (URL or search text) in the built-in browser, creating it if needed.
 pub fn open(app: &mut App, input: &str) {
     let Some(url) = smart_url::resolve(input) else { return };
-    let Some(window) = app.window.clone() else { return };
+    let Some(window) = app.win.window.clone() else { return };
 
-    app.webview_tab = Some(app.wm.active_tab);
-    app.webview_pane = Some(app.wm.active_tab().active);
-    app.browser.editing = false;
+    app.win.webview_tab = Some(app.win.wm.active_tab);
+    app.win.webview_pane = Some(app.win.wm.active_tab().active);
+    app.win.browser.editing = false;
 
-    if let Some(wv) = &mut app.webview {
+    if let Some(wv) = &mut app.win.webview {
         wv.navigate(&url);
         wv.set_visible(true);
     } else {
         let bounds = app.browser_geometry().web_logical();
-        let waker = Some(app.wm.get_proxy());
+        let waker = Some(app.win.wm.get_proxy());
         match crate::network::WebViewPane::new(&window, &url, bounds, waker) {
             Ok(wv) => {
                 log::info!("WebView opened: {url}");
-                app.webview = Some(wv);
+                app.win.webview = Some(wv);
             }
             Err(e) => {
                 log::error!("WebView failed: {e}");
@@ -185,19 +186,19 @@ pub fn open(app: &mut App, input: &str) {
 
 /// Cmd+Shift+B / menu: show or hide the browser without discarding the page.
 pub fn toggle(app: &mut App) {
-    let Some(wv) = &mut app.webview else {
-        app.webview_dialog.toggle();
+    let Some(wv) = &mut app.win.webview else {
+        app.win.webview_dialog.toggle();
         return;
     };
     if wv.visible {
         wv.set_visible(false);
         wv.focus_parent();
-        app.browser.editing = false;
-        app.browser.focused = false;
+        app.win.browser.editing = false;
+        app.win.browser.focused = false;
         focus_terminal_window(app);
     } else {
         wv.set_visible(true);
-        app.webview_tab = Some(app.wm.active_tab);
+        app.win.webview_tab = Some(app.win.wm.active_tab);
     }
     relayout(app);
     if app.browser_visible() {
@@ -207,93 +208,93 @@ pub fn toggle(app: &mut App) {
 
 /// Discard the webview entirely (toolbar close button / Cmd+W).
 pub fn close(app: &mut App) {
-    if let Some(wv) = &app.webview {
+    if let Some(wv) = &app.win.webview {
         wv.focus_parent();
     }
-    app.webview = None;
-    app.webview_tab = None;
-    app.webview_pane = None;
-    app.webview_maximized = false;
-    app.browser.editing = false;
-    app.browser.focused = false;
-    app.browser.hover = None;
-    app.browser.divider_hover = false;
-    app.browser.divider_drag = false;
+    app.win.webview = None;
+    app.win.webview_tab = None;
+    app.win.webview_pane = None;
+    app.win.webview_maximized = false;
+    app.win.browser.editing = false;
+    app.win.browser.focused = false;
+    app.win.browser.hover = None;
+    app.win.browser.divider_hover = false;
+    app.win.browser.divider_drag = false;
     focus_terminal_window(app);
     relayout(app);
 }
 
 pub fn toggle_maximize(app: &mut App) {
-    app.webview_maximized = !app.webview_maximized;
+    app.win.webview_maximized = !app.win.webview_maximized;
     relayout(app);
 }
 
 /// Give the page keyboard focus.
 pub fn focus_page(app: &mut App) {
-    if let Some(wv) = &app.webview {
+    if let Some(wv) = &app.win.webview {
         if wv.visible {
             wv.focus();
-            app.browser.focused = true;
+            app.win.browser.focused = true;
         }
     }
 }
 
 /// Return keyboard focus to the terminal (winit view).
 pub fn focus_terminal(app: &mut App) {
-    if let Some(wv) = &app.webview {
+    if let Some(wv) = &app.win.webview {
         wv.focus_parent();
     }
-    app.browser.focused = false;
+    app.win.browser.focused = false;
     focus_terminal_window(app);
 }
 
 fn focus_terminal_window(app: &App) {
-    if let Some(w) = &app.window {
+    if let Some(w) = &app.win.window {
         w.focus_window();
     }
 }
 
 /// Focus the address field and select its content (Cmd+L).
 pub fn begin_edit(app: &mut App, select_all: bool) {
-    let Some(wv) = &app.webview else { return };
+    let Some(wv) = &app.win.webview else { return };
     if !wv.visible {
         return;
     }
-    if !app.browser.editing {
-        app.browser.return_to_page = app.browser.focused;
+    if !app.win.browser.editing {
+        app.win.browser.return_to_page = app.win.browser.focused;
         let url = wv.url.clone();
-        app.browser.field.set_text(&url);
-        app.browser.editing = true;
+        app.win.browser.field.set_text(&url);
+        app.win.browser.editing = true;
     }
     // The native webview may be first responder; key events must reach winit.
     wv.focus_parent();
     focus_terminal_window(app);
-    app.browser.focused = true;
+    app.win.browser.focused = true;
     if select_all {
-        app.browser.field.select_all();
+        app.win.browser.field.select_all();
     }
     app.request_redraw();
 }
 
 /// Leave the address field. `commit` navigates to its content.
 pub fn end_edit(app: &mut App, commit: bool) {
-    if !app.browser.editing {
+    if !app.win.browser.editing {
         return;
     }
-    app.browser.editing = false;
-    app.browser.field_drag = false;
-    let text = app.browser.field.text();
-    let mut go_page = app.browser.return_to_page;
+    app.win.browser.editing = false;
+    app.win.browser.field_drag = false;
+    let text = app.win.browser.field.text();
+    let mut go_page = app.win.browser.return_to_page;
     if commit {
         if let Some(url) = smart_url::resolve(&text) {
-            if let Some(wv) = &mut app.webview {
+            if let Some(wv) = &mut app.win.webview {
                 wv.navigate(&url);
             }
             go_page = true;
         }
     }
-    if let Some(wv) = &app.webview {
-        app.browser.field.set_text(&wv.url);
+    if let Some(wv) = &app.win.webview {
+        app.win.browser.field.set_text(&wv.url);
     }
     if go_page {
         focus_page(app);
@@ -312,7 +313,7 @@ pub fn run_command(app: &mut App, cmd: BrowserCmd) {
         BrowserCmd::FocusAddress => begin_edit(app, true),
         // Page-level commands only apply while the browser owns the keyboard,
         // so the same accelerators stay free for the terminal otherwise.
-        _ if !app.browser.focused => {}
+        _ if !app.win.browser.focused => {}
         BrowserCmd::Back => back(app),
         BrowserCmd::Forward => forward(app),
         BrowserCmd::Reload => reload_or_stop(app, false),
@@ -322,20 +323,20 @@ pub fn run_command(app: &mut App, cmd: BrowserCmd) {
 }
 
 fn back(app: &App) {
-    if let Some(wv) = &app.webview {
+    if let Some(wv) = &app.win.webview {
         wv.go_back();
     }
 }
 
 fn forward(app: &App) {
-    if let Some(wv) = &app.webview {
+    if let Some(wv) = &app.win.webview {
         wv.go_forward();
     }
 }
 
 /// Toolbar reload button toggles to stop while loading; Cmd+R always reloads.
 fn reload_or_stop(app: &mut App, stop_if_loading: bool) {
-    if let Some(wv) = &mut app.webview {
+    if let Some(wv) = &mut app.win.webview {
         if stop_if_loading && wv.loading {
             wv.stop();
         } else {
@@ -357,7 +358,7 @@ pub(crate) fn toolbar_click(app: &mut App, hit: Hit) {
 
 /// Drain webview events; call from `about_to_wait`.
 pub fn poll(app: &mut App) {
-    let Some(wv) = &mut app.webview else { return };
+    let Some(wv) = &mut app.win.webview else { return };
     let out = wv.poll_events();
     let visible = wv.visible;
     if !visible {
@@ -365,15 +366,15 @@ pub fn poll(app: &mut App) {
     }
     let mut redraw = out.changed;
     if out.focus_clicked {
-        if app.browser.editing {
+        if app.win.browser.editing {
             // The user clicked into the page: drop the edit without navigating.
-            app.browser.editing = false;
-            if let Some(wv) = &app.webview {
-                app.browser.field.set_text(&wv.url);
+            app.win.browser.editing = false;
+            if let Some(wv) = &app.win.webview {
+                app.win.browser.field.set_text(&wv.url);
             }
         }
-        if !app.browser.focused {
-            app.browser.focused = true;
+        if !app.win.browser.focused {
+            app.win.browser.focused = true;
             redraw = true;
         }
     }

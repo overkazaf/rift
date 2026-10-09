@@ -740,7 +740,7 @@ pub fn run_command(app: &mut App, cmd: AutopilotCmd) {
 }
 
 fn toast(app: &mut App, msg: impl Into<String>) {
-    app.blocks_ui.show_toast(msg);
+    app.win.blocks_ui.show_toast(msg);
     app.request_redraw();
 }
 
@@ -784,7 +784,7 @@ fn show_trust_modal(app: &mut App, need: TrustNeed) {
     lines.extend(need.summary.iter().cloned());
     lines.push(String::new());
     lines.push("Trusting lets this file auto-approve your agents' prompts in this repo (after the countdown). Critical commands are never auto-approved, whatever it says. Until you trust it, it is ignored.".into());
-    app.confirm.push(ConfirmRequest {
+    app.win.confirm.push(ConfirmRequest {
         title: format!("Trust policy from {name}?"),
         badge: Some(("SECURITY".into(), Tone::Warning)),
         lines,
@@ -834,20 +834,20 @@ pub fn resolve_confirm(app: &mut App, c: PolicyConfirm, choice: Option<usize>) {
 pub fn evaluate_all(app: &mut App, now: Instant) {
     let list = sessions(app);
     let uids: Vec<usize> = list.iter().map(|s| s.uid).collect();
-    app.agents_ui.auto.prune(&uids);
+    app.win.agents_ui.auto.prune(&uids);
     for s in &list {
         if !s.waiting {
-            app.agents_ui.auto.clear_prompt(s.uid);
+            app.win.agents_ui.auto.clear_prompt(s.uid);
             continue;
         }
-        if !app.agents_ui.auto.enabled(s.uid) {
-            app.agents_ui.auto.drop_pending(s.uid);
+        if !app.win.agents_ui.auto.enabled(s.uid) {
+            app.win.agents_ui.auto.drop_pending(s.uid);
             continue;
         }
-        let Some(info) = app.agents_ui.info.get(&s.uid) else { continue };
+        let Some(info) = app.win.agents_ui.info.get(&s.uid) else { continue };
         let Some(p) = info.prompt.clone().filter(|_| info.settled) else {
             // No prompt, or one that is not the live UI at the bottom of the screen.
-            app.agents_ui.auto.drop_pending(s.uid);
+            app.win.agents_ui.auto.drop_pending(s.uid);
             continue;
         };
         let Some(sev) = severity_of(&info.risk) else { continue }; // still being checked
@@ -859,17 +859,17 @@ pub fn evaluate_all(app: &mut App, now: Instant) {
         if let Some(need) = loaded.trust_needed {
             show_trust_modal(app, need);
         }
-        app.agents_ui.auto.countdown_ms = loaded.policy.countdown_ms.unwrap_or(DEFAULT_COUNTDOWN_MS);
+        app.win.agents_ui.auto.countdown_ms = loaded.policy.countdown_ms.unwrap_or(DEFAULT_COUNTDOWN_MS);
         let env = PathEnv::new(root.as_deref(), s.cwd.as_deref(), home());
         let mut prompt = p;
         prompt.agent = prompt.agent.or(Some(s.kind));
         let outcome = policy::decide(&loaded.policy, &prompt, &env, sev);
         let sig = policy::signature(&prompt);
-        app.agents_ui.auto.consider(s.uid, &sig, &outcome, now);
+        app.win.agents_ui.auto.consider(s.uid, &sig, &outcome, now);
     }
     // With the dock closed nobody sees the card's countdown: say it once, with the way out.
-    let started = app.agents_ui.auto.take_started();
-    if !app.agents_ui.visible {
+    let started = app.win.agents_ui.auto.take_started();
+    if !app.win.agents_ui.visible {
         if let Some((_, p)) = started.last() {
             let verb = if p.verdict == Verdict::Deny { "denying" } else { "approving" };
             let secs = fmt_remaining(p.deadline.saturating_duration_since(now));
@@ -881,22 +881,22 @@ pub fn evaluate_all(app: &mut App, now: Instant) {
 /// Send the answers whose countdown ran out. Called every supervision pass.
 pub fn tick(app: &mut App, now: Instant) {
     // Typing in an agent's pane means a human is on it: that prompt stays theirs.
-    for (uid, sig, started) in app.agents_ui.auto.running() {
-        let typed = app.wm.locate_pane(uid).and_then(|(ti, pi)| app.wm.tabs[ti].pane(pi)).and_then(|p| p.act.last_input).is_some_and(|t| t > started);
+    for (uid, sig, started) in app.win.agents_ui.auto.running() {
+        let typed = app.pane_ref(uid).and_then(|p| p.act.last_input).is_some_and(|t| t > started);
         if typed {
-            app.agents_ui.auto.dismiss(uid, &sig);
+            app.win.agents_ui.auto.dismiss(uid, &sig);
             app.request_redraw();
         }
     }
-    for (uid, pend) in app.agents_ui.auto.due(now) {
+    for (uid, pend) in app.win.agents_ui.auto.due(now) {
         fire(app, uid, pend, now);
     }
 }
 
 fn fire(app: &mut App, uid: usize, pend: Pending, now: Instant) {
     let Some(s) = sessions(app).into_iter().find(|s| s.uid == uid) else { return };
-    let typed_since = app.wm.locate_pane(uid).and_then(|(ti, pi)| app.wm.tabs[ti].pane(pi)).and_then(|p| p.act.last_input).is_some_and(|t| t > pend.started);
-    let info = app.agents_ui.info.get(&uid).cloned().unwrap_or_default();
+    let typed_since = app.pane_ref(uid).and_then(|p| p.act.last_input).is_some_and(|t| t > pend.started);
+    let info = app.win.agents_ui.info.get(&uid).cloned().unwrap_or_default();
     let prompt = info.prompt.clone().filter(|_| info.settled);
     let current_sig = prompt.as_ref().map(policy::signature);
     let fresh = prompt.as_ref().and_then(|p| {
@@ -906,10 +906,10 @@ fn fire(app: &mut App, uid: usize, pend: Pending, now: Instant) {
         let env = PathEnv::new(root.as_deref(), s.cwd.as_deref(), home());
         Some(policy::decide(&loaded.policy, p, &env, sev))
     });
-    let enabled = app.agents_ui.auto.enabled(uid);
+    let enabled = app.win.agents_ui.auto.enabled(uid);
     match fire_check(&pend, enabled, s.waiting, typed_since, current_sig.as_deref(), fresh.as_ref()) {
         FireCheck::Drop(_) => {}
-        FireCheck::Dismiss(_) => app.agents_ui.auto.dismiss(uid, &pend.sig),
+        FireCheck::Dismiss(_) => app.win.agents_ui.auto.dismiss(uid, &pend.sig),
         FireCheck::Send(option) => {
             let Some(p) = prompt else { return };
             match super::console::send_verified(app, uid, &p, option, true) {
@@ -935,8 +935,8 @@ fn finish(app: &mut App, s: &Sess, pend: &Pending) {
         reason: pend.reason.clone(),
     };
     app.agents_rt.auto_host.log(&e);
-    app.agents_ui.policy_log.push(e);
-    app.agents_ui.auto.record(s.uid, pend.verdict);
+    app.win.agents_ui.policy_log.push(e);
+    app.win.agents_ui.auto.record(s.uid, pend.verdict);
     if pend.verdict == Verdict::Deny {
         let body = format!("{} was denied automatically: {} ({})", s.kind.name(), cut(&one_line(&pend.subject), 60), pend.reason);
         super::notify::post("Rift autopilot", &body, app.config.agents.sound);
@@ -946,13 +946,13 @@ fn finish(app: &mut App, s: &Sess, pend: &Pending) {
 }
 
 pub fn toggle_global(app: &mut App) {
-    let on = !app.agents_ui.auto.global();
-    app.agents_ui.auto.set_global(on);
+    let on = !app.win.agents_ui.auto.global();
+    app.win.agents_ui.auto.set_global(on);
     toast(app, if on { "Autopilot on for all agents (Critical is never auto-approved)" } else { "Autopilot off for all agents" });
 }
 
 pub fn toggle_agent(app: &mut App, uid: usize) {
-    let on = app.agents_ui.auto.toggle_agent(uid);
+    let on = app.win.agents_ui.auto.toggle_agent(uid);
     let name = app.agents.session(uid).map_or("agent", |s| s.kind.name());
     let msg = format!("Autopilot {} for {name}", if on { "on" } else { "off" });
     toast(app, msg);
@@ -960,7 +960,7 @@ pub fn toggle_agent(app: &mut App, uid: usize) {
 
 /// A click on a card's autopilot line: stop the countdown, else flip the switch.
 pub fn click_card(app: &mut App, uid: usize) {
-    if app.agents_ui.auto.cancel(uid) {
+    if app.win.agents_ui.auto.cancel(uid) {
         app.request_redraw();
     } else {
         toggle_agent(app, uid);
@@ -969,14 +969,14 @@ pub fn click_card(app: &mut App, uid: usize) {
 
 pub fn open_log(app: &mut App) {
     let file = app.agents_rt.auto_host.paths.log.clone();
-    app.agents_ui.policy_log.open(&file);
+    app.win.agents_ui.policy_log.open(&file);
     app.request_redraw();
 }
 
 /// "Always allow this": show the rule text, add it on confirmation.
 pub fn always_allow(app: &mut App, uid: usize) {
     let Some(s) = sessions(app).into_iter().find(|s| s.uid == uid) else { return };
-    let Some(info) = app.agents_ui.info.get(&uid).cloned() else { return };
+    let Some(info) = app.win.agents_ui.info.get(&uid).cloned() else { return };
     let Some(p) = info.prompt else { return toast(app, "No approval prompt on this card") };
     let sev = match severity_of(&info.risk) {
         Some(s) => s,
@@ -1003,7 +1003,7 @@ pub fn always_allow(app: &mut App, uid: usize) {
         lines.push(String::new());
     }
     lines.push("Autopilot still has to be on for the rule to act, and Critical commands are never auto-approved.".into());
-    app.confirm.push(crate::ui::confirm::ConfirmRequest {
+    app.win.confirm.push(crate::ui::confirm::ConfirmRequest {
         title: "Always allow this?".into(),
         badge: Some(("POLICY".into(), Tone::Accent)),
         lines,
@@ -1069,8 +1069,8 @@ pub fn edit_policy(app: &mut App) {
 pub fn mcp_decision(app: &mut App, pane_id: usize, command: &str, cwd: Option<&str>, critical: Option<bool>) -> McpAuto {
     let owner = app.agents.session(pane_id).map(|s| (s.pane_uid, s.kind, s.git_root.clone()));
     let enabled = match &owner {
-        Some((uid, ..)) => app.agents_ui.auto.enabled(*uid),
-        None => app.agents_ui.auto.global(),
+        Some((uid, ..)) => app.win.agents_ui.auto.enabled(*uid),
+        None => app.win.agents_ui.auto.global(),
     };
     if !enabled {
         return McpAuto::Ask;
@@ -1100,9 +1100,9 @@ pub fn mcp_record(app: &mut App, pane_id: usize, command: &str, verdict: Verdict
         reason: d.reason.clone(),
     };
     app.agents_rt.auto_host.log(&e);
-    app.agents_ui.policy_log.push(e);
+    app.win.agents_ui.policy_log.push(e);
     if let Some(uid) = owner {
-        app.agents_ui.auto.record(uid, verdict);
+        app.win.agents_ui.auto.record(uid, verdict);
     }
 }
 

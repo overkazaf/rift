@@ -27,6 +27,11 @@ impl Welcome {
         }
     }
 
+    /// Closed guide (windows after the first never show the first-run guide).
+    pub fn hidden() -> Self {
+        Self { visible: false, page: 0, total_pages: 4 }
+    }
+
     pub fn toggle(&mut self) {
         self.visible = !self.visible;
         self.page = 0;

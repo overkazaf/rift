@@ -88,6 +88,16 @@ impl AgentsUi {
         Self::default()
     }
 
+    /// Exchange the process-wide parts of the dock (`info`: per-agent cards,
+    /// `auto`: autopilot switches and countdowns) with `other`. The app calls
+    /// this when the active window changes, so these parts always sit in the
+    /// active window's `AgentsUi` and behave as global state, while the rest
+    /// (visibility, selection, scroll, composer, hit areas) stays per window.
+    pub fn take_shared_from(&mut self, other: &mut AgentsUi) {
+        std::mem::swap(&mut self.info, &mut other.info);
+        std::mem::swap(&mut self.auto, &mut other.auto);
+    }
+
     /// Show / hide. Showing focuses the dock so the keyboard works at once.
     pub fn toggle(&mut self) {
         self.visible = !self.visible;
@@ -635,8 +645,14 @@ pub struct TabBadge {
 }
 
 pub fn tab_badges(reg: &AgentRegistry, tab_count: usize) -> Vec<TabBadge> {
+    tab_badges_in(reg, 0, tab_count)
+}
+
+/// Badges of window `win` only: the registry spans all windows, whose tab
+/// indexes are unrelated.
+pub fn tab_badges_in(reg: &AgentRegistry, win: u64, tab_count: usize) -> Vec<TabBadge> {
     let mut v = vec![TabBadge::default(); tab_count];
-    for s in reg.sessions().iter().filter(|s| s.state.is_live()) {
+    for s in reg.sessions().iter().filter(|s| s.state.is_live() && crate::app::windows::pane_window(s.pane_uid) == win) {
         if let Some(b) = v.get_mut(s.tab_index) {
             b.count += 1;
             b.attention |= s.needs_attention;
@@ -658,8 +674,8 @@ fn dot(cx: &mut Ctx, x: usize, y: usize, d: usize, c: Rgb, alpha: u8) {
 
 /// Badges on the tab bar: an accent dot + count, amber and pulsing when any
 /// agent in the tab needs you. Drawn into the left padding of each tab.
-pub fn draw_tab_badges(buf: &mut [u32], w: usize, h: usize, font: &mut FontManager, theme: &Theme, tab_bar_h: usize, reg: &AgentRegistry, tab_count: usize, t: f32) {
-    let badges = tab_badges(reg, tab_count);
+pub fn draw_tab_badges(buf: &mut [u32], w: usize, h: usize, font: &mut FontManager, theme: &Theme, tab_bar_h: usize, reg: &AgentRegistry, win: u64, tab_count: usize, t: f32) {
+    let badges = tab_badges_in(reg, win, tab_count);
     if badges.iter().all(|b| b.count == 0) {
         return;
     }

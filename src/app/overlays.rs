@@ -29,12 +29,12 @@ use super::App;
 /// Returns true if the event was consumed.
 pub fn try_intercept(app: &mut App, event: &KeyEvent, event_loop: &ActiveEventLoop) -> bool {
     // Consent / paste / host-key confirmations beat everything.
-    if app.confirm.visible() {
+    if app.win.confirm.visible() {
         return handle_confirm(app, event);
     }
     // Preview-Then-Accept danger confirmation — absolute highest priority.
     // Nothing should be able to bypass an unconfirmed dangerous command.
-    if app.exec_preview.visible {
+    if app.win.exec_preview.visible {
         return handle_exec_preview(app, event);
     }
     // The queue countdown: Esc pauses the queue instead of reaching the agent.
@@ -43,22 +43,22 @@ pub fn try_intercept(app: &mut App, event: &KeyEvent, event_loop: &ActiveEventLo
         return true;
     }
     // Workflow overlays (wizard, queue editor, compare) are modal.
-    if app.workflows.overlay_visible() && !app.command_palette.visible {
+    if app.workflows.overlay_visible() && !app.win.command_palette.visible {
         return handle_workflow(app, event);
     }
     // TimeWarp browser has highest priority
-    if app.timewarp_browser.active {
+    if app.win.timewarp_browser.active {
         return handle_timewarp(app, event);
     }
     // Right-click context menu and inline tab rename are modal for the keyboard.
-    if app.mui.menu.visible {
-        return super::mouse::handle_menu_key(app, event, event_loop);
+    if app.win.mui.menu.visible {
+        return super::mouse::handle_menu_key(app, event);
     }
-    if app.mui.tabs.editor.is_some() {
+    if app.win.mui.tabs.editor.is_some() {
         return super::tabs::handle_key(app, event);
     }
     // WebView address bar editing
-    if app.browser.editing {
+    if app.win.browser.editing {
         return crate::network::browser::handle_key(app, event);
     }
     // UI Gallery (visual QA page)
@@ -70,86 +70,86 @@ pub fn try_intercept(app: &mut App, event: &KeyEvent, event_loop: &ActiveEventLo
         return true;
     }
     // Observer summary dismissal
-    if app.observer_summary.is_some() {
+    if app.win.observer_summary.is_some() {
         if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
-            app.observer_summary = None;
+            app.win.observer_summary = None;
             app.request_redraw();
         }
         return true; // consume all keys while summary visible
     }
-    if app.welcome.visible {
+    if app.win.welcome.visible {
         return handle_welcome(app, event);
     }
-    if app.prefs.visible {
+    if app.win.prefs.visible {
         return handle_prefs(app, event);
     }
-    if app.ssh_dialog.visible {
+    if app.win.ssh_dialog.visible {
         return handle_ssh(app, event);
     }
-    if app.webview_dialog.visible {
+    if app.win.webview_dialog.visible {
         return handle_webview_dialog(app, event);
     }
-    if app.compare_view.visible {
+    if app.win.compare_view.visible {
         return handle_compare(app, event);
     }
     // Command Palette (Cmd+P) — takes priority over the scrollback search overlay
-    if app.command_palette.visible {
+    if app.win.command_palette.visible {
         return handle_command_palette(app, event, event_loop);
     }
-    if app.search.visible {
+    if app.win.search.visible {
         return handle_search(app, event);
     }
-    if app.file_manager.visible {
+    if app.win.file_manager.visible {
         return handle_file_manager(app, event);
     }
-    if app.git_panel.visible {
+    if app.win.git_panel.visible {
         return handle_git_panel(app, event);
     }
-    if app.cicd.visible {
+    if app.win.cicd.visible {
         return handle_cicd(app, event);
     }
-    if app.heatmap.visible {
+    if app.win.heatmap.visible {
         return handle_heatmap(app, event);
     }
-    if app.docker.visible {
+    if app.win.docker.visible {
         return handle_docker(app, event);
     }
-    if app.network_monitor.visible {
+    if app.win.network_monitor.visible {
         return handle_netmon(app, event);
     }
-    if app.process_tree.visible {
+    if app.win.process_tree.visible {
         return handle_proctree(app, event);
     }
     if app.mcp.overlay.visible {
         return handle_mcp_activity(app, event);
     }
-    if app.agents_ui.policy_log.visible {
+    if app.win.agents_ui.policy_log.visible {
         return handle_policy_log(app, event);
     }
     if crate::review::visible(app) {
         return handle_review(app, event);
     }
-    if app.system_info.visible {
+    if app.win.system_info.visible {
         return handle_sysinfo(app, event);
     }
-    if app.port_dashboard.visible {
+    if app.win.port_dashboard.visible {
         return handle_port_dashboard(app, event);
     }
-    if app.regex_playground.visible {
+    if app.win.regex_playground.visible {
         return handle_regex_playground(app, event);
     }
     // Docked AI chat: keys go to its composer while it has focus; chords it
     // doesn't use (Cmd+T, Cmd+P, ...) fall through to the global shortcuts.
-    if app.agents_ui.focused && crate::agents::runtime::handle_key(app, event) {
+    if app.win.agents_ui.focused && crate::agents::runtime::handle_key(app, event) {
         return true;
     }
-    if app.chat.focused && crate::ai::chat::handle_key(app, event) {
+    if app.win.chat.focused && crate::ai::chat::handle_key(app, event) {
         return true;
     }
-    if app.history.visible {
+    if app.win.history.visible {
         return handle_history(app, event);
     }
-    if app.autocomplete.visible {
+    if app.win.autocomplete.visible {
         return handle_autocomplete(app, event);
     }
     false
@@ -166,7 +166,7 @@ fn handle_confirm(app: &mut App, event: &KeyEvent) -> bool {
         _ => None,
     };
     if let Some(k) = k {
-        if let Some((req, choice)) = app.confirm.handle_key(k) {
+        if let Some((req, choice)) = app.win.confirm.handle_key(k) {
             crate::ui::confirm::resolve(app, req, choice);
         }
         app.request_redraw();
@@ -188,12 +188,12 @@ fn handle_exec_preview(app: &mut App, event: &KeyEvent) -> bool {
         _ => None,
     };
     if let Some(k) = ek {
-        if let Some(action) = app.exec_preview.handle_key(k) {
+        if let Some(action) = app.win.exec_preview.handle_key(k) {
             match action {
                 ExecPreviewAction::Execute => {
-                    app.wm.active_pane_mut().write(b"\r");
-                    if app.wm.process_all_output() {
-                        app.wm.flush_all_responses();
+                    app.win.wm.active_pane_mut().write(b"\r");
+                    if app.win.wm.process_all_output() {
+                        app.win.wm.flush_all_responses();
                     }
                 }
                 ExecPreviewAction::Cancel => {}
@@ -214,7 +214,7 @@ fn handle_welcome(app: &mut App, event: &KeyEvent) -> bool {
         Key::Character(ref s) if s.eq_ignore_ascii_case("q") => WelcomeKey::Q,
         _ => WelcomeKey::Right,
     };
-    app.welcome.handle_key(wk);
+    app.win.welcome.handle_key(wk);
     app.request_redraw();
     true
 }
@@ -233,32 +233,28 @@ fn handle_prefs(app: &mut App, event: &KeyEvent) -> bool {
     };
 
     if let Some(pk) = pk {
-        if let Some(action) = app.prefs.handle_key(pk) {
+        if let Some(action) = app.win.prefs.handle_key(pk) {
             match action {
                 PrefsAction::ThemeChanged(ref name) => {
                     if let Some(theme) = crate::config::Config::theme_by_name(name) {
                         app.config.theme_name = name.clone();
-                        app.renderer.set_theme(theme);
+                        app.set_theme_all(theme);
                     }
                 }
                 PrefsAction::FontSizeChanged(size) => {
                     app.config.font_size = size;
-                    if let Some(window) = &app.window {
-                        let scale = window.scale_factor();
-                        let physical = size * scale as f32;
-                        let font_path = crate::config::resolve_font_path(&app.config);
-                        app.renderer.reinit_font(&font_path, physical);
-                        let ws = window.inner_size();
-                        super::lifecycle::handle_resize(app, ws.width, ws.height);
-                    }
+                    super::shortcuts::reinit_font_from_config(app);
                 }
                 PrefsAction::OpacityChanged(v) => {
-                    app.renderer.opacity = v;
                     app.config.opacity = v;
-                    #[cfg(target_os = "macos")]
-                    if let Some(w) = &app.window {
-                        crate::platform::macos::apply_transparency(w, v as f64);
+                    for ws in app.all_window_states_mut() {
+                        ws.renderer.opacity = v;
+                        #[cfg(target_os = "macos")]
+                        if let Some(w) = &ws.window {
+                            crate::platform::macos::apply_transparency(w, v as f64);
+                        }
                     }
+                    app.request_redraw_all();
                 }
                 PrefsAction::SaveConfig => {
                     crate::config::toml::save_config(&app.config);
@@ -270,10 +266,10 @@ fn handle_prefs(app: &mut App, event: &KeyEvent) -> bool {
     }
 
     // Ctrl+Shift+, can close prefs
-    if app.modifiers.control_key() && app.modifiers.shift_key() {
+    if app.win.modifiers.control_key() && app.win.modifiers.shift_key() {
         if let Key::Character(ref s) = event.logical_key {
             if s == "," || s == "<" {
-                app.prefs.toggle();
+                app.win.prefs.toggle();
                 return true;
             }
         }
@@ -295,7 +291,7 @@ fn handle_ssh(app: &mut App, event: &KeyEvent) -> bool {
         _ => None,
     };
     if let Some(k) = sdk {
-        if let Some(req) = app.ssh_dialog.handle_key(k) {
+        if let Some(req) = app.win.ssh_dialog.handle_key(k) {
             log::info!("SSH dialog: connecting to {}@{}:{} (alias: {})", req.user, req.host, req.port, req.alias);
             super::shortcuts::do_ssh_connect(app, req);
         }
@@ -306,23 +302,23 @@ fn handle_ssh(app: &mut App, event: &KeyEvent) -> bool {
 
 fn handle_webview_dialog(app: &mut App, event: &KeyEvent) -> bool {
     // Cmd+V paste, Cmd+C copy, Cmd+X cut, Cmd+A select all
-    if app.modifiers.super_key() {
+    if app.win.modifiers.super_key() {
         if let Some(ref s) = addr_bar_key_char(event) {
             match s.as_str() {
                 "v" => {
                     if let Some(text) = crate::window::selection::paste_from_clipboard() {
                         let clean = crate::window::selection::sanitize_paste(text.lines().next().unwrap_or(""), false);
                         for c in clean.chars() {
-                            app.webview_dialog.handle_key(WvDialogKey::Char(c));
+                            app.win.webview_dialog.handle_key(WvDialogKey::Char(c));
                         }
                     }
                 }
                 "c" => {
-                    crate::window::selection::copy_to_clipboard(&app.webview_dialog.url);
+                    crate::window::selection::copy_to_clipboard(&app.win.webview_dialog.url);
                 }
                 "x" => {
-                    crate::window::selection::copy_to_clipboard(&app.webview_dialog.url);
-                    app.webview_dialog.url.clear();
+                    crate::window::selection::copy_to_clipboard(&app.win.webview_dialog.url);
+                    app.win.webview_dialog.url.clear();
                 }
                 "a" => {}
                 _ => {}
@@ -340,7 +336,7 @@ fn handle_webview_dialog(app: &mut App, event: &KeyEvent) -> bool {
         _ => None,
     };
     if let Some(k) = wk {
-        if let Some(url) = app.webview_dialog.handle_key(k) {
+        if let Some(url) = app.win.webview_dialog.handle_key(k) {
             super::shortcuts::open_webview(app, &url);
         }
         app.request_redraw();
@@ -349,31 +345,31 @@ fn handle_webview_dialog(app: &mut App, event: &KeyEvent) -> bool {
 }
 
 fn handle_timewarp(app: &mut App, event: &KeyEvent) -> bool {
-    let max = app.timewarp.snapshot_count();
+    let max = app.win.timewarp.snapshot_count();
     match event.logical_key {
         Key::Named(NamedKey::ArrowLeft) => {
-            if app.modifiers.shift_key() {
-                app.timewarp_browser.jump_back(10, max);
+            if app.win.modifiers.shift_key() {
+                app.win.timewarp_browser.jump_back(10, max);
             } else {
-                app.timewarp_browser.step_back(max);
+                app.win.timewarp_browser.step_back(max);
             }
         }
         Key::Named(NamedKey::ArrowRight) => {
-            if app.modifiers.shift_key() {
-                app.timewarp_browser.jump_forward(10);
+            if app.win.modifiers.shift_key() {
+                app.win.timewarp_browser.jump_forward(10);
             } else {
-                app.timewarp_browser.step_forward();
+                app.win.timewarp_browser.step_forward();
             }
         }
         Key::Named(NamedKey::Escape) => {
-            app.timewarp_browser.exit();
+            app.win.timewarp_browser.exit();
         }
         // Ctrl+Shift+Z also exits
         _ => {
-            if app.modifiers.control_key() && app.modifiers.shift_key() {
+            if app.win.modifiers.control_key() && app.win.modifiers.shift_key() {
                 if let Key::Character(ref s) = event.logical_key {
                     if s.eq_ignore_ascii_case("z") {
-                        app.timewarp_browser.exit();
+                        app.win.timewarp_browser.exit();
                     }
                 }
             }
@@ -390,7 +386,7 @@ fn handle_compare(app: &mut App, event: &KeyEvent) -> bool {
         Key::Named(NamedKey::ArrowDown) => CompareKey::Down,
         _ => return true, // only Esc closes; other keys are swallowed
     };
-    app.compare_view.handle_key(ck);
+    app.win.compare_view.handle_key(ck);
     app.request_redraw();
     true
 }
@@ -405,17 +401,17 @@ fn handle_search(app: &mut App, event: &KeyEvent) -> bool {
         _ => None,
     };
     if let Some(k) = sk {
-        if let Some(action) = app.search.handle_key(k) {
+        if let Some(action) = app.win.search.handle_key(k) {
             match action {
                 SearchAction::UpdateSearch => {
-                    let pane = app.wm.active_pane();
-                    app.search.search(&pane.terminal.scrollback, &pane.terminal.grid);
+                    let pane = app.win.wm.active_pane();
+                    app.win.search.search(&pane.terminal.scrollback, &pane.terminal.grid);
                 }
                 SearchAction::JumpToMatch(idx) => {
-                    if let Some(m) = app.search.matches.get(idx) {
+                    if let Some(m) = app.win.search.matches.get(idx) {
                         let row = m.row;
                         let _ = (m.col_start, m.col_end);
-                        let pane = app.wm.active_pane_mut();
+                        let pane = app.win.wm.active_pane_mut();
                         let sb_len = pane.terminal.scrollback_len();
                         if row < sb_len {
                             let offset = sb_len - row;
@@ -435,36 +431,36 @@ fn handle_search(app: &mut App, event: &KeyEvent) -> bool {
 fn handle_autocomplete(app: &mut App, event: &KeyEvent) -> bool {
     match event.logical_key {
         Key::Named(NamedKey::Tab) | Key::Named(NamedKey::ArrowDown) => {
-            app.autocomplete.select_next();
+            app.win.autocomplete.select_next();
             app.request_redraw();
             return true;
         }
         Key::Named(NamedKey::ArrowUp) => {
-            app.autocomplete.select_prev();
+            app.win.autocomplete.select_prev();
             app.request_redraw();
             return true;
         }
         Key::Named(NamedKey::Enter) => {
-            if let Some(text) = app.autocomplete.accept() {
-                let terminal = &app.wm.active_pane().terminal;
+            if let Some(text) = app.win.autocomplete.accept() {
+                let terminal = &app.win.wm.active_pane().terminal;
                 let row = terminal.cursor_row;
                 let col = terminal.cursor_col;
                 let line: String = crate::terminal::grid::cells_text(&terminal.grid[row][..col.min(terminal.grid[row].len())]);
                 let current_word = line.split_whitespace().last().unwrap_or("");
                 let mut out = vec![0x7fu8; current_word.len()];
                 out.extend_from_slice(text.as_bytes());
-                app.wm.active_pane_mut().write(&out);
+                app.win.wm.active_pane_mut().write(&out);
             }
             app.request_redraw();
             return true;
         }
         Key::Named(NamedKey::Escape) => {
-            app.autocomplete.dismiss();
+            app.win.autocomplete.dismiss();
             app.request_redraw();
             return true;
         }
         _ => {
-            app.autocomplete.dismiss();
+            app.win.autocomplete.dismiss();
             return false; // fall through to normal handling
         }
     }
@@ -483,15 +479,15 @@ fn handle_history(app: &mut App, event: &KeyEvent) -> bool {
         _ => None,
     };
     if let Some(k) = hk {
-        if let Some(action) = app.history.handle_key(k) {
+        if let Some(action) = app.win.history.handle_key(k) {
             match action {
                 HistoryAction::Execute(cmd) => {
                     let cmd = crate::window::selection::sanitize_paste(&cmd, false);
-                    app.wm.active_pane_mut().write(format!("{cmd}\n").as_bytes());
+                    app.win.wm.active_pane_mut().write(format!("{cmd}\n").as_bytes());
                 }
                 HistoryAction::Insert(cmd) => {
                     let cmd = crate::window::selection::sanitize_paste(&cmd, false);
-                    app.wm.active_pane_mut().write(cmd.as_bytes());
+                    app.win.wm.active_pane_mut().write(cmd.as_bytes());
                 }
             }
         }
@@ -503,9 +499,10 @@ fn handle_history(app: &mut App, event: &KeyEvent) -> bool {
 /// Open the command palette with fresh dynamic entries (tabs, saved SSH hosts).
 pub fn open_command_palette(app: &mut App) {
     let ctx = PaletteContext {
-        tabs: app.wm.tabs.iter().map(|t| t.display_title().to_string()).collect(),
-        active_tab: app.wm.active_tab,
+        tabs: app.win.wm.tabs.iter().map(|t| t.display_title().to_string()).collect(),
+        active_tab: app.win.wm.active_tab,
         ssh_hosts: app
+            .win
             .ssh_dialog
             .saved_hosts()
             .into_iter()
@@ -515,32 +512,32 @@ pub fn open_command_palette(app: &mut App) {
         models: crate::ai::local::picker::current_options(app),
         agents: crate::agents::runtime::installed(app),
         in_git_repo: {
-            let p = app.wm.active_pane();
+            let p = app.win.wm.active_pane();
             p.terminal.cwd.as_deref().is_some_and(|c| crate::agents::git::repo_info(std::path::Path::new(c)).is_some())
         },
         workflows: crate::workflow::palette_user_templates(app),
     };
-    app.command_palette.open(ctx);
+    app.win.command_palette.open(ctx);
 }
 
 /// Apply a pending theme live-preview (or rollback) requested by the palette.
 /// The committed theme stays in `app.config`, so a rollback just re-applies it.
 fn sync_palette_preview(app: &mut App) {
-    match app.command_palette.take_preview() {
+    match app.win.command_palette.take_preview() {
         Some(Preview::Theme(name)) => {
             if let Some(theme) = crate::config::Config::theme_by_name(&name) {
-                app.renderer.set_theme(theme);
+                app.win.renderer.set_theme(theme);
             }
         }
-        Some(Preview::Restore) => app.renderer.set_theme(app.config.theme.clone()),
+        Some(Preview::Restore) => app.win.renderer.set_theme(app.config.theme.clone()),
         None => {}
     }
 }
 
 fn handle_command_palette(app: &mut App, event: &KeyEvent, event_loop: &ActiveEventLoop) -> bool {
-    let cmd = app.modifiers.super_key();
-    let ctrl = app.modifiers.control_key();
-    let alt = app.modifiers.alt_key();
+    let cmd = app.win.modifiers.super_key();
+    let ctrl = app.win.modifiers.control_key();
+    let alt = app.win.modifiers.alt_key();
     let mut paste: Option<String> = None;
     let pk = match event.logical_key {
         Key::Named(NamedKey::Escape) => Some(PaletteKey::Escape),
@@ -591,11 +588,11 @@ fn handle_command_palette(app: &mut App, event: &KeyEvent, event_loop: &ActiveEv
         // Single-line input: take the first line only, minus control chars.
         let first = crate::window::selection::sanitize_paste(text.lines().next().unwrap_or(""), false);
         for c in first.chars() {
-            let _ = app.command_palette.handle_key(PaletteKey::Char(c));
+            let _ = app.win.command_palette.handle_key(PaletteKey::Char(c));
         }
     }
     if let Some(k) = pk {
-        if let Some(action) = app.command_palette.handle_key(k) {
+        if let Some(action) = app.win.command_palette.handle_key(k) {
             dispatch_palette_action(app, action, event_loop);
         }
     }
@@ -606,8 +603,8 @@ fn handle_command_palette(app: &mut App, event: &KeyEvent, event_loop: &ActiveEv
 
 /// Mouse hover over the palette: highlight the row under the cursor.
 pub fn palette_cursor_moved(app: &mut App) {
-    let (x, y) = (app.cursor_x, app.cursor_y);
-    if app.command_palette.mouse_move(x, y) {
+    let (x, y) = (app.win.cursor_x, app.win.cursor_y);
+    if app.win.command_palette.mouse_move(x, y) {
         sync_palette_preview(app);
         app.request_redraw();
     }
@@ -616,9 +613,9 @@ pub fn palette_cursor_moved(app: &mut App) {
 /// Left click: run the row under the cursor (Cmd+click keeps the palette
 /// open where sensible); clicking outside the panel closes it.
 pub fn palette_click(app: &mut App, event_loop: &ActiveEventLoop) {
-    let (x, y) = (app.cursor_x, app.cursor_y);
-    let keep = app.modifiers.super_key();
-    if let Some(action) = app.command_palette.mouse_click(x, y, keep) {
+    let (x, y) = (app.win.cursor_x, app.win.cursor_y);
+    let keep = app.win.modifiers.super_key();
+    if let Some(action) = app.win.command_palette.mouse_click(x, y, keep) {
         dispatch_palette_action(app, action, event_loop);
     }
     sync_palette_preview(app);
@@ -627,7 +624,7 @@ pub fn palette_click(app: &mut App, event_loop: &ActiveEventLoop) {
 
 /// Wheel over the palette scrolls its list; positive `lines` scrolls up.
 pub fn palette_wheel(app: &mut App, lines: i32) {
-    app.command_palette.scroll_lines(lines);
+    app.win.command_palette.scroll_lines(lines);
     app.request_redraw();
 }
 
@@ -636,7 +633,7 @@ fn apply_theme(app: &mut App, name: &str) {
     if let Some(theme) = crate::config::Config::theme_by_name(name) {
         app.config.theme = theme.clone();
         app.config.theme_name = name.to_string();
-        app.renderer.set_theme(theme);
+        app.set_theme_all(theme);
     }
 }
 
@@ -653,7 +650,7 @@ fn dispatch_palette_action(app: &mut App, action: PaletteAction, event_loop: &Ac
         }
         PaletteAction::OpenUrl(input) => crate::network::browser::open(app, &input),
         PaletteAction::Ssh(target) => {
-            let saved = app.ssh_dialog.saved_hosts().into_iter().find(|h| h.alias == target);
+            let saved = app.win.ssh_dialog.saved_hosts().into_iter().find(|h| h.alias == target);
             let req = saved.or_else(|| {
                 let (user, host, port) = parse_ssh_spec(&target)?;
                 let user = user
@@ -668,11 +665,11 @@ fn dispatch_palette_action(app: &mut App, action: PaletteAction, event_loop: &Ac
         }
         PaletteAction::Cd(path) => {
             let line = format!("cd {}\n", shell_quote_path(&path));
-            app.wm.active_pane_mut().write(line.as_bytes());
+            app.win.wm.active_pane_mut().write(line.as_bytes());
         }
         PaletteAction::Shell(cmd) => {
             let cmd = crate::window::selection::sanitize_paste(&cmd, false);
-            app.wm.active_pane_mut().write(format!("{cmd}\n").as_bytes());
+            app.win.wm.active_pane_mut().write(format!("{cmd}\n").as_bytes());
         }
         PaletteAction::AskAi(question) => {
             // Open the chat sidebar and send the question right away.
@@ -680,19 +677,19 @@ fn dispatch_palette_action(app: &mut App, action: PaletteAction, event_loop: &Ac
             crate::ai::hub::ask(app, req);
         }
         PaletteAction::SwitchTab(i) => {
-            if i < app.wm.tab_count() {
-                app.wm.switch_tab(i);
+            if i < app.win.wm.tab_count() {
+                app.win.wm.switch_tab(i);
                 super::shortcuts::sync_webview_for_tab(app);
                 app.update_title();
             }
         }
         PaletteAction::NextTab => {
-            app.wm.next_tab();
+            app.win.wm.next_tab();
             super::shortcuts::sync_webview_for_tab(app);
             app.update_title();
         }
         PaletteAction::PrevTab => {
-            app.wm.prev_tab();
+            app.win.wm.prev_tab();
             super::shortcuts::sync_webview_for_tab(app);
             app.update_title();
         }
@@ -719,12 +716,12 @@ fn handle_file_manager(app: &mut App, event: &KeyEvent) -> bool {
         _ => None,
     };
     if let Some(k) = fk {
-        if let Some(action) = app.file_manager.handle_key(k) {
+        if let Some(action) = app.win.file_manager.handle_key(k) {
             match action {
                 crate::tools::file_manager::FileManagerAction::OpenFile(path) => {
                     let cmd = format!("cat {}\n", path);
-                    app.wm.active_pane_mut().write(cmd.as_bytes());
-                    app.file_manager.toggle();
+                    app.win.wm.active_pane_mut().write(cmd.as_bytes());
+                    app.win.file_manager.toggle();
                 }
             }
         }
@@ -747,7 +744,7 @@ fn handle_git_panel(app: &mut App, event: &KeyEvent) -> bool {
         }
         _ => return true,
     };
-    app.git_panel.handle_key(gk);
+    app.win.git_panel.handle_key(gk);
     app.request_redraw();
     true
 }
@@ -763,7 +760,7 @@ fn handle_cicd(app: &mut App, event: &KeyEvent) -> bool {
         }
         _ => return true,
     };
-    app.cicd.handle_key(ck);
+    app.win.cicd.handle_key(ck);
     app.request_redraw();
     true
 }
@@ -773,7 +770,7 @@ fn handle_heatmap(app: &mut App, event: &KeyEvent) -> bool {
         Key::Named(NamedKey::Escape) => HeatmapKey::Escape,
         _ => return true, // only Esc closes; other keys are swallowed
     };
-    app.heatmap.handle_key(hk);
+    app.win.heatmap.handle_key(hk);
     app.request_redraw();
     true
 }
@@ -790,12 +787,12 @@ fn handle_docker(app: &mut App, event: &KeyEvent) -> bool {
         }
         _ => return true,
     };
-    if let Some(action) = app.docker.handle_key(dk) {
+    if let Some(action) = app.win.docker.handle_key(dk) {
         match action {
             DockerAction::RunCommand(cmd) => {
                 let cmd = crate::window::selection::sanitize_paste(&cmd, false);
-                app.wm.active_pane_mut().write(format!("{cmd}\n").as_bytes());
-                app.docker.toggle();
+                app.win.wm.active_pane_mut().write(format!("{cmd}\n").as_bytes());
+                app.win.docker.toggle();
             }
         }
     }
@@ -811,7 +808,7 @@ fn handle_netmon(app: &mut App, event: &KeyEvent) -> bool {
         }
         _ => return true,
     };
-    app.network_monitor.handle_key(key);
+    app.win.network_monitor.handle_key(key);
     app.request_redraw();
     true
 }
@@ -819,7 +816,7 @@ fn handle_netmon(app: &mut App, event: &KeyEvent) -> bool {
 /// Change Review overlay: modal, consumes every key.
 fn handle_review(app: &mut App, event: &KeyEvent) -> bool {
     use crate::review::ReviewKey;
-    if app.modifiers.super_key() || app.modifiers.control_key() {
+    if app.win.modifiers.super_key() || app.win.modifiers.control_key() {
         return true;
     }
     let key = match &event.logical_key {
@@ -848,7 +845,7 @@ fn handle_review(app: &mut App, event: &KeyEvent) -> bool {
 /// Workflow overlays: modal, consume every key.
 fn handle_workflow(app: &mut App, event: &KeyEvent) -> bool {
     use crate::workflow::ui::WKey;
-    let m = app.modifiers;
+    let m = app.win.modifiers;
     let named = |n: &NamedKey| -> Option<WKey> {
         Some(match n {
             NamedKey::Escape => WKey::Escape,
@@ -917,7 +914,7 @@ fn handle_policy_log(app: &mut App, event: &KeyEvent) -> bool {
         Key::Named(NamedKey::PageDown) => LogKey::PageDown,
         _ => return true,
     };
-    app.agents_ui.policy_log.handle_key(key);
+    app.win.agents_ui.policy_log.handle_key(key);
     app.request_redraw();
     true
 }
@@ -930,7 +927,7 @@ fn handle_proctree(app: &mut App, event: &KeyEvent) -> bool {
         }
         _ => return true,
     };
-    app.process_tree.handle_key(key);
+    app.win.process_tree.handle_key(key);
     app.request_redraw();
     true
 }
@@ -940,7 +937,7 @@ fn handle_sysinfo(app: &mut App, event: &KeyEvent) -> bool {
         Key::Named(NamedKey::Escape) => SysInfoKey::Escape,
         _ => return true,
     };
-    app.system_info.handle_key(key);
+    app.win.system_info.handle_key(key);
     app.request_redraw();
     true
 }
@@ -956,12 +953,12 @@ fn handle_port_dashboard(app: &mut App, event: &KeyEvent) -> bool {
         }
         _ => return true,
     };
-    if let Some(action) = app.port_dashboard.handle_key(key) {
+    if let Some(action) = app.win.port_dashboard.handle_key(key) {
         match action {
             PortAction::Kill(pid) => {
                 log::info!("Port Dashboard: killing pid {pid} (SIGTERM)");
                 crate::tools::port_dashboard::kill_pid(pid);
-                app.port_dashboard.refresh();
+                app.win.port_dashboard.refresh();
             }
         }
     }
@@ -970,7 +967,7 @@ fn handle_port_dashboard(app: &mut App, event: &KeyEvent) -> bool {
 }
 
 fn handle_regex_playground(app: &mut App, event: &KeyEvent) -> bool {
-    let ctrl = app.modifiers.control_key();
+    let ctrl = app.win.modifiers.control_key();
     let rk = match &event.logical_key {
         Key::Named(NamedKey::Escape) => Some(RegexKey::Escape),
         Key::Named(NamedKey::Backspace) => Some(RegexKey::Backspace),
@@ -984,7 +981,7 @@ fn handle_regex_playground(app: &mut App, event: &KeyEvent) -> bool {
         _ => None,
     };
     if let Some(k) = rk {
-        app.regex_playground.handle_key(k);
+        app.win.regex_playground.handle_key(k);
     }
     app.request_redraw();
     true

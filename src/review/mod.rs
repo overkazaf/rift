@@ -753,7 +753,7 @@ impl ParsedDiff {
 /// Directory to snapshot for `pane`: the event's git root / cwd, else the
 /// shell-reported cwd of the pane, else Rift's own working directory.
 fn resolve_dir(app: &App, pane: usize, git_root: Option<&str>, cwd: Option<&str>) -> PathBuf {
-    let pane_cwd = app.wm.tabs.iter().flat_map(|t| t.panes()).find(|p| p.id == pane).and_then(|p| p.terminal.cwd.clone());
+    let pane_cwd = app.pane_ref(pane).and_then(|p| p.terminal.cwd.clone());
     git_root
         .map(str::to_string)
         .or_else(|| cwd.map(str::to_string))
@@ -801,7 +801,7 @@ pub fn on_agent_event(app: &mut App, ev: &crate::agents::AgentEvent) {
 
 /// "Review: Mark Checkpoint" for the active pane.
 pub fn mark_checkpoint(app: &mut App) {
-    let pane = app.wm.active_pane().id;
+    let pane = app.win.wm.active_pane().id;
     let dir = resolve_dir(app, pane, None, None);
     app.review.mark(pane, dir);
     app.review.toast(Tone::Neutral, "Saving checkpoint\u{2026}");
@@ -810,7 +810,7 @@ pub fn mark_checkpoint(app: &mut App) {
 
 /// "Review: Changes Since Checkpoint" for the active pane.
 pub fn open_changes(app: &mut App) {
-    let pane = app.wm.active_pane().id;
+    let pane = app.win.wm.active_pane().id;
     open_pane(app, pane);
 }
 
@@ -827,14 +827,15 @@ pub fn poll(app: &mut App) {
     let due = app.review.last_prune.map_or(true, |t| t.elapsed() > Duration::from_secs(5));
     if due && !(app.review.logs.is_empty() && app.review.chips.is_empty()) {
         app.review.last_prune = Some(Instant::now());
-        let alive: Vec<usize> = app.wm.tabs.iter().flat_map(|t| t.panes()).map(|p| p.id).collect();
+        let alive: Vec<usize> = app.all_pane_ids();
         app.review.prune(&alive);
     }
 }
 
 /// Left click: chip on a pane opens its review. True when consumed.
 pub fn on_click(app: &mut App, x: usize, y: usize) -> bool {
-    match app.review.chip_at(x, y) {
+    // Chips of other windows' panes live at the same pixel coordinates.
+    match app.review.chip_at(x, y).filter(|p| crate::app::windows::pane_window(*p) == app.win.id) {
         Some(pane) => {
             open_pane(app, pane);
             true
@@ -916,7 +917,7 @@ fn confirm_revert(app: &mut App, plan: RevertPlan, all: bool) {
         lines.push(format!("  \u{2026} and {} more", plan.ops.len() - 6));
     }
     lines.push("Only files inside the repository are touched. A \"Before revert\" checkpoint is saved so you can undo this.".into());
-    app.confirm.push(ConfirmRequest {
+    app.win.confirm.push(ConfirmRequest {
         title: if all { "Revert all changes?".into() } else { "Revert this file?".into() },
         badge: Some(("DESTRUCTIVE".into(), Tone::Danger)),
         lines,

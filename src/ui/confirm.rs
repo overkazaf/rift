@@ -27,6 +27,8 @@ pub enum ConfirmAction {
     /// Autopilot policy: trust a repo's policy / add an "always allow" rule
     /// (button 0 = yes).
     Policy(Box<crate::agents::autopilot::PolicyConfirm>),
+    /// Close a window that still runs processes. Buttons: Close / Cancel.
+    CloseWindow { win: crate::app::windows::WinId, save_if_last: bool },
 }
 
 pub struct ConfirmRequest {
@@ -233,7 +235,7 @@ pub fn show_ai_consent(app: &mut App, plan: crate::ai::consent::PromptPlan) {
     }
     lines.push("\"Not now\" disables AI; change it later in config.toml ([ai] consent).".into());
     let private = plan.local.is_some();
-    app.confirm.push(ConfirmRequest {
+    app.win.confirm.push(ConfirmRequest {
         title: "Enable AI features?".into(),
         badge: Some(if private { ("LOCAL FIRST".into(), Tone::Success) } else { ("PRIVACY".into(), Tone::Warning) }),
         lines,
@@ -261,7 +263,7 @@ pub fn show_privacy_report(app: &mut App) {
         String::new(),
     ];
     lines.extend(privacy_rows(&usage::recent(12)));
-    app.confirm.push(ConfirmRequest {
+    app.win.confirm.push(ConfirmRequest {
         title: "AI Privacy Report".into(),
         badge: Some((if day.cloud_reqs == 0 { "0 B SENT" } else { "CLOUD USED" }.into(), if day.cloud_reqs == 0 { Tone::Success } else { Tone::Warning })),
         lines,
@@ -301,7 +303,7 @@ pub fn privacy_rows(entries: &[crate::ai::local::usage::Entry]) -> Vec<String> {
 pub fn show_paste_confirm(app: &mut App, text: String, bracketed: bool) {
     let n = text.lines().count().max(1);
     let preview: String = text.lines().next().unwrap_or("").chars().take(60).collect();
-    app.confirm.push(ConfirmRequest {
+    app.win.confirm.push(ConfirmRequest {
         title: format!("Paste {n} line{}?", if n == 1 { "" } else { "s" }),
         badge: None,
         lines: vec![
@@ -318,7 +320,7 @@ pub fn show_paste_confirm(app: &mut App, text: String, bracketed: bool) {
 
 /// A one-button, loud notice (e.g. SSH host key mismatch).
 pub fn show_notice(app: &mut App, title: &str, msg: &str) {
-    app.confirm.push(ConfirmRequest {
+    app.win.confirm.push(ConfirmRequest {
         title: title.into(),
         badge: Some(("DANGER".into(), Tone::Danger)),
         lines: vec![msg.into()],
@@ -340,7 +342,7 @@ pub fn show_ssh_host_key(app: &mut App, p: crate::network::ssh::session::HostKey
         lines.push("known_hosts has other key types for this host; verify this one out of band.".into());
     }
     lines.push("Trusting adds it to ~/.ssh/known_hosts and connects.".into());
-    app.confirm.push(ConfirmRequest {
+    app.win.confirm.push(ConfirmRequest {
         title: "Unknown SSH host".into(),
         badge: Some(("VERIFY".into(), Tone::Warning)),
         lines,
@@ -349,6 +351,22 @@ pub fn show_ssh_host_key(app: &mut App, p: crate::network::ssh::session::HostKey
         esc_choice: Some(1),
         tone: Tone::Warning,
         action: ConfirmAction::SshHostKey { reply: Some(p.reply) },
+    });
+}
+
+/// "Close window with 2 running processes?" (the default button keeps the window).
+pub fn show_close_window(app: &mut App, win: crate::app::windows::WinId, running: usize, save_if_last: bool) {
+    app.win.confirm.push(ConfirmRequest {
+        title: crate::app::window_ops::close_prompt(running),
+        badge: Some(("RUNNING".into(), Tone::Warning)),
+        lines: vec![
+            "Closing the window ends its shells and everything running in them.".into(),
+        ],
+        buttons: vec!["Close window".into(), "Cancel".into()],
+        default_sel: 1,
+        esc_choice: Some(1),
+        tone: Tone::Warning,
+        action: ConfirmAction::CloseWindow { win, save_if_last },
     });
 }
 
@@ -371,6 +389,12 @@ pub fn resolve(app: &mut App, req: ConfirmRequest, choice: Option<usize>) {
         ConfirmAction::ReviewRevert(plan) => crate::review::finish_revert(app, *plan, choice),
         ConfirmAction::Workflow(wf) => crate::workflow::resolve_confirm(app, *wf, choice),
         ConfirmAction::Policy(c) => crate::agents::autopilot::resolve_confirm(app, *c, choice),
+        ConfirmAction::CloseWindow { win, save_if_last } => {
+            if choice == Some(0) {
+                // Already confirmed: skip the process check.
+                crate::app::window_ops::request_close(app, win, false, save_if_last);
+            }
+        }
         ConfirmAction::SshHostKey { mut reply } => {
             if let Some(tx) = reply.take() {
                 let _ = tx.send(choice == Some(0));

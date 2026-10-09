@@ -32,12 +32,12 @@ fn say(app: &mut App, id: u64, tone: Tone, msg: impl Into<String>) {
     if let Some(b) = best_mut(app, id) {
         b.message = Some((tone, msg.clone()));
     }
-    app.blocks_ui.show_toast(msg);
+    app.win.blocks_ui.show_toast(msg);
     app.request_redraw();
 }
 
 fn notice(app: &mut App, title: &str, badge: &str, tone: Tone, text: &str) {
-    app.confirm.push(ConfirmRequest {
+    app.win.confirm.push(ConfirmRequest {
         title: title.to_string(),
         badge: Some((badge.to_string(), tone)),
         lines: text.lines().map(str::to_string).collect(),
@@ -116,7 +116,7 @@ pub(crate) fn on_job(app: &mut App, msg: JobMsg) {
                         lines.push(format!("The candidate has {} uncommitted path{}: they are committed on its own branch first.", pre.uncommitted, if pre.uncommitted == 1 { "" } else { "s" }));
                     }
                     lines.push("Your main worktree is clean and stays untouched if the merge conflicts: it is aborted automatically.".to_string());
-                    app.confirm.push(ConfirmRequest {
+                    app.win.confirm.push(ConfirmRequest {
                         title: format!("Merge {} into {}?", plan.label, pre.target),
                         badge: Some(("git merge --no-ff".into(), Tone::Warning)),
                         lines,
@@ -209,9 +209,9 @@ pub(crate) fn run_best_cmds(app: &mut App, id: u64, cmds: Vec<Cmd>) {
             }
             Cmd::CompareReady => {
                 app.workflows.open_compare = Some(id);
-                app.blocks_ui.show_toast("Best of N: every candidate finished. Opening the comparison");
+                app.win.blocks_ui.show_toast("Best of N: every candidate finished. Opening the comparison");
             }
-            Cmd::Abort(msg) => app.blocks_ui.show_toast(format!("Best of N: {msg}")),
+            Cmd::Abort(msg) => app.win.blocks_ui.show_toast(format!("Best of N: {msg}")),
         }
     }
     app.request_redraw();
@@ -252,7 +252,7 @@ fn begin_merge(app: &mut App, id: u64, idx: usize) {
         None
     };
     if let Some(w) = why {
-        app.blocks_ui.show_toast(w);
+        app.win.blocks_ui.show_toast(w);
         app.request_redraw();
         return;
     }
@@ -284,7 +284,7 @@ fn begin_discard(app: &mut App, id: u64, keep: usize, only_this: bool) {
     }
     let picks: Vec<usize> = if only_this { vec![keep] } else { (0..b.sm.cands.len()).filter(|i| *i != keep).collect() };
     if only_this && !b.sm.cands.get(keep).is_some_and(|c| c.merged) {
-        app.blocks_ui.show_toast("Only a merged candidate can be removed this way: press d to discard the others");
+        app.win.blocks_ui.show_toast("Only a merged candidate can be removed this way: press d to discard the others");
         app.request_redraw();
         return;
     }
@@ -296,7 +296,7 @@ fn begin_discard(app: &mut App, id: u64, keep: usize, only_this: bool) {
         })
         .collect();
     if items.is_empty() {
-        app.blocks_ui.show_toast("Nothing left to discard");
+        app.win.blocks_ui.show_toast("Nothing left to discard");
         app.request_redraw();
         return;
     }
@@ -314,7 +314,7 @@ fn begin_discard(app: &mut App, id: u64, keep: usize, only_this: bool) {
     lines.push("Runs for each: git worktree remove --force <dir> and git branch -D <branch>. Their panes are closed.".to_string());
     lines.push("Uncommitted work in those worktrees is lost.".to_string());
     let n = items.len();
-    app.confirm.push(ConfirmRequest {
+    app.win.confirm.push(ConfirmRequest {
         title: format!("Remove {n} candidate{}?", if n == 1 { "" } else { "s" }),
         badge: Some(("DELETES WORK".into(), Tone::Danger)),
         lines,
@@ -360,7 +360,7 @@ pub fn resolve_confirm(app: &mut App, wf: WfConfirm, choice: Option<usize>) {
             };
             // The agents hold their worktrees: close the panes first.
             for uid in panes {
-                if app.wm.locate_pane(uid).is_some() {
+                if app.pane_exists(uid) {
                     crate::agents::console::close_pane(app, uid);
                 }
             }
@@ -417,6 +417,6 @@ fn judge(app: &mut App, id: u64) {
     // The chat sidebar answers; leave the overlay so it is visible.
     app.workflows.ui.compare = None;
     crate::ai::hub::ask(app, req);
-    app.blocks_ui.show_toast("Asking the AI to judge. Reopen the comparison: palette > Workflow: Compare Candidates");
+    app.win.blocks_ui.show_toast("Asking the AI to judge. Reopen the comparison: palette > Workflow: Compare Candidates");
     app.request_redraw();
 }

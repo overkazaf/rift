@@ -170,7 +170,14 @@ fn handle_job(app: &mut App, job: Job) {
         start_run(app, reply, cell, pane_id, command);
         return;
     }
-    let r = tools::answer_read(&app.wm, &req).unwrap_or_else(|| Reply::err("unsupported request"));
+    let focused = app.windows.focused();
+    let views: Vec<tools::WinView> = app
+        .windows
+        .ids()
+        .iter()
+        .filter_map(|id| app.window_state(*id).map(|ws| tools::WinView { id: *id, focused: focused == Some(*id), wm: &ws.wm }))
+        .collect();
+    let r = tools::answer_read(&views, &req).unwrap_or_else(|| Reply::err("unsupported request"));
     let _ = reply.send(r);
 }
 
@@ -262,10 +269,11 @@ fn start_run(app: &mut App, reply: Sender<Reply>, cell: Arc<ApprovalCell>, pane_
         return refuse(&cell, &reply, "run_command is disabled ([mcp] allow_run = \"never\")");
     }
     let pending = app.mcp.pending.load(Ordering::SeqCst);
-    if let Err(msg) = approval::vet(&command, pane_state(&app.wm, pane_id), pending) {
+    let state = app.wm_of_pane(pane_id).and_then(|wm| pane_state(wm, pane_id));
+    if let Err(msg) = approval::vet(&command, state, pending) {
         return refuse(&cell, &reply, &msg);
     }
-    let (title, cwd) = match tools::pane_ref(&app.wm, pane_id) {
+    let (title, cwd) = match app.pane_ref(pane_id) {
         Some(p) => (p.title().map(str::to_string), p.terminal.cwd.clone()),
         None => return refuse(&cell, &reply, "no such pane"),
     };
@@ -284,7 +292,7 @@ fn start_run(app: &mut App, reply: Sender<Reply>, cell: Arc<ApprovalCell>, pane_
             let idx = run.run_index;
             finish_run(app, Box::new(run), Some(idx));
             // Non-blocking, and it replaces the generic "Ran command" toast.
-            app.blocks_ui.show_toast(format!("Autopilot approved `{}` from MCP ({})", short(&shown), d.rule));
+            app.win.blocks_ui.show_toast(format!("Autopilot approved `{}` from MCP ({})", short(&shown), d.rule));
             app.request_redraw();
             return;
         }
@@ -292,13 +300,13 @@ fn start_run(app: &mut App, reply: Sender<Reply>, cell: Arc<ApprovalCell>, pane_
             crate::agents::autopilot::mcp_record(app, pane_id, &shown, crate::agents::policy::Verdict::Deny, &d);
             finish_run(app, Box::new(run), Some(deny_index));
             crate::agents::notify::post("Rift autopilot", &format!("Denied an MCP command automatically: {} ({})", short(&shown), d.reason), app.config.agents.sound);
-            app.blocks_ui.show_toast(format!("Autopilot denied `{}` from MCP: {}", short(&shown), d.reason));
+            app.win.blocks_ui.show_toast(format!("Autopilot denied `{}` from MCP: {}", short(&shown), d.reason));
             app.request_redraw();
             return;
         }
         crate::agents::autopilot::McpAuto::Ask => {}
     }
-    app.confirm.push(ConfirmRequest {
+    app.win.confirm.push(ConfirmRequest {
         title: spec.title,
         badge: spec.badge,
         lines: spec.lines,
@@ -308,7 +316,7 @@ fn start_run(app: &mut App, reply: Sender<Reply>, cell: Arc<ApprovalCell>, pane_
         tone: spec.tone,
         action: ConfirmAction::McpRun(Box::new(run)),
     });
-    if let Some(w) = &app.window {
+    if let Some(w) = &app.win.window {
         let _ = w.request_user_attention(Some(winit::window::UserAttentionType::Informational));
     }
     app.request_redraw();
@@ -369,11 +377,17 @@ pub fn resolve_run(wm: &mut WindowManager, run: &PendingRun, choice: Option<usiz
 
 /// Called by `ui::confirm::resolve` when the modal is answered.
 pub fn finish_run(app: &mut App, run: Box<PendingRun>, choice: Option<usize>) {
-    let reply = resolve_run(&mut app.wm, &run, choice);
+    // The pane may be in any window; a vanished pane yields the usual
+    // "no longer exists" reply from the active window's lookup.
+    let owner = if app.wm_of_pane(run.pane_id).is_some() { crate::app::windows::pane_window(run.pane_id) } else { app.win.id };
+    let reply = match app.window_state_mut(owner) {
+        Some(ws) => resolve_run(&mut ws.wm, &run, choice),
+        None => resolve_run(&mut app.win.wm, &run, choice),
+    };
     let approved = reply.text.contains(r#""status":"approved""#);
     let _ = run.reply.send(reply);
     if approved {
-        app.blocks_ui.show_toast("Ran command from MCP client");
+        app.win.blocks_ui.show_toast("Ran command from MCP client");
     }
     app.request_redraw();
 }
@@ -493,7 +507,7 @@ mod tests {
                     unanswered.push(job); // the human never answers (reply sender stays alive)
                     continue;
                 }
-                let r = tools::answer_read(&wm, &job.req).unwrap();
+                let r = tools::answer_read(&[tools::WinView::only(&wm)], &job.req).unwrap();
                 let _ = job.reply.send(r);
                 let _ = &mut wm;
             }

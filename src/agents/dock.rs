@@ -203,9 +203,17 @@ pub fn metric_items(s: &AgentSession, info: Option<&PaneInfo>) -> Vec<(String, T
     v
 }
 
+/// "tab 2", or "win 2 · tab 1" for agents of the second and later windows.
+fn tab_label(s: &AgentSession) -> String {
+    match crate::app::windows::pane_window(s.pane_uid) {
+        0 => format!("tab {}", s.tab_index + 1),
+        w => format!("win {} \u{b7} tab {}", w + 1, s.tab_index + 1),
+    }
+}
+
 /// "Codex · tab 2" for the collision chip.
 fn other_label(o: &AgentSession) -> String {
-    format!("{} \u{b7} tab {}", o.kind.name(), o.tab_index + 1)
+    format!("{} \u{b7} {}", o.kind.name(), tab_label(o))
 }
 
 /// One timeline row: (glyph tone, "#3", duration, summary text, summary tone).
@@ -535,7 +543,7 @@ fn draw_header(cx: &mut Ctx, fr: &mut Frame, d: &CardData, left: usize, right: u
 fn draw_place(cx: &mut Ctx, d: &CardData, left: usize, right: usize, y: usize) {
     let tk = cx.tk;
     let s = d.s;
-    let tab = format!("tab {}", s.tab_index + 1);
+    let tab = tab_label(s);
     let tab_w = cx.tw(&tab);
     cx.text(right.saturating_sub(tab_w), y, &tab, tk.text_faint);
     let mut place = s.place();
@@ -1198,7 +1206,7 @@ mod tests {
         each_theme("agents-dock", |b, w, h, f, t| {
             let dock = Rect::new(0, 40, ui::dock_width(w, f.cell_width), h - 40);
             draw_dock(b, w, h, f, t, dock, &r, &mut ui, now, 0.3, "");
-            ui::draw_tab_badges(b, w, h, f, t, 40, &r, 3, 0.3);
+            ui::draw_tab_badges(b, w, h, f, t, 40, &r, 0, 3, 0.3);
             ui::draw_attention_borders(b, w, h, &[Rect::new(dock.right() + 4, 44, 400, 300)], t, 2, 0.3);
             assert!(ui.hits.iter().any(|(_, h)| matches!(h, Hit::Answer { uid: 2, option: 0 })), "approve button is clickable");
             assert!(ui.hits.iter().any(|(_, h)| *h == Hit::Edge));

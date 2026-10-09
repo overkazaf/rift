@@ -240,9 +240,13 @@ impl Review {
         height: usize,
         area: PaneRect,
         shortcut: &str,
+        global_ui: bool,
     ) {
-        self.chip_rects.clear();
-        let show_toast = self.toast.is_some() && !self.ui.visible;
+        // Rects of this window's panes only: other windows keep theirs.
+        let win = wm.window_id();
+        self.chip_rects.retain(|(p, _)| crate::app::windows::pane_window(*p) != win);
+        // The toast is process-wide: only the focused window shows it.
+        let show_toast = global_ui && self.toast.is_some() && !self.ui.visible;
         if self.chips.is_empty() && !show_toast {
             return;
         }

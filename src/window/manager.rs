@@ -2,6 +2,7 @@ use std::time::{Duration, Instant};
 use winit::event_loop::EventLoopProxy;
 
 use super::pane::{Pane, PtyKind};
+use crate::app::windows::pane_id;
 use super::tab::{MinSize, PaneNode, PaneRect, SplitDir, Tab};
 
 /// Total parse time per event-loop pass across all panes.
@@ -18,6 +19,8 @@ pub enum TabEvent {
 }
 
 pub struct WindowManager {
+    /// Stable id of the window this manager belongs to (0 when headless).
+    win: u64,
     pub tabs: Vec<Tab>,
     pub active_tab: usize,
     next_pane_id: usize,
@@ -36,12 +39,23 @@ pub struct WindowManager {
 
 impl WindowManager {
     pub fn new(proxy: EventLoopProxy<()>, cols: usize, rows: usize) -> Self {
-        let pane = Pane::new(0, cols, rows, proxy.clone());
+        Self::for_window(proxy, cols, rows, 0, None)
+    }
+
+    /// Manager of window `win` (see [`crate::app::windows`]): every pane id it
+    /// hands out carries the window id in its high bits, so ids stay unique
+    /// across windows and global registries (agents, MCP, review) can tell
+    /// which window owns a pane. Window 0 keeps the plain ids 0, 1, 2, ...
+    /// `cwd` is where the first shell starts.
+    pub fn for_window(proxy: EventLoopProxy<()>, cols: usize, rows: usize, win: u64, cwd: Option<&str>) -> Self {
+        let first = pane_id(win, 0);
+        let pane = Pane::new_in(first, cols, rows, proxy.clone(), cwd);
         let tab = Tab::new(pane);
         Self {
+            win,
             tabs: vec![tab],
             active_tab: 0,
-            next_pane_id: 1,
+            next_pane_id: first + 1,
             proxy: Some(proxy),
             last_area: PaneRect { x: 0, y: 0, width: 0, height: 0 },
             tab_events: Vec::new(),
@@ -55,6 +69,7 @@ impl WindowManager {
     /// (see [`Pane::scripted`]). Used by the headless screenshot renderer.
     pub fn headless(cols: usize, rows: usize) -> Self {
         Self {
+            win: 0,
             tabs: vec![Tab::new(Pane::scripted(0, cols, rows))],
             active_tab: 0,
             next_pane_id: 1,
@@ -65,6 +80,18 @@ impl WindowManager {
             backlog: false,
             scrollback_lines: 10_000,
         }
+    }
+
+    /// Headless manager of window `win` (pane ids namespaced like
+    /// [`WindowManager::for_window`]); for tests of multi-window routing.
+    #[cfg(test)]
+    pub fn headless_for_window(cols: usize, rows: usize, win: u64) -> Self {
+        let first = pane_id(win, 0);
+        let mut wm = Self::headless(cols, rows);
+        wm.win = win;
+        wm.tabs = vec![Tab::new(Pane::scripted(first, cols, rows))];
+        wm.next_pane_id = first + 1;
+        wm
     }
 
     /// Spawn a shell pane, or an inert one when headless.
@@ -91,6 +118,11 @@ impl WindowManager {
         let id = self.next_pane_id;
         self.next_pane_id += 1;
         id
+    }
+
+    /// Stable id of the window these tabs belong to.
+    pub fn window_id(&self) -> u64 {
+        self.win
     }
 
     pub fn active_tab(&self) -> &Tab {

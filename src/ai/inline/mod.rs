@@ -253,33 +253,33 @@ impl Default for InlineAi {
 /// Any modal overlay that should keep AI hotkeys out of the way. (The
 /// docked chat is deliberately not listed: it can stay open while you work.)
 pub fn overlay_open(app: &App) -> bool {
-    app.exec_preview.visible
-        || app.timewarp_browser.active
-        || app.mui.menu.visible
-        || app.mui.tabs.editor.is_some()
-        || app.browser.editing
-        || app.observer_summary.is_some()
-        || app.welcome.visible
-        || app.prefs.visible
-        || app.ssh_dialog.visible
-        || app.webview_dialog.visible
-        || app.compare_view.visible
-        || app.command_palette.visible
-        || app.search.visible
-        || app.file_manager.visible
-        || app.git_panel.visible
-        || app.cicd.visible
-        || app.heatmap.visible
-        || app.docker.visible
-        || app.network_monitor.visible
-        || app.process_tree.visible
+    app.win.exec_preview.visible
+        || app.win.timewarp_browser.active
+        || app.win.mui.menu.visible
+        || app.win.mui.tabs.editor.is_some()
+        || app.win.browser.editing
+        || app.win.observer_summary.is_some()
+        || app.win.welcome.visible
+        || app.win.prefs.visible
+        || app.win.ssh_dialog.visible
+        || app.win.webview_dialog.visible
+        || app.win.compare_view.visible
+        || app.win.command_palette.visible
+        || app.win.search.visible
+        || app.win.file_manager.visible
+        || app.win.git_panel.visible
+        || app.win.cicd.visible
+        || app.win.heatmap.visible
+        || app.win.docker.visible
+        || app.win.network_monitor.visible
+        || app.win.process_tree.visible
         || app.mcp.overlay.visible
-        || app.agents_ui.policy_log.visible
-        || app.system_info.visible
-        || app.port_dashboard.visible
-        || app.regex_playground.visible
-        || app.history.visible
-        || app.autocomplete.visible
+        || app.win.agents_ui.policy_log.visible
+        || app.win.system_info.visible
+        || app.win.port_dashboard.visible
+        || app.win.regex_playground.visible
+        || app.win.history.visible
+        || app.win.autocomplete.visible
         || crate::ui::kit::gallery::visible()
 }
 
@@ -298,7 +298,7 @@ fn ai_ok(app: &mut App, nag: bool, feature: Feature) -> bool {
             toast_unconfigured(app);
         } else if crate::ai::consent::allowed(app) {
             // Usable default, but the feature is pinned to a provider kind we lack.
-            app.inline_ai.set_toast(NO_ROUTE_MSG);
+            app.win.inline_ai.set_toast(NO_ROUTE_MSG);
             app.request_redraw();
         }
     }
@@ -306,9 +306,9 @@ fn ai_ok(app: &mut App, nag: bool, feature: Feature) -> bool {
 }
 
 fn toast_unconfigured(app: &mut App) {
-    if !app.inline_ai.unconfigured_toasted {
-        app.inline_ai.unconfigured_toasted = true;
-        app.inline_ai.set_toast(UNCONFIGURED_MSG);
+    if !app.win.inline_ai.unconfigured_toasted {
+        app.win.inline_ai.unconfigured_toasted = true;
+        app.win.inline_ai.set_toast(UNCONFIGURED_MSG);
         app.request_redraw();
     }
 }
@@ -342,7 +342,7 @@ fn paste_into_prompt(pane: &mut Pane, text: &str) {
 }
 
 fn find_pane_mut(app: &mut App, id: usize) -> Option<&mut Pane> {
-    for tab in &mut app.wm.tabs {
+    for tab in &mut app.win.wm.tabs {
         for pane in tab.panes_mut() {
             if pane.id == id {
                 return Some(pane);
@@ -394,28 +394,30 @@ fn snap_block_of(t: &Terminal, idx: usize) -> Option<BlockSnap> {
 }
 
 fn snap_block(app: &App, pane: usize, idx: usize) -> Option<BlockSnap> {
-    snap_block_of(&app.wm.active_tab().pane(pane)?.terminal, idx)
+    snap_block_of(&app.win.wm.active_tab().pane(pane)?.terminal, idx)
 }
 
 fn build_model(app: &App) -> ContextModel {
-    let tab = app.wm.active_tab;
-    let t = &app.wm.active_pane().terminal;
-    let selection = if app.selection.active {
+    let tab = app.win.wm.active_tab;
+    let t = &app.win.wm.active_pane().terminal;
+    let selection = if app.win.selection.active {
         let text = crate::app::mouse::selection_text(app);
-        let end_line = app.selection.normalized().1 .0;
+        let end_line = app.win.selection.normalized().1 .0;
         (!text.trim().is_empty()).then_some((text, end_line))
     } else {
         None
     };
     let selected_block = app
+        .win
         .blocks_ui
         .selected
         .filter(|(t, _, _)| *t == tab)
         .and_then(|(_, p, b)| snap_block(app, p, b));
     let hovered_block = app
+        .win
         .blocks_ui
         .hover
-        .filter(|h| h.tab == tab && app.cursor_y >= app.tab_bar_height())
+        .filter(|h| h.tab == tab && app.win.cursor_y >= app.tab_bar_height())
         .and_then(|h| snap_block(app, h.pane, h.block));
     let last_block = t.blocks.blocks().len().checked_sub(1).and_then(|i| snap_block_of(t, i));
     ContextModel { selection, selected_block, hovered_block, last_block, screen: screen_text(t) }
@@ -429,13 +431,13 @@ pub fn open(app: &mut App) {
     if overlay_open(app) {
         return;
     }
-    if app.inline_ai.popover.take().is_some() {
+    if app.win.inline_ai.popover.take().is_some() {
         app.request_redraw();
         return;
     }
-    if matches!(app.inline_ai.nl, NlState::Ghost(_)) {
-        if let NlState::Ghost(g) = std::mem::take(&mut app.inline_ai.nl) {
-            app.inline_ai.popover = Some(Popover {
+    if matches!(app.win.inline_ai.nl, NlState::Ghost(_)) {
+        if let NlState::Ghost(g) = std::mem::take(&mut app.win.inline_ai.nl) {
+            app.win.inline_ai.popover = Some(Popover {
                 edit: LineEdit::with_text(&g.query),
                 resolved: Resolved::Nothing,
                 mode: PopoverMode::RefineNl { previous: g.command },
@@ -448,18 +450,18 @@ pub fn open(app: &mut App) {
         toast_unconfigured(app);
     }
     let resolved = resolve(&build_model(app));
-    app.inline_ai.popover = Some(Popover { edit: LineEdit::default(), resolved, mode: PopoverMode::Ask });
+    app.win.inline_ai.popover = Some(Popover { edit: LineEdit::default(), resolved, mode: PopoverMode::Ask });
     app.request_redraw();
 }
 
 fn submit_popover(app: &mut App) {
-    let Some(pop) = app.inline_ai.popover.as_ref() else { return };
+    let Some(pop) = app.win.inline_ai.popover.as_ref() else { return };
     let text = pop.edit.text();
     let q = text.trim();
     match pop.mode.clone() {
         PopoverMode::Ask => {
             let Some(req) = pop.resolved.to_request(q) else { return };
-            app.inline_ai.popover = None;
+            app.win.inline_ai.popover = None;
             crate::ai::hub::ask(app, req);
         }
         PopoverMode::RefineNl { previous } => {
@@ -467,7 +469,7 @@ fn submit_popover(app: &mut App) {
                 return;
             }
             let query = q.to_string();
-            app.inline_ai.popover = None;
+            app.win.inline_ai.popover = None;
             if ai_ok(app, true, Feature::Nl) {
                 start_nl(app, query, previous.clone(), Some(previous));
             }
@@ -479,18 +481,18 @@ fn submit_popover(app: &mut App) {
 /// Keys while the popover is open (called before overlay routing). Consumes
 /// every key while open.
 pub fn on_key_modal(app: &mut App, event: &KeyEvent) -> bool {
-    if app.inline_ai.popover.is_none() {
+    if app.win.inline_ai.popover.is_none() {
         return false;
     }
     if overlay_open(app) {
-        app.inline_ai.popover = None;
+        app.win.inline_ai.popover = None;
         return false;
     }
-    let m = app.modifiers;
+    let m = app.win.modifiers;
     let (mut close, mut submit) = (false, false);
     let mut paste = false;
     {
-        let Some(pop) = app.inline_ai.popover.as_mut() else { return false };
+        let Some(pop) = app.win.inline_ai.popover.as_mut() else { return false };
         match &event.logical_key {
             Key::Named(NamedKey::Escape) => close = true,
             Key::Named(NamedKey::Enter) => submit = true,
@@ -527,13 +529,13 @@ pub fn on_key_modal(app: &mut App, event: &KeyEvent) -> bool {
     }
     if paste {
         if let Some(text) = crate::window::selection::paste_from_clipboard() {
-            if let Some(pop) = app.inline_ai.popover.as_mut() {
+            if let Some(pop) = app.win.inline_ai.popover.as_mut() {
                 pop.edit.insert_str(&text);
             }
         }
     }
     if close {
-        app.inline_ai.popover = None;
+        app.win.inline_ai.popover = None;
     } else if submit {
         submit_popover(app);
     }
@@ -544,13 +546,13 @@ pub fn on_key_modal(app: &mut App, event: &KeyEvent) -> bool {
 /// Committed IME text. Returns true when the popover took it; any other
 /// input also retires a `#` ghost hint (the user is editing the command).
 pub fn insert_text(app: &mut App, text: &str) -> bool {
-    if let Some(pop) = app.inline_ai.popover.as_mut() {
+    if let Some(pop) = app.win.inline_ai.popover.as_mut() {
         pop.edit.insert_str(text);
         app.request_redraw();
         return true;
     }
-    if matches!(app.inline_ai.nl, NlState::Ghost(_)) {
-        app.inline_ai.nl = NlState::Idle;
+    if matches!(app.win.inline_ai.nl, NlState::Ghost(_)) {
+        app.win.inline_ai.nl = NlState::Idle;
         app.request_redraw();
     }
     false
@@ -577,7 +579,7 @@ fn is_modifier_key(k: &Key) -> bool {
 /// Tab to accept a fix, Esc to dismiss a suggestion / cancel or clear a `#`
 /// command. Returns true when consumed.
 pub fn on_key(app: &mut App, event: &KeyEvent) -> bool {
-    let m = app.modifiers;
+    let m = app.win.modifiers;
     if let Key::Character(s) = &event.logical_key {
         if s.eq_ignore_ascii_case("k") && m.super_key() && !m.shift_key() && !m.alt_key() && !m.control_key() {
             if !event.repeat {
@@ -593,18 +595,18 @@ pub fn on_key(app: &mut App, event: &KeyEvent) -> bool {
         _ => {}
     }
     // Typing anything else edits the generated command: retire its hint.
-    if matches!(app.inline_ai.nl, NlState::Ghost(_))
+    if matches!(app.win.inline_ai.nl, NlState::Ghost(_))
         && !is_modifier_key(&event.logical_key)
         && !matches!(event.logical_key, Key::Named(NamedKey::Enter | NamedKey::Escape))
     {
-        app.inline_ai.nl = NlState::Idle;
+        app.win.inline_ai.nl = NlState::Idle;
         app.request_redraw();
     }
     false
 }
 
 fn escape(app: &mut App) -> bool {
-    match std::mem::take(&mut app.inline_ai.nl) {
+    match std::mem::take(&mut app.win.inline_ai.nl) {
         NlState::Pending(p) => {
             // Cancel: put back what the user typed.
             if let Some(pane) = find_pane_mut(app, p.pane_id) {
@@ -627,7 +629,7 @@ fn escape(app: &mut App) -> bool {
         NlState::Idle => {}
     }
     if active_fix(app).is_some() {
-        app.inline_ai.fix.current = None;
+        app.win.inline_ai.fix.current = None;
         app.request_redraw();
         return true;
     }
@@ -635,8 +637,8 @@ fn escape(app: &mut App) -> bool {
 }
 
 fn active_fix(app: &App) -> Option<&ActiveFix> {
-    let pane = app.wm.active_pane();
-    app.inline_ai
+    let pane = app.win.wm.active_pane();
+    app.win.inline_ai
         .fix
         .current
         .as_ref()
@@ -646,12 +648,12 @@ fn active_fix(app: &App) -> Option<&ActiveFix> {
 /// Tab: type the suggested command at an empty prompt.
 fn accept_fix(app: &mut App) -> bool {
     let Some(f) = active_fix(app) else { return false };
-    if !prompt_is_empty(&app.wm.active_pane().terminal) {
+    if !prompt_is_empty(&app.win.wm.active_pane().terminal) {
         return false; // leave Tab to the shell's completion
     }
     let cmd = f.suggestion.command.clone();
-    app.inline_ai.fix.current = None;
-    paste_into_prompt(app.wm.active_pane_mut(), &cmd);
+    app.win.inline_ai.fix.current = None;
+    paste_into_prompt(app.win.wm.active_pane_mut(), &cmd);
     app.request_redraw();
     true
 }
@@ -659,7 +661,7 @@ fn accept_fix(app: &mut App) -> bool {
 /// "Ask more": hand the failed block to the chat as a Fix request.
 fn ask_more(app: &mut App) {
     use crate::ai::hub::{AskRequest, Intent};
-    let Some(f) = app.inline_ai.fix.current.take() else { return };
+    let Some(f) = app.win.inline_ai.fix.current.take() else { return };
     let req = AskRequest::new("", Intent::Fix).with(f.snap.to_item()).display(format!("Fix: {}", f.snap.label()));
     crate::ai::hub::ask(app, req);
     app.request_redraw();
@@ -668,20 +670,20 @@ fn ask_more(app: &mut App) {
 /// Enter pressed with a plain `\r` bound for the shell. Returns true when
 /// intercepted (a `# ...` line at the prompt).
 pub fn on_enter(app: &mut App) -> bool {
-    match &app.inline_ai.nl {
+    match &app.win.inline_ai.nl {
         NlState::Ghost(_) => {
             // Running the generated command: the hint has served its purpose.
-            app.inline_ai.nl = NlState::Idle;
+            app.win.inline_ai.nl = NlState::Idle;
             app.request_redraw();
             return false;
         }
         NlState::Pending(_) => return true, // swallow: the prompt is empty while we generate
         NlState::Idle => {}
     }
-    if !app.config.ai_nl_hash || app.broadcast {
+    if !app.config.ai_nl_hash || app.win.broadcast {
         return false;
     }
-    let Some(typed) = app.wm.active_pane().terminal.typed_input() else { return false };
+    let Some(typed) = app.win.wm.active_pane().terminal.typed_input() else { return false };
     let Some(query) = nl::detect_query(&typed) else { return false };
     // No consent / no provider: the line goes to the shell untouched.
     if !ai_ok(app, false, Feature::Nl) {
@@ -706,12 +708,12 @@ fn start_nl(app: &mut App, query: String, restore: String, previous: Option<Stri
     // Strict: never fall back to the default model when routing says no.
     let Some(config) = crate::ai::local::routed(app, Feature::Nl) else { return };
     let (os, shell) = env_os_shell();
-    let pane = app.wm.active_pane_mut();
+    let pane = app.win.wm.active_pane_mut();
     let prompt = nl::nl_prompt(&query, previous.as_deref(), &cwd_of(&pane.terminal), &os, &shell);
     pane.terminal.scroll_to_bottom();
     pane.write(ERASE_LINE);
     let pane_id = pane.id;
-    app.inline_ai.nl = NlState::Pending(NlPending {
+    app.win.inline_ai.nl = NlState::Pending(NlPending {
         query,
         restore,
         rx: spawn_request(config, prompt, Feature::Nl),
@@ -722,7 +724,7 @@ fn start_nl(app: &mut App, query: String, restore: String, previous: Option<Stri
 }
 
 fn poll_nl(app: &mut App) {
-    let result = match &app.inline_ai.nl {
+    let result = match &app.win.inline_ai.nl {
         NlState::Pending(p) => match p.rx.try_recv() {
             Ok(r) => r,
             Err(TryRecvError::Empty) => return,
@@ -730,7 +732,7 @@ fn poll_nl(app: &mut App) {
         },
         _ => return,
     };
-    let NlState::Pending(p) = std::mem::take(&mut app.inline_ai.nl) else { return };
+    let NlState::Pending(p) = std::mem::take(&mut app.win.inline_ai.nl) else { return };
     let parsed = result.and_then(|text| {
         nl::parse_nl_response(&text).ok_or_else(|| "the model did not return a usable command".to_string())
     });
@@ -742,17 +744,17 @@ fn poll_nl(app: &mut App) {
             if let Some(pane) = find_pane_mut(app, p.pane_id) {
                 paste_into_prompt(pane, &cmd.command);
             }
-            app.inline_ai.nl =
+            app.win.inline_ai.nl =
                 NlState::Ghost(NlGhost { query: p.query, command: cmd.command, dangerous, pane_id: p.pane_id });
         }
-        Ok(_) => app.inline_ai.set_toast("AI command discarded: the prompt changed"),
+        Ok(_) => app.win.inline_ai.set_toast("AI command discarded: the prompt changed"),
         Err(e) => {
             if can_place {
                 if let Some(pane) = find_pane_mut(app, p.pane_id) {
                     paste_into_prompt(pane, &p.restore);
                 }
             }
-            app.inline_ai.set_toast(format!("AI: {}", crate::ui::trunc(&e, 120)));
+            app.win.inline_ai.set_toast(format!("AI: {}", crate::ui::trunc(&e, 120)));
         }
     }
     app.request_redraw();
@@ -761,7 +763,7 @@ fn poll_nl(app: &mut App) {
 // ── Proactive fix ──
 
 fn poll_fix(app: &mut App) {
-    let result = match &app.inline_ai.fix.pending {
+    let result = match &app.win.inline_ai.fix.pending {
         Some(p) => match p.rx.try_recv() {
             Ok(r) => r,
             Err(TryRecvError::Empty) => return,
@@ -769,7 +771,7 @@ fn poll_fix(app: &mut App) {
         },
         None => return,
     };
-    let Some(p) = app.inline_ai.fix.pending.take() else { return };
+    let Some(p) = app.win.inline_ai.fix.pending.take() else { return };
     let suggestion = match result {
         Ok(text) => fix::parse_fix_response(&text, &p.snap.command),
         Err(e) => {
@@ -777,7 +779,7 @@ fn poll_fix(app: &mut App) {
             return; // transient: do not cache failures
         }
     };
-    app.inline_ai.cache_put(p.key.clone(), suggestion.clone());
+    app.win.inline_ai.cache_put(p.key.clone(), suggestion.clone());
     show_fix(app, suggestion, p.sig, p.snap);
 }
 
@@ -786,6 +788,7 @@ fn poll_fix(app: &mut App) {
 fn show_fix(app: &mut App, suggestion: Option<FixSuggestion>, sig: BlockSig, snap: BlockSnap) {
     let Some(suggestion) = suggestion else { return };
     let still_current = app
+        .win
         .wm
         .tabs
         .iter()
@@ -796,33 +799,33 @@ fn show_fix(app: &mut App, suggestion: Option<FixSuggestion>, sig: BlockSig, sna
         return;
     }
     let dangerous = is_dangerous(&suggestion.command, snap.cwd.as_deref());
-    app.inline_ai.fix.current = Some(ActiveFix { suggestion, dangerous, sig, snap });
+    app.win.inline_ai.fix.current = Some(ActiveFix { suggestion, dangerous, sig, snap });
     app.request_redraw();
 }
 
 /// Drop the visible suggestion once its block is stale (new command running
 /// or finished, alt screen).
 fn validate_fix(app: &mut App) {
-    let Some(f) = &app.inline_ai.fix.current else { return };
-    let Some(pane) = app.wm.tabs.iter().flat_map(|t| t.panes()).find(|p| p.id == f.sig.pane_id) else {
-        app.inline_ai.fix.current = None;
+    let Some(f) = &app.win.inline_ai.fix.current else { return };
+    let Some(pane) = app.win.wm.tabs.iter().flat_map(|t| t.panes()).find(|p| p.id == f.sig.pane_id) else {
+        app.win.inline_ai.fix.current = None;
         return;
     };
     let t = &pane.terminal;
     if BlockSig::of(pane.id, t) != f.sig || t.blocks.running_osc_elapsed_ms().is_some() || t.is_alt_screen() {
-        app.inline_ai.fix.current = None;
+        app.win.inline_ai.fix.current = None;
         app.request_redraw();
     }
 }
 
 fn detect_failure(app: &mut App) {
-    let pane = app.wm.active_pane();
+    let pane = app.win.wm.active_pane();
     let t = &pane.terminal;
     if t.is_alt_screen() || !t.blocks.osc_seen() {
         return;
     }
     let sig = BlockSig::of(pane.id, t);
-    let prev = app.inline_ai.watch.replace(sig.clone());
+    let prev = app.win.inline_ai.watch.replace(sig.clone());
     let Some(prev) = prev else { return };
     if prev.pane_id != sig.pane_id || prev == sig || sig.count == 0 {
         return; // baseline (first look / pane switch) or nothing new
@@ -838,38 +841,38 @@ fn detect_failure(app: &mut App) {
     if !ai_ok(app, true, Feature::Fix) {
         return;
     }
-    let Some(snap) = snap_block_of(&app.wm.active_pane().terminal, sig.count - 1) else { return };
+    let Some(snap) = snap_block_of(&app.win.wm.active_pane().terminal, sig.count - 1) else { return };
     let key = fix::fix_key(&snap.command, exit, &snap.output);
-    if let Some(cached) = app.inline_ai.cache.get(&key).cloned() {
+    if let Some(cached) = app.win.inline_ai.cache.get(&key).cloned() {
         show_fix(app, cached, sig, snap);
         return;
     }
-    if app.inline_ai.fix.pending.is_some() {
+    if app.win.inline_ai.fix.pending.is_some() {
         return;
     }
-    if app.inline_ai.last_fix_request.is_some_and(|t| t.elapsed() < FIX_DEBOUNCE) {
+    if app.win.inline_ai.last_fix_request.is_some_and(|t| t.elapsed() < FIX_DEBOUNCE) {
         return;
     }
-    app.inline_ai.last_fix_request = Some(Instant::now());
+    app.win.inline_ai.last_fix_request = Some(Instant::now());
     let (os, shell) = env_os_shell();
-    let cwd = snap.cwd.clone().unwrap_or_else(|| cwd_of(&app.wm.active_pane().terminal));
+    let cwd = snap.cwd.clone().unwrap_or_else(|| cwd_of(&app.win.wm.active_pane().terminal));
     let prompt = fix::fix_prompt(&snap.command, exit, &snap.output, &cwd, &os, &shell);
     let Some(config) = crate::ai::local::routed(app, Feature::Fix) else { return };
     let rx = spawn_request(config, prompt, Feature::Fix);
-    app.inline_ai.fix.pending = Some(PendingFix { rx, key, sig, snap });
+    app.win.inline_ai.fix.pending = Some(PendingFix { rx, key, sig, snap });
 }
 
 // ── Mouse ──
 
 /// Left press. Returns true when the click landed on AI chrome.
 pub fn on_click(app: &mut App) -> bool {
-    let (x, y) = (app.cursor_x, app.cursor_y);
-    let hits = app.inline_ai.hits.clone();
-    if app.inline_ai.popover.is_some() {
+    let (x, y) = (app.win.cursor_x, app.win.cursor_y);
+    let hits = app.win.inline_ai.hits.clone();
+    if app.win.inline_ai.popover.is_some() {
         if hits.popover.is_some_and(|r| r.contains(x, y)) {
             return true;
         }
-        app.inline_ai.popover = None;
+        app.win.inline_ai.popover = None;
         app.request_redraw();
         return false;
     }
@@ -879,7 +882,7 @@ pub fn on_click(app: &mut App) -> bool {
     if hits.accept.is_some_and(|r| r.contains(x, y)) {
         accept_fix(app);
     } else if hits.dismiss.is_some_and(|r| r.contains(x, y)) {
-        app.inline_ai.fix.current = None;
+        app.win.inline_ai.fix.current = None;
     } else if hits.ask_more.is_some_and(|r| r.contains(x, y)) {
         ask_more(app);
     }
@@ -892,11 +895,11 @@ pub fn on_click(app: &mut App) -> bool {
 pub fn set_auto_fix(app: &mut App, on: bool) {
     app.config.ai_auto_fix = on;
     if !on {
-        app.inline_ai.fix.current = None;
-        app.inline_ai.fix.pending = None;
+        app.win.inline_ai.fix.current = None;
+        app.win.inline_ai.fix.pending = None;
     }
     app.menubar.set_ai_checks(app.config.ai_auto_fix, app.config.ai_nl_hash);
-    app.inline_ai.set_toast(format!("Auto Fix Suggestions {}", if on { "on" } else { "off" }));
+    app.win.inline_ai.set_toast(format!("Auto Fix Suggestions {}", if on { "on" } else { "off" }));
     crate::config::toml::save_config(&app.config);
     app.request_redraw();
 }
@@ -904,7 +907,7 @@ pub fn set_auto_fix(app: &mut App, on: bool) {
 pub fn set_nl_hash(app: &mut App, on: bool) {
     app.config.ai_nl_hash = on;
     app.menubar.set_ai_checks(app.config.ai_auto_fix, app.config.ai_nl_hash);
-    app.inline_ai.set_toast(format!("# Natural Language {}", if on { "on" } else { "off" }));
+    app.win.inline_ai.set_toast(format!("# Natural Language {}", if on { "on" } else { "off" }));
     crate::config::toml::save_config(&app.config);
     app.request_redraw();
 }
@@ -913,17 +916,17 @@ pub fn set_nl_hash(app: &mut App, on: bool) {
 
 /// Called from `about_to_wait`: poll background work, retire stale UI.
 pub fn tick(app: &mut App, wake_at: &mut Instant) {
-    if let Some((_, t)) = &app.inline_ai.toast {
+    if let Some((_, t)) = &app.win.inline_ai.toast {
         let end = *t + TOAST_TTL;
         if Instant::now() >= end {
-            app.inline_ai.toast = None;
+            app.win.inline_ai.toast = None;
             app.request_redraw();
         } else {
             *wake_at = (*wake_at).min(end);
         }
     }
-    if app.inline_ai.popover.is_some() && overlay_open(app) {
-        app.inline_ai.popover = None;
+    if app.win.inline_ai.popover.is_some() && overlay_open(app) {
+        app.win.inline_ai.popover = None;
         app.request_redraw();
     }
 
@@ -933,22 +936,22 @@ pub fn tick(app: &mut App, wake_at: &mut Instant) {
     detect_failure(app);
 
     // Ghost hint only lives while its command sits at that pane's prompt.
-    if let NlState::Ghost(g) = &app.inline_ai.nl {
-        let alive = app.wm.tabs.iter().flat_map(|t| t.panes()).find(|p| p.id == g.pane_id).is_some_and(|p| p.terminal.at_shell_prompt());
+    if let NlState::Ghost(g) = &app.win.inline_ai.nl {
+        let alive = app.win.wm.tabs.iter().flat_map(|t| t.panes()).find(|p| p.id == g.pane_id).is_some_and(|p| p.terminal.at_shell_prompt());
         if !alive {
-            app.inline_ai.nl = NlState::Idle;
+            app.win.inline_ai.nl = NlState::Idle;
             app.request_redraw();
         }
     }
 
     // Spinner animation while generating.
-    if matches!(app.inline_ai.nl, NlState::Pending(_)) {
-        let next = app.inline_ai.last_spin + Duration::from_millis(100);
+    if matches!(app.win.inline_ai.nl, NlState::Pending(_)) {
+        let next = app.win.inline_ai.last_spin + Duration::from_millis(100);
         if Instant::now() >= next {
-            app.inline_ai.last_spin = Instant::now();
+            app.win.inline_ai.last_spin = Instant::now();
             app.request_redraw();
         }
-        *wake_at = (*wake_at).min(app.inline_ai.last_spin + Duration::from_millis(100));
+        *wake_at = (*wake_at).min(app.win.inline_ai.last_spin + Duration::from_millis(100));
     }
 }
 

@@ -109,8 +109,8 @@ pub fn select(app: &mut App, choice: &ModelChoice) {
 }
 
 fn notify(app: &mut App, msg: &str) {
-    app.chat.set_toast(msg);
-    app.inline_ai.set_toast(msg);
+    app.win.chat.set_toast(msg);
+    app.win.inline_ai.set_toast(msg);
     app.request_redraw();
 }
 
