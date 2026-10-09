@@ -596,6 +596,10 @@ pub fn mcp_verdict(policy: &Policy, env: &PathEnv, command: &str, critical: Opti
     let d = policy::evaluate(policy, &req, env, sev);
     match d.verdict {
         Verdict::Approve => McpAuto::Approve(d),
+        // A Critical command from MCP is never decided silently: the user
+        // sees the critical modal (Deny is its default). Explicit deny rules
+        // still act on their own.
+        Verdict::Deny if d.rule == "builtin:critical" => McpAuto::Ask,
         Verdict::Deny => McpAuto::Deny(d),
         Verdict::Ask => McpAuto::Ask,
     }
@@ -1535,8 +1539,10 @@ mod tests {
         assert!(matches!(go("cargo test", None, true), McpAuto::Approve(d) if d.rule == "default:cargo-checks"));
         assert_eq!(go("cargo test", None, false), McpAuto::Ask, "autopilot off: the modal, as before");
         assert_eq!(go("git push", None, true), McpAuto::Ask);
-        assert!(matches!(go("rm -rf /", Some(true), true), McpAuto::Deny(d) if d.rule == "builtin:critical"));
-        assert!(matches!(go("ls", Some(true), true), McpAuto::Deny(_)), "the safety engine's Critical is a floor over the rules");
+        assert_eq!(go("rm -rf /", Some(true), true), McpAuto::Ask, "Critical from MCP goes to the modal, never silently");
+        assert_eq!(go("ls", Some(true), true), McpAuto::Ask, "the safety engine's Critical is a floor over the rules");
+        let deny = policy::load_merged(Some("[[rule]]\nprogram = \"terraform\"\naction = \"deny\"\n"), None);
+        assert!(matches!(mcp_verdict(&deny, &env, "terraform destroy", None, true, None), McpAuto::Deny(_)), "explicit deny rules still act");
         assert_eq!(go("make deploy", Some(false), true), McpAuto::Ask);
         // A Warning only passes an explicit rule naming the program.
         let named = policy::load_merged(Some("[[rule]]\nprogram = \"git\"\naction = \"approve\"\n"), None);

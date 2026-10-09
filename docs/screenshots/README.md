@@ -24,6 +24,10 @@ important content stays inside the central 1200 x 630 area.
 | `preview-accept.png` | Preview-Then-Accept modal for `curl -fsSL … | sh` (CRITICAL, classified by the real exec-preview rules; routine `rm -rf ./build` is Info and shows no modal) |
 | `effects-crt.png` | CRT effect: the real GPU shader (curvature, scanlines, vignette, chromatic aberration) |
 | `hud.png` | HUD strip (CPU / MEM sparklines, disk, git, load) |
+| `mission-control.png` | Mission Control dock: Claude Code card waiting on a RISKY `git push --force` with 1 Approve / 2 Always / 3 Deny, Codex working, Gemini done |
+| `autopilot.png` | Autopilot countdown on a Claude Code card plus the Policy Log overlay (approved / denied, deciding rule) |
+| `workflow-compare.png` | Best-of-3 Compare view: candidate cards (files, tests, duration, cost), file list and diff, Merge / Discard / Ask AI |
+| `workflow-queue.png` | Per-agent task queue overlay with three queued tasks |
 
 Notes:
 

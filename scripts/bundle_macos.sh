@@ -4,7 +4,7 @@ set -e
 
 APP_NAME="Rift"
 BUNDLE_ID="com.overkazaf.rift"
-VERSION="${RIFT_VERSION:-0.3.0}"
+VERSION="${RIFT_VERSION:-0.4.0}"
 ICON_PNG="assets/icon.png"
 
 # Build release (CI sets SKIP_BUILD=1 after producing target/release/rift itself,

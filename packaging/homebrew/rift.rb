@@ -7,8 +7,8 @@
 # attached to the GitHub Release). Until the dmg is signed + notarized (see
 # .github/workflows/release.yml TODOs) Gatekeeper will need a manual "Open anyway".
 cask "rift" do
-  version "0.3.0"
-  sha256 "REPLACE_WITH_SHA256_OF_Rift-0.3.0-macos.dmg"
+  version "0.4.0"
+  sha256 "REPLACE_WITH_SHA256_OF_Rift-0.4.0-macos.dmg"
 
   url "https://github.com/overkazaf/rift/releases/download/v#{version}/Rift-#{version}-macos.dmg"
   name "Rift"

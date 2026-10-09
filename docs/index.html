@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Rift — the AI-native terminal that understands your screen</title>
-<meta name="description" content="Rift is a fast, native terminal emulator written in Rust with Warp-style command blocks, a local-first AI that reads your screen, and a cyberpunk soul. Open source, MIT, no account.">
+<meta name="description" content="Rift is a fast, native terminal emulator written in Rust with Warp-style command blocks, a local-first AI that reads your screen, mission control for AI coding agents, and a cyberpunk soul. Open source, MIT, no account.">
 <meta name="theme-color" content="#080a18">
 <link rel="icon" type="image/png" href="favicon.png">
 <link rel="apple-touch-icon" href="favicon.png">
@@ -13,7 +13,7 @@
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Rift">
 <meta property="og:title" content="Rift — the AI-native terminal that understands your screen">
-<meta property="og:description" content="Native Rust terminal with command blocks, local-first AI, Preview-Then-Accept for dangerous commands, and a cyberpunk soul. Bring your own key. No account.">
+<meta property="og:description" content="Native Rust terminal with command blocks, local-first AI, mission control for Claude Code, Codex and friends, Preview-Then-Accept for dangerous commands, and a cyberpunk soul. Bring your own key. No account.">
 <meta property="og:url" content="https://overkazaf.github.io/rift/">
 <meta property="og:image" content="https://overkazaf.github.io/rift/screenshots/hero.png">
 <meta property="og:image:alt" content="The Rift terminal with command blocks, an inline AI fix suggestion and the AI chat sidebar">
@@ -40,6 +40,7 @@
     <nav aria-label="Primary">
       <ul class="nav-links">
         <li><a href="#features">Features</a></li>
+        <li><a href="#agents">Agents</a></li>
         <li><a href="#compare">Compare</a></li>
         <li><a href="#shortcuts">Shortcuts</a></li>
         <li><a href="#install">Install</a></li>
@@ -60,7 +61,7 @@
 <section class="hero" aria-labelledby="hero-title">
   <div class="wrap hero-grid">
     <div class="hero-copy">
-      <p class="eyebrow"><span class="dot" aria-hidden="true"></span> v0.3 · open source · MIT</p>
+      <p class="eyebrow"><span class="dot" aria-hidden="true"></span> v0.4.0 · open source · MIT · <a href="#agents">new: agent mission control</a></p>
       <h1 id="hero-title">The AI-native terminal that <span class="hl">understands your screen</span>.</h1>
       <p class="lede">Native and fast like Ghostty. Blocks and AI like Warp. But local-first, bring-your-own-key, no account — and with a cyberpunk soul. Rift is a terminal emulator written in Rust.</p>
       <div class="cta">
@@ -201,12 +202,13 @@
 
     <article class="feat">
       <div class="feat-copy">
-        <h3>Splits that behave</h3>
-        <p>Recursive splits with geometric focus, zoom, equalize, swap and drag-resize. Tabs rename and reorder. Quit and come back to the same tabs, split layouts and working directories.</p>
+        <h3>Splits, tabs &amp; windows</h3>
+        <p>Recursive splits with geometric focus, zoom, equalize, swap and drag-resize. Tabs rename and reorder. Open as many windows as you like — each has its own tabs, panes and docks. Quit and come back to every window, with the same tabs, split layouts, working directories and positions.</p>
         <ul class="ticks">
           <li><kbd>⌘D</kbd> split right · <kbd>⌘⇧D</kbd> split down · <kbd>⌘⇧↩</kbd> zoom</li>
           <li><kbd>⌥⌘</kbd>+arrows to move focus by geometry</li>
-          <li>Session restore: tabs, layouts, cwd</li>
+          <li><kbd>⌘N</kbd> new window, opened in the focused pane's directory</li>
+          <li>Session restore: all windows, tabs, layouts, cwd</li>
         </ul>
       </div>
       <img class="shot" src="screenshots/splits.png" width="1600" height="1000" loading="lazy" alt="Rift with four split panes in two tabs, the focused pane highlighted with a magenta border">
@@ -252,6 +254,67 @@
   </div>
 </section>
 
+<!-- ───────────────────────── AGENTS ───────────────────────── -->
+<section id="agents" class="features" aria-labelledby="agents-title">
+  <div class="wrap">
+    <p class="kicker">// agents · new in 0.4.0</p>
+    <h2 id="agents-title">Mission control for your AI coding agents.</h2>
+
+    <article class="feat">
+      <div class="feat-copy">
+        <h3>Mission Control dock</h3>
+        <p>Run Claude Code, Codex CLI, Gemini CLI, opencode, Aider or Cursor CLI in any pane. Rift notices them, tracks what each one is doing across every tab, and tells you when one needs you.</p>
+        <ul class="ticks">
+          <li>One card per agent: repo and branch, state, model, tokens, cost, context use and a turn timeline</li>
+          <li>Answer approval prompts right on the card with <kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> — the agent's own options; risky commands are flagged, critical ones need a second press</li>
+          <li>Interrupt, reply, broadcast, review or restart without switching panes</li>
+          <li><kbd>⌘⇧;</kbd> toggle the dock · <kbd>⌘⇧.</kbd> jump to the next agent that needs you</li>
+        </ul>
+      </div>
+      <img class="shot" src="screenshots/mission-control.png" width="1600" height="1000" loading="lazy" alt="The Mission Control dock on the left with cards for Claude Code, Codex and Gemini CLI; the Claude Code card needs you and shows a risky git push --force request with Approve, Always and Deny buttons">
+    </article>
+
+    <article class="feat flip">
+      <div class="feat-copy">
+        <h3>Autopilot &amp; approval policy</h3>
+        <p>Stop babysitting routine prompts. With autopilot on, Rift answers an agent's prompt when your policy says it's routine — after a short, visible countdown you can cancel with <kbd>Esc</kbd>. It's off by default, per agent or for all of them.</p>
+        <ul class="ticks">
+          <li>Rules in <code>~/.config/rift/policy.toml</code>, plus a repo's <code>.rift/policy.toml</code> once you trust it</li>
+          <li><strong>Critical commands are never auto-approved.</strong> From an agent's pane they're answered No and you're notified; from an MCP client you get the critical confirm dialog, with Deny as the default</li>
+          <li>Protected paths and anything outside the repo always ask</li>
+          <li>Every automatic decision lands in a policy log you can read</li>
+        </ul>
+      </div>
+      <img class="shot" src="screenshots/autopilot.png" width="1600" height="1000" loading="lazy" alt="Autopilot counting down to approve cargo test on a Claude Code card, with the Policy Log overlay listing approved and denied requests and the rule that decided each">
+    </article>
+
+    <div class="feat-grid">
+      <article class="card">
+        <img class="shot" src="screenshots/workflow-compare.png" width="1600" height="1000" loading="lazy" alt="Compare candidates view for a best-of-3 run: Claude Code, Codex and Gemini CLI cards with files changed, test results, duration and cost, a diff below, and Merge, Discard others and Ask AI to judge buttons">
+        <h3>Best of N</h3>
+        <p>Give one task to 2–4 agents, each in its own git worktree. Compare diffs, test results, time and cost side by side, then merge the winner and discard the rest.</p>
+      </article>
+      <article class="card">
+        <img class="shot" src="screenshots/workflow-queue.png" width="1600" height="1000" loading="lazy" alt="Task queue overlay for a Claude Code agent with three queued tasks and keys to add, edit, remove, reorder and pause">
+        <h3>Task queues</h3>
+        <p>Line up the next tasks for an agent. Each one is sent when the agent goes idle, after a 3-second countdown you can cancel. Queues survive a restart.</p>
+      </article>
+    </div>
+
+    <div class="sub-ai">
+      <h3>More for agents</h3>
+      <ul class="pill-list">
+        <li><strong>Write &amp; Review</strong> — a second agent reviews every turn; forward its verdict with <kbd>f</kbd></li>
+        <li><strong>Fix failing tests</strong> — loops test failures back to the agent until they pass</li>
+        <li><strong>workflows.toml</strong> — your own templates with <code>{task}</code>, <code>{branch}</code>, <code>{cwd}</code></li>
+        <li><strong>Change review</strong> — per-turn checkpoints, diff and one-click revert with <kbd>⌘⇧J</kbd>; never touches your index or branches</li>
+        <li><strong>MCP server</strong> — <code>claude mcp add rift -- rift mcp</code>; agents read your panes and run commands only with your approval</li>
+        <li><strong>New Agent</strong> — start one in a fresh git worktree, or a 2×2 grid of them</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
 <!-- ───────────────────────── COMPARE ───────────────────────── -->
 <section id="compare" class="compare" aria-labelledby="compare-title">
   <div class="wrap">
@@ -272,10 +335,11 @@
           <tr><th scope="row">Built-in AI chat / NL → command</th><td class="us"><span class="p">◐</span> preview</td><td><span class="n">✗</span></td><td><span class="y">✓</span></td><td><span class="p">◐</span> plugin</td></tr>
           <tr><th scope="row">Bring your own key / local models</th><td class="us"><span class="y">✓</span> incl. Ollama</td><td>—</td><td><span class="p">◐</span></td><td><span class="p">◐</span> plugin</td></tr>
           <tr><th scope="row">Dangerous-command preview</th><td class="us"><span class="y">✓</span></td><td><span class="n">✗</span></td><td><span class="n">✗</span></td><td><span class="n">✗</span></td></tr>
+          <tr><th scope="row">AI agent mission control</th><td class="us"><span class="y">✓</span> dock + autopilot</td><td><span class="n">✗</span></td><td><span class="p">◐</span> own agents</td><td><span class="n">✗</span></td></tr>
           <tr><th scope="row">Built-in browser panel</th><td class="us"><span class="y">✓</span></td><td><span class="n">✗</span></td><td><span class="n">✗</span></td><td><span class="p">◐</span></td></tr>
           <tr><th scope="row">Screen effects / shaders</th><td class="us"><span class="y">✓</span> 6 built in</td><td><span class="y">✓</span> custom shaders</td><td><span class="n">✗</span></td><td><span class="n">✗</span></td></tr>
           <tr><th scope="row">Platforms</th><td class="us">macOS, Linux</td><td>macOS, Linux</td><td>macOS, Linux, Windows</td><td>macOS</td></tr>
-          <tr><th scope="row">Maturity</th><td class="us">Early (v0.3)</td><td>Stable</td><td>Stable</td><td>Very mature</td></tr>
+          <tr><th scope="row">Maturity</th><td class="us">Early (v0.4)</td><td>Stable</td><td>Stable</td><td>Very mature</td></tr>
         </tbody>
       </table>
     </div>
@@ -296,6 +360,8 @@
           <dt><kbd>⌘P</kbd></dt><dd>Command palette</dd>
           <dt><kbd>⌘K</kbd></dt><dd>Ask AI about this</dd>
           <dt><kbd>⌘⇧A</kbd></dt><dd>AI chat sidebar</dd>
+          <dt><kbd>⌘⇧;</kbd></dt><dd>Agent Mission Control</dd>
+          <dt><kbd>⌘⇧.</kbd></dt><dd>Next agent that needs you</dd>
           <dt><kbd>Tab</kbd></dt><dd>Accept fix suggestion</dd>
           <dt><kbd>⌘Y</kbd></dt><dd>History search</dd>
           <dt><kbd>⌘F</kbd></dt><dd>Find in scrollback</dd>
@@ -310,9 +376,10 @@
           <dt><kbd>⌘⇧C</kbd></dt><dd>Copy block output</dd>
           <dt><kbd>⌘C</kbd></dt><dd>Copy selected block / selection</dd>
         </dl>
-        <h3>Tabs</h3>
+        <h3>Windows &amp; tabs</h3>
         <dl>
           <dt><kbd>⌘N</kbd></dt><dd>New window</dd>
+          <dt><kbd>⌥⌘W</kbd></dt><dd>Close window</dd>
           <dt><kbd>⌘⇧T</kbd></dt><dd>New tab</dd>
           <dt><kbd>⌘⇧W</kbd></dt><dd>Close tab</dd>
           <dt><kbd>⌘⇧[</kbd> <kbd>⌘⇧]</kbd></dt><dd>Previous / next tab</dd>
@@ -337,6 +404,7 @@
         <h3>Tools</h3>
         <dl>
           <dt><kbd>⌘⇧B</kbd></dt><dd>Browser panel</dd>
+          <dt><kbd>⌘⇧J</kbd></dt><dd>Change review</dd>
           <dt><kbd>⌘⇧S</kbd></dt><dd>SSH manager</dd>
           <dt><kbd>⌘⇧H</kbd></dt><dd>HUD</dd>
           <dt><kbd>⌃⇧Z</kbd></dt><dd>Time Warp</dd>
@@ -357,7 +425,7 @@
     <div>
       <p class="kicker">// install</p>
       <h2 id="install-title">Quickstart</h2>
-      <p>Rift builds from source with a stable Rust toolchain. Prebuilt binaries will be published on <a href="https://github.com/overkazaf/rift/releases">GitHub Releases</a>.</p>
+      <p>Download <code>Rift-0.4.0-macos.dmg</code> (or the Linux <code>.tar.gz</code>) from <a href="https://github.com/overkazaf/rift/releases">GitHub Releases</a>, or build from source with a stable Rust toolchain.</p>
       <ol class="steps">
         <li>Clone and build with GPU rendering and the built-in browser.</li>
         <li>Run it. Shell integration for zsh, bash and fish is injected automatically.</li>
@@ -464,7 +532,11 @@ api_url  = "http://localhost:11434"</code></pre>
     </details>
     <details>
       <summary>Will AI ever run a command on its own?</summary>
-      <p>No. Generated and suggested commands are typed into your prompt for review; you press Enter. Dangerous commands additionally go through Preview-Then-Accept.</p>
+      <p>Rift's own AI never does: generated and suggested commands are typed into your prompt for review, and you press Enter. Dangerous commands additionally go through Preview-Then-Accept. For coding agents, autopilot can answer routine prompts for you — but only if you turn it on, only when your policy approves the request, and never for critical commands.</p>
+    </details>
+    <details>
+      <summary>Which coding agents does Mission Control support?</summary>
+      <p>Claude Code, Codex CLI, Gemini CLI, opencode, Aider and Cursor CLI are detected automatically. For exact state tracking, point Claude Code hooks or Codex <code>notify</code> at <code>rift agent-event</code> — see the <a href="https://github.com/overkazaf/rift#mission-control-for-ai-agents">README</a>.</p>
     </details>
     <details>
       <summary>Does it modify my <code>.zshrc</code> / <code>.bashrc</code>?</summary>

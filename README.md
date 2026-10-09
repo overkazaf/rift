@@ -100,13 +100,13 @@ Rift is young. The others are excellent and much more mature. This table shows w
 | Built-in browser panel | ✅ | ❌ | ❌ | ◐ |
 | Screen effects / shaders | ✅ 6 built in | ✅ custom shaders | ❌ | ❌ |
 | Platforms | macOS, Linux | macOS, Linux | macOS, Linux, Windows | macOS |
-| Maturity | Early (v0.3) | Stable | Stable | Very mature |
+| Maturity | Early (v0.4) | Stable | Stable | Very mature |
 
 <sub>✅ yes · ◐ partial / in progress · ❌ no. Based on our reading of each project's public docs as of 2026. If something is wrong, please open an issue.</sub>
 
 ## Quickstart
 
-You need a stable Rust toolchain. Prebuilt binaries will be published on [Releases](https://github.com/overkazaf/rift/releases).
+Download the macOS `.dmg` or Linux tarball from [Releases](https://github.com/overkazaf/rift/releases), or build from source with a stable Rust toolchain:
 
 ```bash
 git clone https://github.com/overkazaf/rift.git
@@ -285,7 +285,7 @@ Rift is built to supervise AI coding agents: Claude Code, Codex CLI, Gemini CLI,
 
 Stop babysitting routine prompts. **Autopilot** answers an agent's approval prompt for you when your *policy* says the request is routine, after a short, visible countdown. It is **off by default for every agent** and the policy never acts while it is off.
 
-> **Critical commands are never auto-approved.** Whatever the rules say, anything the safety engine rates *critical* (`rm -rf` on system directories, `curl | sh`, `dd` to a disk, a fork bomb, ...) is answered **No** and you get a notification. Commands rated *risky* can only be approved by a rule you wrote that names the program. A rule cannot approve protected paths either (`.git/**`, `.env*`, `*.pem`, `~/.ssh/**`, CI configs, agent settings, `.rift/**`), or anything outside the repo root (symlinks are resolved first).
+> **Critical commands are never auto-approved.** Whatever the rules say, anything the safety engine rates *critical* (`rm -rf` on system directories, `curl | sh`, `dd` to a disk, a fork bomb, ...) is answered **No** and you get a notification when an agent asks in its pane; when it comes from an MCP client, Rift shows you the critical confirm dialog instead (Deny is the default) so you always get a look. Commands rated *risky* can only be approved by a rule you wrote that names the program. A rule cannot approve protected paths either (`.git/**`, `.env*`, `*.pem`, `~/.ssh/**`, CI configs, agent settings, `.rift/**`), or anything outside the repo root (symlinks are resolved first).
 
 - **Turn it on.** `p` on a card (or click the card's autopilot line) for one agent, `P` (or the **AUTO** switch in the dock header, or *Agents: Toggle Autopilot* in the palette) for all of them. Each card then shows `autopilot on · 12 auto-approved`.
 - **Countdown.** When a waiting agent's prompt is approved or denied by policy, its card shows ``Auto-approving `cargo test` in 1.5s — Esc to stop`` and answers when it reaches zero. `Esc` (or any other dock key, or typing in the agent's pane) cancels it: that prompt stays a question for you. Just before sending, Rift re-reads the screen and the policy and answers only if the prompt is still exactly the one that was judged. It always presses the one-time *Yes* (never *Always*), or *No* for a deny.
