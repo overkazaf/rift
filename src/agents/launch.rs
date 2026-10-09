@@ -122,7 +122,7 @@ pub fn plan_free(repo_root: &Path, repo_name: &str, kind: AgentKind, count: usiz
     out
 }
 
-fn branch_exists(repo_root: &Path, branch: &str) -> bool {
+pub(crate) fn branch_exists(repo_root: &Path, branch: &str) -> bool {
     std::process::Command::new("git")
         .arg("-C")
         .arg(repo_root)
@@ -136,7 +136,13 @@ fn branch_exists(repo_root: &Path, branch: &str) -> bool {
 pub fn create_worktrees(repo_root: &Path, repo_name: &str, kind: AgentKind, count: usize) -> Result<Vec<WorktreePlan>, String> {
     let root = repo_root.to_path_buf();
     let plans = plan_free(repo_root, repo_name, kind, count, &|p, b| p.exists() || branch_exists(&root, b));
-    let mut done = Vec::new();
+    run_plans(plans)
+}
+
+/// Run `git worktree add` for every plan. When one fails, the worktrees made
+/// before it are removed again, so a failed launch leaves nothing behind.
+pub fn run_plans(plans: Vec<WorktreePlan>) -> Result<Vec<WorktreePlan>, String> {
+    let mut done: Vec<WorktreePlan> = Vec::new();
     for plan in plans {
         let out = std::process::Command::new("git")
             .args(plan.git_args())
@@ -145,11 +151,44 @@ pub fn create_worktrees(repo_root: &Path, repo_name: &str, kind: AgentKind, coun
         if !out.status.success() {
             let err = String::from_utf8_lossy(&out.stderr);
             let first = err.lines().find(|l| !l.trim().is_empty()).unwrap_or("git worktree add failed");
-            return Err(format!("{}: {}", plan.shell_command(), first.trim()));
+            let msg = format!("{}: {}", plan.shell_command(), first.trim());
+            for d in done.iter().rev() {
+                let _ = std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(&d.repo_root)
+                    .args(["worktree", "remove", "--force"])
+                    .arg(&d.path)
+                    .output();
+                let _ = std::process::Command::new("git").arg("-C").arg(&d.repo_root).args(["branch", "-D", &d.branch]).output();
+            }
+            return Err(msg);
         }
         done.push(plan);
     }
     Ok(done)
+}
+
+/// Worktrees for a best-of-N run: `../<repo>-bestof-<slug>-<i>` on branch
+/// `agent/bestof-<slug>-<i>`. When any of the names is taken the whole set gets
+/// a `-2`, `-3`, ... suffix on the slug so the candidates stay together.
+/// Returns the slug actually used.
+pub fn plan_bestof(repo_root: &Path, repo_name: &str, slug: &str, n: usize, taken: &dyn Fn(&Path, &str) -> bool) -> (String, Vec<WorktreePlan>) {
+    let parent = repo_root.parent().unwrap_or(repo_root);
+    for attempt in 1..1000usize {
+        let s = if attempt == 1 { slug.to_string() } else { format!("{slug}-{attempt}") };
+        let plans: Vec<WorktreePlan> = (1..=n)
+            .map(|i| WorktreePlan {
+                repo_root: repo_root.to_path_buf(),
+                path: parent.join(format!("{repo_name}-bestof-{s}-{i}")),
+                branch: format!("agent/bestof-{s}-{i}"),
+                n: i,
+            })
+            .collect();
+        if !plans.iter().any(|p| taken(&p.path, &p.branch)) {
+            return (s, plans);
+        }
+    }
+    (slug.to_string(), Vec::new())
 }
 
 // ───────────────────────────── layouts ─────────────────────────────
@@ -255,6 +294,21 @@ mod tests {
         assert_eq!(ns, vec![3, 4, 5]);
         let none = plan_free(Path::new("/x/rift"), "rift", AgentKind::Codex, 2, &|_, _| false);
         assert_eq!(none.iter().map(|p| p.n).collect::<Vec<_>>(), vec![1, 2]);
+    }
+
+    #[test]
+    fn bestof_names_stay_together() {
+        let none = |_: &Path, _: &str| false;
+        let (slug, plans) = plan_bestof(Path::new("/w/app"), "app", "add-retry", 3, &none);
+        assert_eq!(slug, "add-retry");
+        assert_eq!(plans.iter().map(|p| p.branch.as_str()).collect::<Vec<_>>(), ["agent/bestof-add-retry-1", "agent/bestof-add-retry-2", "agent/bestof-add-retry-3"]);
+        assert_eq!(plans[1].path, Path::new("/w/app-bestof-add-retry-2"));
+        assert_eq!(plans[1].git_args().last().map(String::as_str), Some("agent/bestof-add-retry-2"));
+        // One taken name moves the whole set.
+        let taken = |_: &Path, b: &str| b == "agent/bestof-add-retry-2";
+        let (slug, plans) = plan_bestof(Path::new("/w/app"), "app", "add-retry", 3, &taken);
+        assert_eq!(slug, "add-retry-2");
+        assert!(plans.iter().all(|p| p.branch.starts_with("agent/bestof-add-retry-2-")));
     }
 
     #[test]

@@ -215,6 +215,7 @@ pub fn refresh(app: &mut App, now: Instant) {
         info.turns = turns;
         info.files = files;
         info.launch = launch;
+        info.wf = app.workflows.card_info(s.uid, now);
         if info != old {
             changed = true;
         }
@@ -383,6 +384,12 @@ pub fn apply(app: &mut App, action: Action) -> bool {
         }
         Action::Restart(uid) => restart(app, uid),
         Action::Close(uid) => close_pane(app, uid),
+        Action::Queue(uid) => {
+            crate::workflow::open_queue(app, uid);
+            app.agents_ui.focused = false;
+        }
+        Action::Forward(uid) => crate::workflow::forward_feedback(app, uid),
+        Action::StopWorkflow(uid) => crate::workflow::stop(app, Some(uid)),
         Action::ToggleDensity => {
             app.agents_ui.compact = !app.agents_ui.compact;
             app.agents_ui.follow = true;
@@ -620,6 +627,11 @@ pub fn on_mouse_press(app: &mut App) -> bool {
             app.review.open_turn(uid, id);
             app.agents_ui.focused = false;
         }
+        Some(Hit::Queue(uid)) => {
+            app.agents_ui.selected = Some(uid);
+            crate::workflow::open_queue(app, uid);
+            app.agents_ui.focused = false;
+        }
         Some(Hit::Confirm(yes)) => {
             press_key(app, if yes { DockKey::Enter } else { DockKey::Escape });
         }
@@ -650,7 +662,7 @@ pub fn on_right_press(app: &mut App) -> bool {
         return false;
     }
     let uid = match app.agents_ui.hit_at(app.cursor_x, app.cursor_y) {
-        Some(Hit::Card(u) | Hit::Mark(u) | Hit::Interrupt(u) | Hit::Reply(u) | Hit::Review(u) | Hit::Restart(u) | Hit::Close(u) | Hit::More(u)) => Some(u),
+        Some(Hit::Card(u) | Hit::Mark(u) | Hit::Interrupt(u) | Hit::Reply(u) | Hit::Review(u) | Hit::Restart(u) | Hit::Close(u) | Hit::More(u) | Hit::Queue(u)) => Some(u),
         Some(Hit::Answer { uid, .. } | Hit::Turn { uid, .. }) => Some(uid),
         _ => None,
     };

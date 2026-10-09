@@ -37,6 +37,15 @@ pub fn try_intercept(app: &mut App, event: &KeyEvent, event_loop: &ActiveEventLo
     if app.exec_preview.visible {
         return handle_exec_preview(app, event);
     }
+    // The queue countdown: Esc pauses the queue instead of reaching the agent.
+    if crate::workflow::countdown_active(app) && !app.workflows.overlay_visible() && matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
+        crate::workflow::cancel_countdown(app);
+        return true;
+    }
+    // Workflow overlays (wizard, queue editor, compare) are modal.
+    if app.workflows.overlay_visible() && !app.command_palette.visible {
+        return handle_workflow(app, event);
+    }
     // TimeWarp browser has highest priority
     if app.timewarp_browser.active {
         return handle_timewarp(app, event);
@@ -506,6 +515,7 @@ pub fn open_command_palette(app: &mut App) {
             let p = app.wm.active_pane();
             p.terminal.cwd.as_deref().is_some_and(|c| crate::agents::git::repo_info(std::path::Path::new(c)).is_some())
         },
+        workflows: crate::workflow::palette_user_templates(app),
     };
     app.command_palette.open(ctx);
 }
@@ -687,6 +697,7 @@ fn dispatch_palette_action(app: &mut App, action: PaletteAction, event_loop: &Ac
         PaletteAction::PrivacyReport => crate::ui::confirm::show_privacy_report(app),
         PaletteAction::McpActivity => app.mcp.overlay.toggle(),
         PaletteAction::Agent(l) => crate::agents::runtime::launch(app, l),
+        PaletteAction::Workflow(c) => crate::workflow::run_command(app, c),
         PaletteAction::Template(_) => {}
     }
 }
@@ -827,6 +838,52 @@ fn handle_review(app: &mut App, event: &KeyEvent) -> bool {
         return true;
     }
     crate::review::handle_key(app, key);
+    true
+}
+
+/// Workflow overlays: modal, consume every key.
+fn handle_workflow(app: &mut App, event: &KeyEvent) -> bool {
+    use crate::workflow::ui::WKey;
+    let m = app.modifiers;
+    let named = |n: &NamedKey| -> Option<WKey> {
+        Some(match n {
+            NamedKey::Escape => WKey::Escape,
+            NamedKey::Enter if m.super_key() || m.control_key() => WKey::Submit,
+            NamedKey::Enter if m.shift_key() => WKey::ShiftEnter,
+            NamedKey::Enter => WKey::Enter,
+            NamedKey::Tab if m.shift_key() => WKey::BackTab,
+            NamedKey::Tab => WKey::Tab,
+            NamedKey::Backspace => WKey::Backspace,
+            NamedKey::Delete => WKey::Delete,
+            NamedKey::ArrowLeft => WKey::Left,
+            NamedKey::ArrowRight => WKey::Right,
+            NamedKey::ArrowUp => WKey::Up,
+            NamedKey::ArrowDown => WKey::Down,
+            NamedKey::Home => WKey::Home,
+            NamedKey::End => WKey::End,
+            NamedKey::PageUp => WKey::PageUp,
+            NamedKey::PageDown => WKey::PageDown,
+            NamedKey::Space => WKey::Char(' '),
+            _ => return None,
+        })
+    };
+    let key = match &event.logical_key {
+        Key::Named(n) => named(n),
+        Key::Character(s) if m.super_key() => {
+            if s.eq_ignore_ascii_case("v") {
+                crate::window::selection::paste_from_clipboard().map(WKey::Text)
+            } else {
+                None
+            }
+        }
+        Key::Character(s) if m.control_key() => s.chars().next().map(|c| WKey::Ctrl(c.to_ascii_lowercase())),
+        Key::Character(s) if s.chars().count() > 1 => Some(WKey::Text(s.to_string())),
+        Key::Character(s) => s.chars().next().map(WKey::Char),
+        _ => None,
+    };
+    if let Some(k) = key {
+        crate::workflow::handle_key(app, k);
+    }
     true
 }
 

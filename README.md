@@ -272,12 +272,75 @@ Rift is built to supervise AI coding agents: Claude Code, Codex CLI, Gemini CLI,
   - **Broadcast.** `Space` (or `Cmd+click`) marks cards; `b` types once to every marked agent (or to all live agents when none is marked) and asks for confirmation when there is more than one target. Agents waiting on an approval menu are skipped, since typed text would act as menu keys.
   - **Review.** `v` or the **Review** button opens the change-review overlay for that pane; clicking a turn in the card's timeline opens it at that turn.
   - **Restart / close.** `R` stops the agent (if running) and re-runs its original launch command in the same pane (the command text Rift saw, or the default for the agent); `x` closes the pane. Both ask first when work could be lost.
-  - Keys at a glance: arrows or `j`/`k` select, `Enter` jump, `1`–`3` answer (otherwise `1`–`9` jump to the Nth agent), `Esc` interrupt, `r` reply, `b` broadcast, `Space` mark, `a` mark all, `c` clear marks, `v` review, `R` restart, `x` close, `m` menu, `Tab` density, `n` next waiting.
+  - Keys at a glance: arrows or `j`/`k` select, `Enter` jump, `1`–`3` answer (otherwise `1`–`9` jump to the Nth agent), `Esc` interrupt, `r` reply, `b` broadcast, `Space` mark, `a` mark all, `c` clear marks, `v` review, `t` task queue, `f` forward reviewer feedback, `S` stop a workflow loop, `R` restart, `x` close, `m` menu, `Tab` density, `n` next waiting.
 - **At a glance.** Each card shows the model, tokens, cost, context-window use and the usage reset time read from the agent's own UI (Claude Code status lines and spinner, Codex footer and `Token usage`, Gemini footer, Aider's token report, opencode's sidebar; parsers and fixtures in `src/agents/metrics.rs`), the files changed in the latest turn and over all turns (from change review), and a compact **turn timeline** (duration, files, outcome). The footer totals cost and tokens across agents and counts those waiting. If two agents run in the same git worktree *and* branch, both cards get an amber **same worktree as …** chip with a hint to use *New Agent > worktree*.
 - **Needs you.** `Cmd+Shift+.` jumps to the next agent waiting for you (cycling). Tabs show a badge with the agent count and an amber dot when one is waiting, and a waiting pane gets an amber border.
 - **Notifications.** When an agent needs approval or finishes a turn while its pane is not in front of you (or Rift is in the background) you get a macOS notification such as "Claude Code in rift/main needs your approval", plus a dock badge with the number of agents waiting. Notifications are de-duplicated and rate limited. Clicking a notification does not focus the pane (not supported yet).
 - **New Agent.** Command palette > `agent` (or *Agents > New Agent…*) lists the agent CLIs found on your `PATH`. Run one in the current directory, or in a **new git worktree** (`git worktree add ../<repo>-<agent>-<n> -b agent/<agent>-<n>`, created in the background with a progress toast). The tab is titled `<agent> · <branch>`. *Agent Layout: 2×2* (also `agent` palette entries for 2×1 and 3×2) starts a grid of agents, one worktree each.
 - **Change review.** Every turn is bracketed by `TurnStarted` / `TurnFinished` events that the change-review module uses to show what an agent changed.
+- **Workflows.** Several agents on one task, a writer with a reviewer, a fix-the-tests loop and per-agent task queues: see [Workflows](#workflows).
+
+### Workflows
+
+Workflows build on the dock, worktrees and change review. All of them are in the command palette (`Cmd+P`, type `workflow`); the three built-ins, *Best of 3*, *Write & Review* and *Fix failing tests*, plus your own from `workflows.toml` are listed there. Each opens a small form (task, agents, optional test command) and starts the agents in new tabs.
+
+**Best of N** (*Workflow: Best of N…*, or *Best of 3*). Describe a task, pick 2 to 4 agents (mix Claude Code, Codex and Gemini freely) and Rift:
+
+1. creates one git worktree per candidate on branch `agent/bestof-<slug>-<i>` (`../<repo>-bestof-<slug>-<i>`), from the commit your current branch is on. Changes you have not committed are not in the candidates;
+2. opens a grid in a new tab and gives every agent the same prompt. When the CLI takes the prompt as an argument it is passed that way (`claude "task"`, `codex "task"`, `gemini -i "task"`; Rift reads each CLI's own `--help` to check, and caches the answer). Otherwise, and for multi-line or very long tasks, the prompt is typed into the agent once it sits idle at its input box;
+3. when every candidate has finished a turn, collects each candidate's diff against the base commit (uncommitted work included) and, if a test command is set (the form suggests `cargo test`, `npm test`, `pytest`, `go test ./...` or `make test` by project), runs it in each worktree in the background;
+4. opens the **Compare** view: one card per candidate side by side (files changed, `+`/`-`, tests passed or failed, duration, cost read from the agent's UI), and below it the candidate's files and diff in the same diff viewer as Change Review. `←`/`→` (or `1`–`4`) pick a candidate, `j`/`k` a file, `n`/`p` a hunk. Reopen it any time with *Workflow: Compare Candidates*.
+
+Actions in the compare view (each asks first, and git runs on background threads):
+
+| Key | Action |
+|---|---|
+| `m` | **Merge this candidate.** Only when the main worktree has no uncommitted changes to tracked files and is on the branch the run started from (otherwise Rift explains why and does nothing). The candidate's uncommitted work is committed on its own branch, then `git merge --no-ff` runs in the main worktree. A conflict aborts the merge (`git merge --abort`) and names the files; your branch is untouched. |
+| `d` | **Discard others.** Closes the other candidates' panes, then `git worktree remove --force` and `git branch -D` for each. Only `agent/bestof-*` branches and `*-bestof-*` sibling worktrees created by the run can be removed, never the checked-out branch. The confirmation lists what would be lost (unmerged changes). |
+| `D` | After a merge: remove the merged candidate's own worktree and branch. |
+| `a` | **Ask AI to judge.** Sends the task, the test results and every diff to the AI chat (same consent, secret redaction and size caps as every other AI request). |
+
+**Write & Review** (*Workflow: Write & Review*). Agent A (the writer) works on the task; whenever one of its turns finishes with changes, agent B (the reviewer, in a second pane of the same worktree, told not to modify anything) gets that turn's diff and the task and is asked for concrete problems and a closing `VERDICT: APPROVED` or `VERDICT: CHANGES REQUESTED`. The reviewer's reply appears as a note on the writer's card in the dock ("Reviewer · round 1 · changes requested") and on the reviewer's own card. Select the writer's card and press `f` to forward the feedback to the writer, which starts the next round. The loop stops on `APPROVED`, after the round limit (3 by default, set in the form or with `rounds`), when a turn changes nothing, when you press `S` on either card or run *Workflow: Stop*, or when a pane closes. With `auto_forward = true` the feedback is forwarded without waiting for `f`. Both agents share one worktree, so the dock shows its usual *same worktree* chip; that is expected.
+
+**Fix failing tests** (*Workflow: Fix failing tests*). Rift runs the test command first. If it fails, the last 120 lines of output go to the agent as a prompt; after each of the agent's turns the tests run again, until they pass or the attempt limit (3 by default) is used up. The card shows the attempt and the tail of the latest failure.
+
+**Task queue.** Press `t` on an agent's card (or *Workflow: Task Queue…*) to open its queue: `a` adds a task (a multi-line composer: `Enter` saves, `Shift+Enter` adds a line), `e` edits, `x` removes, `u` / `d` move a task up or down, `p` pauses, `c c` clears. When the agent finishes a turn and sits idle, a toast counts down 3 seconds ("Next task for Claude Code in 3s: …") and then sends the next task; `Esc` during the countdown cancels it and pauses that agent's queue. A card with a queue shows `queue N` and the next task. Queues are saved with the session (`~/.config/rift/session.json`) by pane position and come back after a restart; agents driven by a workflow loop ignore their queue while the loop runs.
+
+#### workflows.toml
+
+Define your own in `~/.config/rift/workflows.toml` (read each time the palette opens; a problem in one entry shows once as a toast and skips only that entry). A workflow with the name of a built-in replaces it.
+
+```toml
+# Claude writes, Codex reviews, at most 2 rounds, in a fresh worktree.
+[[workflow]]
+name = "Refactor with review"
+description = "Claude writes, Codex reviews"
+strategy = "write-review"        # single | best-of | write-review | fix-tests
+agents = ["claude", "codex"]     # writer first, reviewer second
+worktree = true                  # yes: new git worktree, no: current directory
+rounds = 2                       # review rounds (write-review) or attempts (fix-tests)
+auto_forward = false             # true: send feedback to the writer without pressing f
+test = "cargo test"              # optional; suggested in the form, run by best-of and fix-tests
+prompt = """
+You are on branch {branch} in {cwd}.
+Task: {task}
+Keep the change small and add tests.
+"""
+
+# Four agents race on the same task.
+[[workflow]]
+name = "Bake-off"
+agents = ["claude", "codex", "gemini", "claude"]   # several agents imply strategy = "best-of"
+prompt = "{task}"
+
+# One agent, no worktree.
+[[workflow]]
+name = "Quick fix"
+agents = ["gemini"]
+prompt = "Fix this in the current directory, then stop: {task}"
+```
+
+`prompt` is expanded once for every agent: `{task}` is what you typed in the form, `{branch}` the agent's branch (its own worktree branch, or the current branch) and `{cwd}` its working directory. Unknown `{…}` text stays as written. Without `strategy`, one agent means `single` and several mean `best-of`; `agents` may be left out (the form asks, defaulting to your `default_agent`). Best of N and Write & Review need a git repository.
 
 ### Claude Code hooks
 
@@ -412,6 +475,9 @@ src/
 ├── window/              WindowManager, tabs, recursive split tree, panes, selection
 ├── shell_integration/   Embedded zsh/bash/fish hooks + auto-injection (never touches rc files)
 ├── blocks_ui/           Warp-style command blocks: gutter, chips, hover toolbar, folding, navigation
+├── agents/              Mission Control: detection, dock, approvals, metrics, New Agent + worktrees
+├── review/              Change Review: per-turn checkpoints (git trees), diff overlay, revert
+├── workflow/            Workflows: best of N + compare/merge, write & review, fix tests, task queues, workflows.toml
 ├── mcp/                 Built-in MCP server: Unix socket, `rift mcp` stdio bridge, tools, approval flow
 ├── ai/                  LLM backends, chat sidebar (streaming), inline Cmd+K / fix / # NL, advisor, observer
 ├── network/             SSH (russh), built-in browser chrome + WebView (wry)

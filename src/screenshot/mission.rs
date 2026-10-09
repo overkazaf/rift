@@ -168,7 +168,7 @@ pub fn build_menu(s: &mut Stage) {
     s.agents_ui.ctl.open_menu(claude);
 }
 
-fn base(s: &mut Stage) {
+pub(super) fn base(s: &mut Stage) {
     s.window_title = "aurora \u{2014} rift".into();
     s.set_tabs(&["aurora"]);
     s.dock_cols = 42;

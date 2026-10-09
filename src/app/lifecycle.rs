@@ -261,7 +261,7 @@ pub fn redraw(app: &mut App) {
     // IME: position the OS candidate window and draw inline preedit text
     // (While renaming a tab the preedit belongs to the rename field instead.)
     // (While the Cmd+K popover is open the preedit belongs to its input.)
-    if app.mui.tabs.editor.is_none() && app.inline_ai.popover.is_none() && !app.chat.focused && !app.agents_ui.composing() {
+    if app.mui.tabs.editor.is_none() && app.inline_ai.popover.is_none() && !app.chat.focused && !app.agents_ui.composing() && !app.workflows.ui.text_input_active() {
         super::ime::update_cursor_area(&app.wm, &app.renderer, window, &mut app.ime_area, content_area);
         super::ime::render_preedit(&app.wm, &mut app.renderer, &app.ime_preedit, &mut buffer, width as usize, content_area);
     }
@@ -275,6 +275,13 @@ pub fn redraw(app: &mut App) {
     if app.agents_ui.composing() {
         if let Some(r) = app.agents_ui.ime_rect {
             super::ime::set_cursor_area(window, &mut app.ime_area, (r.x, r.y, r.w, r.h));
+        }
+    }
+
+    // Workflow wizard / queue editor: the candidate window follows the text caret.
+    if app.workflows.ui.text_input_active() {
+        if let Some(r) = app.workflows.ui.ime_rect() {
+            super::ime::set_cursor_area(window, &mut app.ime_area, r);
         }
     }
 
@@ -436,6 +443,8 @@ pub fn redraw(app: &mut App) {
             &mut app.renderer.font, &app.renderer.theme,
         );
     }
+    // Workflow overlays (wizard, queue editor, compare) and the queue countdown toast.
+    crate::workflow::render(&mut app.workflows, &app.agents, &mut app.renderer, &mut buffer, width as usize, height as usize);
     if app.mcp.overlay.visible {
         app.mcp.overlay.render(
             &mut buffer, width as usize, height as usize,
@@ -548,8 +557,8 @@ pub fn redraw(app: &mut App) {
         cx.spinner_toast(&msg, elapsed);
     }
 
-    // Worktree creation for "New Agent" in progress.
-    if let Some(label) = app.agents_rt.progress_label() {
+    // Worktree creation for "New Agent" / workflows in progress.
+    if let Some(label) = app.agents_rt.progress_label().or_else(|| app.workflows.progress_label()) {
         let elapsed = app.renderer.start_time.elapsed().as_secs_f32();
         let tk = crate::ui::kit::Tokens::new(&app.renderer.theme, app.renderer.font.cell_width, app.renderer.font.cell_height);
         let mut cx = crate::ui::kit::Ctx::new(&mut buffer, width as usize, height as usize, &mut app.renderer.font, &tk);
@@ -743,6 +752,7 @@ fn about_to_wait_inner(app: &mut App, event_loop: &ActiveEventLoop) {
 
     // Change Review: collect finished git jobs (snapshots, diffs, reverts).
     crate::review::poll(app);
+    crate::workflow::poll(app, &mut wake_at);
     if let Some(d) = app.review.next_deadline() {
         wake_at = wake_at.min(d);
     }
@@ -1012,6 +1022,7 @@ fn about_to_wait_inner(app: &mut App, event_loop: &ActiveEventLoop) {
         || app.process_tree.visible
         || app.mcp.overlay.visible
         || app.review.ui.visible
+        || app.workflows.overlay_visible()
         || app.system_info.visible
         || app.port_dashboard.visible
         || app.regex_playground.visible

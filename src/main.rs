@@ -17,6 +17,7 @@ mod renderer;
 mod window;
 mod ui;
 mod review;
+mod workflow;
 mod network;
 #[allow(dead_code)]
 mod ai;

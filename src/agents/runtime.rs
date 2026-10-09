@@ -213,6 +213,7 @@ pub fn poll(app: &mut App, wake_at: &mut Instant) {
     // Public events: one drain, dispatched to the change-review module.
     for ev in app.agents.drain_events() {
         crate::review::on_agent_event(app, &ev);
+        crate::workflow::on_agent_event(app, &ev);
     }
     notify_events(app, now);
     update_badge(app);
@@ -420,7 +421,7 @@ pub fn default_agent(app: &mut App) -> Option<AgentKind> {
     AgentKind::parse(&app.config.agents.default_agent).or_else(|| installed(app).first().copied())
 }
 
-fn active_cwd(app: &App) -> PathBuf {
+pub(crate) fn active_cwd(app: &App) -> PathBuf {
     let p = app.wm.active_pane();
     let cwd = match p.pty {
         PtyKind::Ssh(_) => None,
@@ -430,7 +431,11 @@ fn active_cwd(app: &App) -> PathBuf {
 }
 
 fn queue_command(app: &mut App, uid: usize, kind: AgentKind) {
-    let cmd = launch::launch_command(kind);
+    queue_cmd(app, uid, launch::launch_command(kind));
+}
+
+/// Type `cmd` in pane `uid` once its shell shows the first prompt.
+fn queue_cmd(app: &mut App, uid: usize, cmd: String) {
     app.agents_rt.console.note_launch(uid, &cmd);
     app.agents_rt.pending.push(PendingCmd { uid, cmd, since: Instant::now(), strict: false });
 }
@@ -565,14 +570,31 @@ fn finish_jobs(app: &mut App) {
     }
 }
 
-/// One tab holding a `cols x rows` grid; pane `i` runs the agent in `slots[i]`.
-fn build_grid(app: &mut App, kind: AgentKind, cols: usize, rows: usize, slots: Vec<(PathBuf, String)>) {
+/// One agent to start in a grid or tab: where, which CLI and the exact command typed.
+#[derive(Clone, Debug)]
+pub struct Slot {
+    pub dir: PathBuf,
+    /// Tab title part when the slot gets its own tab ("agent/claude-1").
+    pub label: String,
+    pub kind: AgentKind,
+    pub cmd: String,
+}
+
+impl Slot {
+    pub fn plain(dir: PathBuf, label: String, kind: AgentKind) -> Slot {
+        Slot { dir, label, kind, cmd: launch::launch_command(kind) }
+    }
+}
+
+/// A tab titled `title` holding a `cols x rows` grid; pane `i` runs `slots[i].cmd`
+/// in `slots[i].dir`. Slots that do not fit get their own tabs. Returns the pane
+/// uids in slot order and whether the window was too small for the whole grid.
+pub fn open_grid(app: &mut App, title: &str, cols: usize, rows: usize, slots: &[Slot]) -> (Vec<usize>, bool) {
     if slots.is_empty() {
-        return;
+        return (Vec::new(), false);
     }
     let (c, r) = pane_dims(app);
-    let title = format!("{} \u{b7} grid {}x{}", kind.slug(), cols, rows);
-    let first = app.wm.new_tab_in(c, r, slots[0].0.to_str(), Some(&title));
+    let first = app.wm.new_tab_in(c, r, slots[0].dir.to_str(), Some(title));
     let mut panes = vec![first];
     let mut columns: Vec<Vec<usize>> = vec![vec![first]];
     let mut refused = false;
@@ -583,7 +605,7 @@ fn build_grid(app: &mut App, kind: AgentKind, cols: usize, rows: usize, slots: V
         }
         let area = app.content_area();
         let min = crate::app::panes::min_size(app);
-        let cwd = slots[n].0.to_str().map(str::to_string);
+        let cwd = slots[n].dir.to_str().map(str::to_string);
         let (target, dir) = match step {
             GridStep::NewColumn => (columns.last().and_then(|c| c.last()).copied(), SplitDir::Horizontal),
             GridStep::NewRow { col } => (columns.get(col).and_then(|c| c.last()).copied(), SplitDir::Vertical),
@@ -603,14 +625,30 @@ fn build_grid(app: &mut App, kind: AgentKind, cols: usize, rows: usize, slots: V
             }
         }
     }
-    for (i, uid) in panes.iter().enumerate() {
-        let _ = i;
-        queue_command(app, *uid, kind);
+    for (uid, slot) in panes.iter().zip(slots) {
+        queue_cmd(app, *uid, slot.cmd.clone());
     }
     // Whatever did not fit gets its own tab.
-    for (dir, label) in slots.iter().skip(panes.len()) {
-        open_tab(app, kind, dir, label);
+    for slot in slots.iter().skip(panes.len()) {
+        panes.push(open_slot_tab(app, slot));
     }
+    (panes, refused)
+}
+
+/// A new tab running the slot's command.
+pub fn open_slot_tab(app: &mut App, slot: &Slot) -> usize {
+    let (c, r) = pane_dims(app);
+    let title = launch::tab_title(slot.kind, &slot.label);
+    let uid = app.wm.new_tab_in(c, r, slot.dir.to_str(), Some(&title));
+    queue_cmd(app, uid, slot.cmd.clone());
+    uid
+}
+
+/// One tab holding a `cols x rows` grid; pane `i` runs the agent in `slots[i]`.
+fn build_grid(app: &mut App, kind: AgentKind, cols: usize, rows: usize, slots: Vec<(PathBuf, String)>) {
+    let title = format!("{} \u{b7} grid {}x{}", kind.slug(), cols, rows);
+    let slots: Vec<Slot> = slots.into_iter().map(|(dir, label)| Slot::plain(dir, label, kind)).collect();
+    let (_, refused) = open_grid(app, &title, cols, rows, &slots);
     if refused {
         app.blocks_ui.show_toast("Window too small for the whole grid: extra agents opened in tabs");
     }

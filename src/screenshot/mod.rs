@@ -17,6 +17,7 @@ mod page;
 mod png;
 mod scenes;
 mod shell;
+mod workflow;
 
 use std::path::{Path, PathBuf};
 

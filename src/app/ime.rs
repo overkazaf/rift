@@ -55,6 +55,12 @@ fn commit_text(app: &mut App, text: &str) {
     if crate::ai::inline::insert_text(app, text) {
         return;
     }
+    // Workflow overlays: the wizard's text fields and the queue composer.
+    if app.workflows.overlay_visible() {
+        app.workflows.ui.insert_text(text);
+        app.request_redraw();
+        return;
+    }
     // Modal overlays that sit above everything and take no free text: drop input.
     if app.exec_preview.visible
         || app.timewarp_browser.active
@@ -147,6 +153,7 @@ fn other_panel_visible(app: &App) -> bool {
         || app.process_tree.visible
         || app.mcp.overlay.visible
         || app.review.ui.visible
+        || app.workflows.overlay_visible()
         || app.system_info.visible
         || app.port_dashboard.visible
 }

@@ -10,6 +10,7 @@
 use std::path::PathBuf;
 
 use crate::terminal::{Cell, Terminal};
+use crate::workflow::queue::TaskQueue;
 use crate::window::pane::PtyKind;
 use crate::window::tab::{PaneNode, SplitDir, Tab};
 use crate::window::WindowManager;
@@ -34,6 +35,8 @@ pub struct TabState {
     pub layout: Option<PaneNode<Option<String>>>,
     /// In-order index of the focused pane within `layout`.
     pub active_pane: usize,
+    /// Task queues of agents (workflows), by in-order pane index.
+    pub queues: Vec<(usize, TaskQueue)>,
 }
 
 // ── Public API ──
@@ -42,7 +45,13 @@ pub struct TabState {
 /// Called on app exit so the next launch can restore where the user left
 /// off.
 pub fn save_session(wm: &WindowManager) -> Result<(), String> {
-    let tabs: Vec<TabState> = wm.tabs.iter().map(|tab| {
+    save_session_with(wm, &[])
+}
+
+/// Like [`save_session`], also storing each tab's task queues
+/// (`queues[tab]` = (in-order pane index, queue) pairs).
+pub fn save_session_with(wm: &WindowManager, queues: &[Vec<(usize, TaskQueue)>]) -> Result<(), String> {
+    let tabs: Vec<TabState> = wm.tabs.iter().enumerate().map(|(ti, tab)| {
         let terminal = &tab.active_pane().terminal;
         TabState {
             title: tab.title.clone(),
@@ -56,6 +65,7 @@ pub fn save_session(wm: &WindowManager) -> Result<(), String> {
                 })
             }),
             active_pane: tab.active,
+            queues: queues.get(ti).cloned().unwrap_or_default(),
         }
     }).collect();
 
@@ -107,10 +117,10 @@ pub fn clear_session() {
 /// brand new shell). Creates additional tabs as needed, restores titles
 /// and scrollback, and best-effort `cd`s each shell back to its previous
 /// working directory. A no-op if there is nothing to restore.
-pub fn restore_session(wm: &mut WindowManager) {
-    let Some(state) = load_session() else { return };
+pub fn restore_session(wm: &mut WindowManager) -> Vec<(usize, TaskQueue)> {
+    let Some(state) = load_session() else { return Vec::new() };
     if state.tabs.is_empty() {
-        return;
+        return Vec::new();
     }
 
     let (cols, rows) = {
@@ -129,6 +139,15 @@ pub fn restore_session(wm: &mut WindowManager) {
     wm.active_tab = state.active_tab.min(last);
     wm.renumber_tabs();
     log::info!("Session restored: {} tab(s)", wm.tabs.len());
+    state.tabs.iter().enumerate().flat_map(|(ti, t)| queues_to_panes(wm, ti, t)).collect()
+}
+
+/// Queues of a restored tab keyed by the new pane ids (positions that no
+/// longer exist are dropped).
+pub fn queues_to_panes(wm: &WindowManager, tab_idx: usize, state: &TabState) -> Vec<(usize, TaskQueue)> {
+    let Some(tab) = wm.tabs.get(tab_idx) else { return Vec::new() };
+    let panes = tab.panes();
+    state.queues.iter().filter_map(|(leaf, q)| panes.get(*leaf).map(|p| (p.id, q.clone()))).collect()
 }
 
 /// Rebuild one tab: the split layout first (spawning extra panes in their
@@ -342,6 +361,23 @@ impl SessionState {
                 s.push('\n');
             }
             s.push_str("      ]");
+            if !tab.queues.is_empty() {
+                s.push_str(",\n      \"queues\": [");
+                for (k, (leaf, q)) in tab.queues.iter().enumerate() {
+                    if k > 0 {
+                        s.push_str(", ");
+                    }
+                    s.push_str(&format!("{{\"pane\": {leaf}, \"paused\": {}, \"tasks\": [", q.paused));
+                    for (j, t) in q.tasks.iter().enumerate() {
+                        if j > 0 {
+                            s.push_str(", ");
+                        }
+                        s.push_str(&format!("\"{}\"", json_escape(t)));
+                    }
+                    s.push_str("]}");
+                }
+                s.push(']');
+            }
             if let Some(layout) = &tab.layout {
                 s.push_str(&format!(",\n      \"active_pane\": {},\n      \"layout\": ", tab.active_pane));
                 layout_to_json(layout, &mut s);
@@ -375,11 +411,28 @@ impl SessionState {
                 .unwrap_or_default();
             let layout = obj_get(tobj, "layout").and_then(|v| layout_from_json(v, 0));
             let active_pane = obj_get(tobj, "active_pane").and_then(JsonValue::as_u64).unwrap_or(0) as usize;
-            tabs.push(TabState { title, working_dir, scrollback, layout, active_pane });
+            let queues = obj_get(tobj, "queues").and_then(JsonValue::as_array).map(queues_from_json).unwrap_or_default();
+            tabs.push(TabState { title, working_dir, scrollback, layout, active_pane, queues });
         }
 
         Some(SessionState { tabs, active_tab, timestamp })
     }
+}
+
+fn queues_from_json(items: &[JsonValue]) -> Vec<(usize, TaskQueue)> {
+    items
+        .iter()
+        .filter_map(|v| {
+            let o = v.as_object()?;
+            let pane = obj_get(o, "pane").and_then(JsonValue::as_u64)? as usize;
+            let mut q = TaskQueue::default();
+            for t in obj_get(o, "tasks").and_then(JsonValue::as_array)?.iter().filter_map(JsonValue::as_str) {
+                q.push(t);
+            }
+            q.paused = matches!(obj_get(o, "paused"), Some(JsonValue::Bool(true)));
+            (!q.is_empty()).then_some((pane, q))
+        })
+        .collect()
 }
 
 fn layout_to_json(node: &PaneNode<Option<String>>, out: &mut String) {
@@ -681,8 +734,9 @@ mod tests {
                     scrollback: vec!["hi".into()],
                     layout: Some(layout),
                     active_pane: 2,
+                    queues: Vec::new(),
                 },
-                TabState { title: "u".into(), working_dir: "~".into(), scrollback: vec![], layout: None, active_pane: 0 },
+                TabState { title: "u".into(), working_dir: "~".into(), scrollback: vec![], layout: None, active_pane: 0, queues: Vec::new() },
             ],
             active_tab: 1,
             timestamp: 7,
@@ -733,4 +787,71 @@ mod tests {
         assert!(JsonParser::new(&deep).parse_value().is_none());
     }
 
+
+    fn queue(tasks: &[&str], paused: bool) -> TaskQueue {
+        let mut q = TaskQueue::default();
+        for t in tasks {
+            q.push(t);
+        }
+        q.paused = paused;
+        q
+    }
+
+    #[test]
+    fn task_queues_round_trip_through_session_json() {
+        let state = SessionState {
+            tabs: vec![
+                TabState {
+                    title: "agents".into(),
+                    working_dir: "~".into(),
+                    scrollback: vec![],
+                    layout: None,
+                    active_pane: 0,
+                    queues: vec![
+                        (0, queue(&["fix the \"login\" test", "two\nlines\twith \\ and \u{4e2d}\u{6587} \u{1f642}", "third"], false)),
+                        (2, queue(&["only one"], true)),
+                    ],
+                },
+                TabState { title: "plain".into(), working_dir: "~".into(), scrollback: vec![], layout: None, active_pane: 0, queues: Vec::new() },
+            ],
+            active_tab: 0,
+            timestamp: 9,
+        };
+        let json = state.to_json();
+        assert!(json.contains("\"queues\""));
+        let back = SessionState::from_json(&json).expect("parses");
+        assert_eq!(back.tabs[0].queues, state.tabs[0].queues);
+        assert!(back.tabs[1].queues.is_empty());
+        assert!(!json.split("\"title\": \"plain\"").nth(1).unwrap_or("").contains("queues"), "tabs without queues write no key");
+        // Old files, and damaged queue entries, load without queues.
+        let old = r#"{"active_tab":0,"timestamp":1,"tabs":[{"title":"a","working_dir":"~","scrollback":[]}]}"#;
+        assert!(SessionState::from_json(old).unwrap().tabs[0].queues.is_empty());
+        let bad = r#"{"active_tab":0,"timestamp":1,"tabs":[{"title":"a","working_dir":"~","scrollback":[],"queues":[{"pane":"x"},{"pane":1,"tasks":[]},{"pane":3,"tasks":["ok",5]}]}]}"#;
+        let q = &SessionState::from_json(bad).unwrap().tabs[0].queues;
+        assert_eq!(q.len(), 1);
+        assert_eq!((q[0].0, q[0].1.tasks.as_slice()), (3, &["ok".to_string()][..]));
+    }
+
+    #[test]
+    fn restored_queues_attach_to_the_new_pane_ids() {
+        let mut wm = WindowManager::headless(80, 24);
+        let a = crate::window::PaneRect { x: 0, y: 30, width: 2400, height: 1400 };
+        let min = crate::window::tab::MinSize::from_cells(10, 20);
+        wm.split_active(SplitDir::Horizontal, a, min);
+        let ids: Vec<usize> = wm.tabs[0].panes().iter().map(|p| p.id).collect();
+        assert!(ids.len() >= 2, "{ids:?}");
+        let st = TabState {
+            title: "t".into(),
+            working_dir: "~".into(),
+            scrollback: vec![],
+            layout: None,
+            active_pane: 0,
+            queues: vec![(1, queue(&["x"], false)), (7, queue(&["gone"], false))],
+        };
+        let mapped = queues_to_panes(&wm, 0, &st);
+        assert_eq!(mapped.len(), 1, "position 7 no longer exists");
+        assert_eq!(mapped[0].0, ids[1]);
+        assert_eq!(mapped[0].1.tasks, ["x"]);
+        assert!(queues_to_panes(&wm, 5, &st).is_empty());
+    }
 }

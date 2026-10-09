@@ -449,6 +449,8 @@ pub enum PaletteAction {
     McpActivity,
     /// "New Agent": launch an agent CLI (tab / worktree / grid).
     Agent(crate::agents::runtime::Launch),
+    /// Workflows: best of N, write & review, fix tests, queue, compare.
+    Workflow(crate::workflow::WorkflowCmd),
     /// Internal: completes the query to this keyword; never dispatched.
     Template(&'static str),
 }
@@ -503,6 +505,8 @@ pub struct PaletteContext {
     pub agents: Vec<crate::agents::AgentKind>,
     /// The active pane sits inside a git repository (worktrees possible).
     pub in_git_repo: bool,
+    /// The user's own workflow templates (`workflows.toml`): (name, detail).
+    pub workflows: Vec<(String, String)>,
 }
 
 /// Live-preview request for the dispatcher (theme browsing).
@@ -1412,6 +1416,12 @@ fn dynamic_items(ctx: &PaletteContext) -> Vec<PaletteItem> {
         it.id = format!("tab-dyn:{i}"); // index-based ids are unstable; keep them out of frecency
         v.push(it);
     }
+    for (name, detail) in &ctx.workflows {
+        let mut it = entry(&format!("Workflow: {name}"), Category::Agents, Some(detail.clone()), PaletteAction::Workflow(crate::workflow::WorkflowCmd::Template(name.clone())));
+        it.meta = true;
+        it.id = format!("workflow:{name}");
+        v.push(it);
+    }
     for h in &ctx.ssh_hosts {
         let mut it = entry(&format!("SSH: {}", h.alias), Category::Tools, Some(h.detail.clone()), PaletteAction::Ssh(h.alias.clone()));
         it.meta = true;
@@ -1485,6 +1495,16 @@ fn catalog() -> Vec<PaletteItem> {
     v.push(entry("Next Agent Needing Attention", Agents, s("Shift+."), Menu(MenuAction::AgentNextAttention)));
     v.push(entry("New Agent...", Agents, None, Menu(MenuAction::AgentNew)));
     v.push(entry("Agent Layout: 2\u{d7}2", Agents, None, Menu(MenuAction::AgentLayout2x2)));
+    {
+        use crate::workflow::WorkflowCmd as W;
+        v.push(entry("Workflow: Best of N\u{2026}", Agents, None, PaletteAction::Workflow(W::BestOfN)));
+        v.push(entry("Workflow: Best of 3", Agents, None, PaletteAction::Workflow(W::Template("Best of 3".into()))));
+        v.push(entry("Workflow: Write & Review", Agents, None, PaletteAction::Workflow(W::Template("Write & Review".into()))));
+        v.push(entry("Workflow: Fix failing tests", Agents, None, PaletteAction::Workflow(W::Template("Fix failing tests".into()))));
+        v.push(entry("Workflow: Compare Candidates", Agents, None, PaletteAction::Workflow(W::Compare)));
+        v.push(entry("Workflow: Task Queue\u{2026}", Agents, None, PaletteAction::Workflow(W::Queue)));
+        v.push(entry("Workflow: Stop", Agents, None, PaletteAction::Workflow(W::Stop)));
+    }
     v.push(entry("Toggle Auto Fix Suggestions", Ai, None, Menu(MenuAction::AutoFixToggle)));
     v.push(entry("Toggle # Natural Language", Ai, None, Menu(MenuAction::NaturalLanguageToggle)));
     v.push(entry("AI: Select Model", Ai, None, PaletteAction::Template("model ")));
@@ -1577,6 +1597,7 @@ mod tests {
             font_size: 15.0,
             agents: vec![crate::agents::AgentKind::ClaudeCode, crate::agents::AgentKind::Codex],
             in_git_repo: true,
+            workflows: vec![("Refactor with review".into(), "write & review \u{b7} workflows.toml".into())],
             models: vec![
                 crate::ai::local::picker::ModelOption {
                     label: "qwen2.5-coder:7b".into(),
@@ -2175,6 +2196,32 @@ mod tests {
         for m in expected {
             assert!(have.contains(&format!("{m:?}")), "missing palette entry for {m:?}");
         }
+    }
+
+    #[test]
+    fn workflow_entries_are_searchable() {
+        use crate::workflow::WorkflowCmd;
+        let mut p = pal();
+        open(&mut p);
+        p.set_query("workflow best");
+        let n = names(&p);
+        assert!(n.contains(&"Workflow: Best of N\u{2026}"), "{n:?}");
+        assert!(n.contains(&"Workflow: Best of 3"), "{n:?}");
+        p.set_query("workflow write");
+        assert!(names(&p).contains(&"Workflow: Write & Review"));
+        p.set_query("workflow fix");
+        assert!(names(&p).contains(&"Workflow: Fix failing tests"));
+        // The user's own template from workflows.toml.
+        p.set_query("workflow refactor");
+        let n = names(&p);
+        assert_eq!(n.first().copied(), Some("Workflow: Refactor with review"), "{n:?}");
+        let act = p.handle_key(PaletteKey::Enter);
+        assert!(matches!(act, Some(PaletteAction::Workflow(WorkflowCmd::Template(ref t))) if t == "Refactor with review"), "{act:?}");
+        open(&mut p);
+        p.set_query("workflow compare");
+        assert!(names(&p).contains(&"Workflow: Compare Candidates"));
+        p.set_query("workflow stop");
+        assert!(names(&p).contains(&"Workflow: Stop"));
     }
 
     #[test]

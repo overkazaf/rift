@@ -27,7 +27,7 @@ use crate::tools::hud::{Hud, HudData};
 use crate::window::tab::{PaneNode, SplitDir, Tab};
 use crate::window::{Pane, PaneRect, WindowManager};
 
-pub const NAMES: [&str; 16] = [
+pub const NAMES: [&str; 20] = [
     "hero",
     "blocks",
     "ai-chat",
@@ -44,6 +44,10 @@ pub const NAMES: [&str; 16] = [
     "mission-control",
     "mission-control-reply",
     "mission-control-menu",
+    "workflow-compare",
+    "workflow-dock",
+    "workflow-wizard",
+    "workflow-queue",
 ];
 
 pub struct SceneSpec {
@@ -74,6 +78,10 @@ pub fn spec(name: &str) -> Option<SceneSpec> {
         "mission-control" => (18.0 / 24.0, mission_control),
         "mission-control-reply" => (18.0 / 24.0, |s| super::mission::build_reply(s)),
         "mission-control-menu" => (18.0 / 24.0, |s| super::mission::build_menu(s)),
+        "workflow-compare" => (18.0 / 24.0, |s| super::workflow::build_compare(s)),
+        "workflow-dock" => (18.0 / 24.0, |s| super::workflow::build_dock(s)),
+        "workflow-wizard" => (18.0 / 24.0, |s| super::workflow::build_wizard(s)),
+        "workflow-queue" => (18.0 / 24.0, |s| super::workflow::build_queue(s)),
         _ => return None,
     };
     Some(SceneSpec { font_mul, build })
@@ -111,6 +119,8 @@ pub struct Stage {
     pub agents_ui: crate::agents::ui::AgentsUi,
     /// Preferred dock width in columns (0 = default).
     pub dock_cols: usize,
+    /// A workflow overlay drawn over everything (wizard, queue editor, compare view).
+    pub workflow: Option<super::workflow::Overlay>,
     font_path: String,
     font_px: f32,
 }
@@ -140,6 +150,7 @@ impl Stage {
             agents: crate::agents::AgentRegistry::new(),
             agents_ui: crate::agents::ui::AgentsUi::new(),
             dock_cols: 0,
+            workflow: None,
             font_path: font_path.to_string(),
             font_px,
         }
@@ -310,6 +321,9 @@ impl Stage {
         }
         if let Some(e) = &self.exec_preview {
             e.render(&mut buf, w, h, &mut self.renderer.font, &self.renderer.theme);
+        }
+        if let Some(o) = &mut self.workflow {
+            o.render(&mut buf, w, h, &mut self.renderer.font, &self.renderer.theme);
         }
         buf
     }

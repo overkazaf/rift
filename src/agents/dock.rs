@@ -289,7 +289,7 @@ fn draw_cross(cx: &mut Ctx, x: usize, y: usize, s: usize, c: Rgb) {
     }
 }
 
-fn kind_chip(cx: &mut Ctx, x: usize, y: usize, size: usize, kind: AgentKind) {
+pub(crate) fn kind_chip(cx: &mut Ctx, x: usize, y: usize, size: usize, kind: AgentKind) {
     let c = kind.color();
     cx.fill_rrect(Rect::new(x, y, size, size), cx.tk.radius_sm, c);
     // Dark or light glyph, whichever reads better on the brand colour.
@@ -376,6 +376,8 @@ struct Plan {
     /// Prompt box text, full and trimmed (compact cards).
     body: Vec<(String, LineStyle)>,
     body_compact: Vec<(String, LineStyle)>,
+    /// Workflow block (label, queue, countdown, reviewer note).
+    wf: Vec<(String, Tone)>,
 }
 
 fn plan_card(d: &CardData, inner_cols: usize) -> Plan {
@@ -388,6 +390,7 @@ fn plan_card(d: &CardData, inner_cols: usize) -> Plan {
         }
         _ => (Vec::new(), Vec::new()),
     };
+    let wf = d.info.map(|i| crate::workflow::card_lines(&i.wf, inner_cols, if d.selected { 3 } else { 2 })).unwrap_or_default();
     let raw = if d.waiting() && body.is_empty() { d.info.map_or(0, |i| i.raw_tail.len().min(3)) } else { 0 };
     let flags = CardFlags {
         selected: d.selected,
@@ -400,8 +403,9 @@ fn plan_card(d: &CardData, inner_cols: usize) -> Plan {
         confirm: d.confirm_text().is_some(),
         composer: d.composing(),
         turns: d.info.map_or(0, |i| i.turns.len()),
+        workflow_lines: wf.len(),
     };
-    Plan { flags, lines, body, body_compact }
+    Plan { flags, lines, body, body_compact, wf }
 }
 
 fn draw_card(cx: &mut Ctx, fr: &mut Frame, r: Rect, d: &CardData, detail: Detail, row_list: &[Row], plan: &Plan) {
@@ -467,6 +471,14 @@ fn draw_card(cx: &mut Ctx, fr: &mut Frame, r: Rect, d: &CardData, detail: Detail
             Row::Composer => draw_composer(cx, fr, d, left, right, y, h),
             Row::Actions => draw_actions(cx, fr, d, left, right, y, h),
             Row::Timeline(n) => draw_timeline(cx, fr, d, left, right, y, n),
+            Row::Workflow(n) => {
+                let band = Rect::new(left.saturating_sub(tk.sp.xs), y, inner_w + tk.sp.xs, n * lp);
+                for (i, (text, tone)) in plan.wf.iter().take(n).enumerate() {
+                    let colour = if *tone == Tone::Neutral { tk.text_muted } else { tk.tone(*tone) };
+                    cx.text_fit(left, y + i * lp + lp.saturating_sub(tk.ch) / 2, inner_w, text, colour);
+                }
+                fr.add(band, Hit::Queue(uid));
+            }
         }
         y += h + ui::rows_gap(tk);
     }

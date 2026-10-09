@@ -141,6 +141,8 @@ pub struct App {
     pub agents: crate::agents::AgentRegistry,
     pub agents_ui: crate::agents::ui::AgentsUi,
     pub agents_rt: crate::agents::runtime::Runtime,
+    /// Workflows: best-of-N, write & review, fix tests, task queues (see `crate::workflow`).
+    pub workflows: crate::workflow::Workflows,
 
     pub needs_render: bool,
     pub startup_time: std::time::Instant,
@@ -185,7 +187,7 @@ impl App {
 
         // Restore the previous session (tabs, titles, working dirs,
         // scrollback) if one was saved on a prior exit.
-        crate::tools::session::restore_session(&mut wm);
+        let restored_queues = crate::tools::session::restore_session(&mut wm);
 
         let keymap = keymap::Keymap::build(&config.input.keybindings);
         let notify_after_secs = config.notify_after_secs;
@@ -268,6 +270,11 @@ impl App {
             agents: agents_registry,
             agents_ui: Default::default(),
             agents_rt: Default::default(),
+            workflows: {
+                let mut w = crate::workflow::Workflows::new();
+                w.queues.extend(restored_queues);
+                w
+            },
 
             startup_time: std::time::Instant::now(),
             startup_skipped: false,
@@ -422,7 +429,7 @@ impl ApplicationHandler for App {
             WindowEvent::CloseRequested => {
                 // Auto-save config and terminal session on exit
                 crate::config::toml::save_config(&self.config);
-                if let Err(e) = crate::tools::session::save_session(&self.wm) {
+                if let Err(e) = crate::tools::session::save_session_with(&self.wm, &self.workflows.queues_for_session(&self.wm)) {
                     log::warn!("Failed to save session: {e}");
                 }
                 event_loop.exit();
@@ -529,6 +536,13 @@ impl ApplicationHandler for App {
                         }
                     }
                     self.request_redraw();
+                    return;
+                }
+                // Workflow overlays (compare buttons, candidate cards) own the mouse.
+                if self.workflows.overlay_visible() {
+                    if state == ElementState::Pressed && button == MouseButton::Left {
+                        crate::workflow::on_click(self);
+                    }
                     return;
                 }
                 // Command palette is modal for the mouse: click runs/closes.
@@ -727,7 +741,7 @@ impl ApplicationHandler for App {
                         if let winit::keyboard::Key::Character(ref s) = event.logical_key {
                             if s.eq_ignore_ascii_case("q") {
                                 crate::config::toml::save_config(&self.config);
-                                if let Err(e) = crate::tools::session::save_session(&self.wm) {
+                                if let Err(e) = crate::tools::session::save_session_with(&self.wm, &self.workflows.queues_for_session(&self.wm)) {
                                     log::warn!("Failed to save session: {e}");
                                 }
                                 event_loop.exit();

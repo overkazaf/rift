@@ -30,6 +30,8 @@ pub enum Hit {
     Restart(usize),
     Close(usize),
     More(usize),
+    /// The workflow block of a card: opens its task queue.
+    Queue(usize),
     Mark(usize),
     Turn { uid: usize, id: u64 },
     Menu { uid: usize, item: super::control::MenuItem },
@@ -306,6 +308,8 @@ pub enum Row {
     Actions,
     /// Header + `n` turns.
     Timeline(usize),
+    /// Workflow lines: label, queue, countdown, reviewer note.
+    Workflow(usize),
 }
 
 /// What decides a card's rows.
@@ -324,6 +328,8 @@ pub struct CardFlags {
     pub confirm: bool,
     pub composer: bool,
     pub turns: usize,
+    /// Text lines of the workflow block (0 = none).
+    pub workflow_lines: usize,
 }
 
 pub fn rows(f: &CardFlags, detail: Detail) -> Vec<Row> {
@@ -338,6 +344,9 @@ pub fn rows(f: &CardFlags, detail: Detail) -> Vec<Row> {
             if f.collision {
                 v.push(Row::Chips { hint: false });
             }
+            if f.workflow_lines > 0 {
+                v.push(Row::Workflow(f.workflow_lines.min(COMPACT_WORKFLOW_LINES)));
+            }
         }
         Detail::Full => {
             v.push(Row::Place);
@@ -348,6 +357,9 @@ pub fn rows(f: &CardFlags, detail: Detail) -> Vec<Row> {
             if f.collision {
                 // A waiting card keeps its room for the prompt; the other collision card carries the tip.
                 v.push(Row::Chips { hint: !f.waiting });
+            }
+            if f.workflow_lines > 0 {
+                v.push(Row::Workflow(f.workflow_lines));
             }
         }
     }
@@ -373,6 +385,9 @@ pub fn rows(f: &CardFlags, detail: Detail) -> Vec<Row> {
     }
     v
 }
+
+/// Workflow lines kept on compact cards.
+pub const COMPACT_WORKFLOW_LINES: usize = 3;
 
 /// Turns listed in a card's timeline.
 pub const MAX_TURNS_SHOWN: usize = 4;
@@ -402,6 +417,7 @@ pub fn row_h(r: Row, tk: &Tokens) -> usize {
         Row::Composer => tk.input_h,
         Row::Actions => action_h(tk),
         Row::Timeline(n) => (n + 1) * lp,
+        Row::Workflow(n) => n * lp,
     }
 }
 

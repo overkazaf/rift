@@ -28,6 +28,8 @@ pub mod diff;
 pub mod git;
 mod ui;
 
+pub(crate) use ui::draw_file_diff;
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -132,6 +134,14 @@ impl PaneLog {
     fn turn_mut(&mut self, id: u64) -> Option<&mut Turn> {
         self.turns.iter_mut().find(|t| t.id == id)
     }
+}
+
+/// The two trees that bracket one finished agent turn.
+#[derive(Clone, Debug)]
+pub struct TurnRange {
+    pub repo: PathBuf,
+    pub base: String,
+    pub end: String,
 }
 
 /// "3 files changed" chip on a pane.
@@ -456,6 +466,17 @@ impl Review {
                 failed: t.error.is_some(),
             })
             .collect()
+    }
+
+    /// Trees of the pane's newest agent turn once it has finished and both of its
+    /// snapshots exist (they are taken on the worker, so this can lag the event).
+    pub fn last_turn_range(&self, pane: usize) -> Option<TurnRange> {
+        let t = self.logs.get(&pane)?.turns.iter().rev().find(|t| t.kind == TurnKind::Agent)?;
+        if !t.finished {
+            return None;
+        }
+        let start = t.start.as_ref()?;
+        Some(TurnRange { repo: start.repo_root.clone(), base: start.tree.clone(), end: t.end_tree.clone()? })
     }
 
     /// (files changed in the newest finished turn, files summed over all turns).

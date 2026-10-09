@@ -21,6 +21,9 @@ pub enum ConfirmAction {
     McpRun(Box<crate::mcp::host::PendingRun>),
     /// Change Review: buttons Revert / Cancel.
     ReviewRevert(Box<crate::review::RevertPlan>),
+    /// Workflows: merge a candidate (Merge / Cancel), discard candidates
+    /// (Remove / Cancel) or a notice (OK).
+    Workflow(Box<crate::workflow::WfConfirm>),
 }
 
 pub struct ConfirmRequest {
@@ -363,6 +366,7 @@ pub fn resolve(app: &mut App, req: ConfirmRequest, choice: Option<usize>) {
         }
         ConfirmAction::McpRun(run) => crate::mcp::host::finish_run(app, run, choice),
         ConfirmAction::ReviewRevert(plan) => crate::review::finish_revert(app, *plan, choice),
+        ConfirmAction::Workflow(wf) => crate::workflow::resolve_confirm(app, *wf, choice),
         ConfirmAction::SshHostKey { mut reply } => {
             if let Some(tx) = reply.take() {
                 let _ = tx.send(choice == Some(0));

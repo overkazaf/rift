@@ -56,6 +56,8 @@ pub struct PaneInfo {
     pub files: (Option<usize>, usize),
     /// Command that starts this agent again (restart).
     pub launch: Option<String>,
+    /// Workflow state: queue, countdown, reviewer note.
+    pub wf: crate::workflow::CardInfo,
 }
 
 impl PaneInfo {
@@ -118,6 +120,12 @@ pub enum Action {
     Review(usize),
     Restart(usize),
     Close(usize),
+    /// Open the task-queue editor for this agent.
+    Queue(usize),
+    /// Send the reviewer's feedback to the writer.
+    Forward(usize),
+    /// Stop the workflow loop this agent belongs to.
+    StopWorkflow(usize),
     ToggleDensity,
     /// Show a one-line message.
     Notice(String),
@@ -291,6 +299,69 @@ impl Composer {
         }
         self.text.drain(i..self.cursor);
         self.cursor = i;
+    }
+
+    /// Replace the whole text; the cursor goes to the end.
+    pub fn set_text(&mut self, s: &str) {
+        self.clear();
+        self.insert_str(s);
+    }
+
+    /// (line, column) of the cursor, counting `\n`-separated lines.
+    pub fn line_col(&self) -> (usize, usize) {
+        let before = &self.text[..self.cursor.min(self.text.len())];
+        let line = before.iter().filter(|c| **c == '\n').count();
+        let col = before.iter().rev().take_while(|c| **c != '\n').count();
+        (line, col)
+    }
+
+    /// Move the cursor one line up, keeping the column where possible.
+    pub fn up(&mut self) {
+        let (line, col) = self.line_col();
+        if line == 0 {
+            self.cursor = 0;
+            return;
+        }
+        let starts = self.line_starts();
+        let prev_len = starts[line] - starts[line - 1] - 1;
+        self.cursor = starts[line - 1] + col.min(prev_len);
+    }
+
+    /// Move the cursor one line down, keeping the column where possible.
+    pub fn down(&mut self) {
+        let (line, col) = self.line_col();
+        let starts = self.line_starts();
+        if line + 1 >= starts.len() {
+            self.cursor = self.text.len();
+            return;
+        }
+        let next_end = starts.get(line + 2).map_or(self.text.len(), |s| s - 1);
+        let next_len = next_end - starts[line + 1];
+        self.cursor = starts[line + 1] + col.min(next_len);
+    }
+
+    /// Cursor to the start of its line.
+    pub fn line_home(&mut self) {
+        let (_, col) = self.line_col();
+        self.cursor -= col;
+    }
+
+    /// Cursor to the end of its line.
+    pub fn line_end(&mut self) {
+        while self.cursor < self.text.len() && self.text[self.cursor] != '\n' {
+            self.cursor += 1;
+        }
+    }
+
+    /// Char index where each line starts.
+    fn line_starts(&self) -> Vec<usize> {
+        let mut v = vec![0];
+        for (i, c) in self.text.iter().enumerate() {
+            if *c == '\n' {
+                v.push(i + 1);
+            }
+        }
+        v
     }
 
     /// The single-line rendering and the cursor column in it.
@@ -529,6 +600,9 @@ impl Control {
                 }
             }
             DockKey::Char('v') => sel_uid.map_or(Action::None, Action::Review),
+            DockKey::Char('t') => sel_uid.map_or(Action::None, Action::Queue),
+            DockKey::Char('f') => sel_uid.map_or(Action::None, Action::Forward),
+            DockKey::Char('S') => sel_uid.map_or(Action::None, Action::StopWorkflow),
             DockKey::Char('x') => match sel_uid {
                 Some(uid) => {
                     self.mode = Mode::ConfirmClose(uid);
@@ -738,7 +812,7 @@ impl Control {
     pub fn hints(&self, waiting_selected: bool) -> Vec<(&'static str, &'static str)> {
         match &self.mode {
             Mode::Browse if waiting_selected => vec![("1-3", "answer"), ("Esc", "interrupt"), ("r", "reply"), ("v", "review"), ("Enter", "jump")],
-            Mode::Browse => vec![("Enter", "jump"), ("r", "reply"), ("b", "broadcast"), ("v", "review"), ("Esc", "interrupt"), ("x", "close")],
+            Mode::Browse => vec![("Enter", "jump"), ("r", "reply"), ("b", "broadcast"), ("v", "review"), ("t", "queue"), ("Esc", "interrupt"), ("x", "close")],
             Mode::Compose { .. } => vec![("Enter", "send"), ("Esc", "cancel"), ("S-Enter", "newline")],
             Mode::ConfirmSend { .. } | Mode::ConfirmClose(_) | Mode::ConfirmRestart(_) | Mode::ConfirmRisk { .. } => vec![("Enter", "confirm"), ("Esc", "cancel")],
             Mode::Menu { .. } => vec![("Enter", "run"), ("Esc", "close")],
@@ -1134,5 +1208,37 @@ mod tests {
         assert!(c.hints(false).iter().any(|h| h.1 == "broadcast"));
         c.mode = Mode::Compose { broadcast: false };
         assert!(c.hints(false).iter().any(|h| h.1 == "send"));
+    }
+
+    #[test]
+    fn composer_moves_between_lines() {
+        let mut c = Composer::default();
+        c.insert_str("abc\nde\nfghij");
+        assert_eq!(c.line_col(), (2, 5));
+        c.up();
+        assert_eq!(c.line_col(), (1, 2), "column clamps to the shorter line");
+        c.up();
+        assert_eq!(c.line_col(), (0, 2));
+        c.up();
+        assert_eq!(c.cursor(), 0, "up on the first line goes home");
+        c.down();
+        assert_eq!(c.line_col(), (1, 0));
+        c.down();
+        assert_eq!(c.line_col(), (2, 0));
+        c.down();
+        assert_eq!(c.cursor(), 12, "down on the last line goes to the end");
+        c.line_home();
+        assert_eq!(c.line_col(), (2, 0));
+        c.line_end();
+        assert_eq!(c.line_col(), (2, 5));
+        c.up();
+        c.line_end();
+        assert_eq!(c.line_col(), (1, 2));
+        c.up();
+        c.line_home();
+        assert_eq!(c.line_col(), (0, 0));
+        c.set_text("x\ny");
+        assert_eq!(c.text(), "x\ny");
+        assert_eq!(c.line_col(), (1, 1));
     }
 }

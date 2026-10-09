@@ -222,75 +222,11 @@ impl Review {
     }
 
     fn draw_diff(&mut self, cx: &mut Ctx, area: Rect) {
-        let tk = cx.tk;
         let ViewState::Ready(d) = &self.ui.view else { return };
         let Some(f) = d.files.get(self.ui.file) else { return };
-        let vis = (area.h / tk.row_h).max(1);
-        self.ui.page = vis;
-        let total = f.row_count();
-        let shown = total.min(self.ui.limit.max(1));
-        let hidden = total - shown;
-        let content_rows = shown + usize::from(hidden > 0);
-        let max_scroll = content_rows.saturating_sub(vis);
-        self.ui.scroll = self.ui.scroll.min(max_scroll);
-        let scroll = self.ui.scroll;
-
-        let nd = digits(max_line_no(f)).max(3);
-        let gut_cols = 2 * nd + 3;
-        let gut_w = gut_cols * tk.cw;
-        let sb = if content_rows > vis { tk.sp.sm } else { 0 };
-        let row_w = area.w.saturating_sub(sb);
-        let base = tk.surface;
-        let add_bg = mix(base, tk.success, 0.16);
-        let del_bg = mix(base, tk.danger, 0.16);
-        let add_gut = mix(base, tk.success, 0.30);
-        let del_gut = mix(base, tk.danger, 0.30);
-        let hunk_bg = mix(base, tk.accent, 0.12);
-
-        let take = vis.min(shown.saturating_sub(scroll));
-        let rows = f.rows(scroll, take);
-        for (n, row) in rows.iter().enumerate() {
-            let y = area.y + n * tk.row_h;
-            let rr = Rect::new(area.x, y, row_w, tk.row_h);
-            match row {
-                Row::Hunk(_, h) => {
-                    cx.fill(rr, hunk_bg);
-                    cx.line_fit(area.x + tk.sp.sm, y, row_w.saturating_sub(tk.sp.md), &clean(&h.header()), tk.accent);
-                }
-                Row::Line(l) => {
-                    let (bg, gutbg, fg_mark, mark) = match l.kind {
-                        LineKind::Add => (Some(add_bg), add_gut, tk.success, '+'),
-                        LineKind::Del => (Some(del_bg), del_gut, tk.danger, '-'),
-                        LineKind::Context => (None, base, tk.text_faint, ' '),
-                        LineKind::NoNewline => (None, base, tk.text_faint, '\\'),
-                    };
-                    if let Some(bg) = bg {
-                        cx.fill(rr, bg);
-                    }
-                    cx.fill(Rect::new(area.x, y, gut_w.min(row_w), tk.row_h), gutbg);
-                    let ty = cx.text_y(y, tk.row_h);
-                    let num = |v: Option<u32>| v.map_or(" ".repeat(nd), |v| format!("{v:>nd$}"));
-                    cx.text(area.x + tk.cw / 2, ty, &num(l.old_no), tk.text_faint);
-                    cx.text(area.x + tk.cw / 2 + (nd + 1) * tk.cw, ty, &num(l.new_no), tk.text_faint);
-                    cx.text(area.x + (2 * nd + 2) * tk.cw, ty, &mark.to_string(), fg_mark);
-                    let tx = area.x + gut_w + tk.cw / 2;
-                    let text = if l.kind == LineKind::NoNewline { clean(&l.text) } else { clean(&l.text) };
-                    let fg = if l.kind == LineKind::NoNewline { tk.text_faint } else { tk.text };
-                    if tx < area.x + row_w {
-                        cx.text_fit(tx, ty, area.x + row_w - tx, &text, fg);
-                    }
-                }
-            }
-        }
-        if hidden > 0 && scroll + take >= shown {
-            let n = scroll + take - scroll;
-            if n < vis {
-                let y = area.y + n * tk.row_h;
-                let msg = format!("\u{2026} {hidden} more rows hidden \u{2014} press m to show more");
-                cx.line_fit(area.x + gut_w, y, row_w.saturating_sub(gut_w), &msg, tk.text_muted);
-            }
-        }
-        cx.scrollbar(area, content_rows, vis, scroll);
+        let paint = draw_file_diff(cx, area, f, self.ui.scroll, self.ui.limit);
+        self.ui.page = paint.page;
+        self.ui.scroll = paint.scroll;
     }
 
     /// Chips (and the toast, when the overlay is closed) over the panes of the active tab.
@@ -389,4 +325,85 @@ mod tests {
         rv.ui.view = ViewState::Ready(Box::new(Default::default()));
         each_theme("review-empty", |b, w, h, f, t| rv.render(b, w, h, f, t));
     }
+}
+
+/// What [`draw_file_diff`] settled on.
+#[derive(Clone, Copy, Debug)]
+pub struct DiffPaint {
+    /// Scroll offset after clamping.
+    pub scroll: usize,
+    /// Rows visible in `area` (the page size).
+    pub page: usize,
+}
+
+/// Paint one file's diff (gutter with line numbers, add/delete tint, hunk
+/// headers, scroll bar) into `area`. Shared by the review overlay and the
+/// best-of-N compare view.
+pub(crate) fn draw_file_diff(cx: &mut Ctx, area: Rect, f: &FileDiff, scroll: usize, limit: usize) -> DiffPaint {
+    let tk = cx.tk;
+    let vis = (area.h / tk.row_h).max(1);
+    let total = f.row_count();
+    let shown = total.min(limit.max(1));
+    let hidden = total - shown;
+    let content_rows = shown + usize::from(hidden > 0);
+    let max_scroll = content_rows.saturating_sub(vis);
+    let scroll = scroll.min(max_scroll);
+
+    let nd = digits(max_line_no(f)).max(3);
+    let gut_cols = 2 * nd + 3;
+    let gut_w = gut_cols * tk.cw;
+    let sb = if content_rows > vis { tk.sp.sm } else { 0 };
+    let row_w = area.w.saturating_sub(sb);
+    let base = tk.surface;
+    let add_bg = mix(base, tk.success, 0.16);
+    let del_bg = mix(base, tk.danger, 0.16);
+    let add_gut = mix(base, tk.success, 0.30);
+    let del_gut = mix(base, tk.danger, 0.30);
+    let hunk_bg = mix(base, tk.accent, 0.12);
+
+    let take = vis.min(shown.saturating_sub(scroll));
+    let rows = f.rows(scroll, take);
+    for (n, row) in rows.iter().enumerate() {
+        let y = area.y + n * tk.row_h;
+        let rr = Rect::new(area.x, y, row_w, tk.row_h);
+        match row {
+            Row::Hunk(_, h) => {
+                cx.fill(rr, hunk_bg);
+                cx.line_fit(area.x + tk.sp.sm, y, row_w.saturating_sub(tk.sp.md), &clean(&h.header()), tk.accent);
+            }
+            Row::Line(l) => {
+                let (bg, gutbg, fg_mark, mark) = match l.kind {
+                    LineKind::Add => (Some(add_bg), add_gut, tk.success, '+'),
+                    LineKind::Del => (Some(del_bg), del_gut, tk.danger, '-'),
+                    LineKind::Context => (None, base, tk.text_faint, ' '),
+                    LineKind::NoNewline => (None, base, tk.text_faint, '\\'),
+                };
+                if let Some(bg) = bg {
+                    cx.fill(rr, bg);
+                }
+                cx.fill(Rect::new(area.x, y, gut_w.min(row_w), tk.row_h), gutbg);
+                let ty = cx.text_y(y, tk.row_h);
+                let num = |v: Option<u32>| v.map_or(" ".repeat(nd), |v| format!("{v:>nd$}"));
+                cx.text(area.x + tk.cw / 2, ty, &num(l.old_no), tk.text_faint);
+                cx.text(area.x + tk.cw / 2 + (nd + 1) * tk.cw, ty, &num(l.new_no), tk.text_faint);
+                cx.text(area.x + (2 * nd + 2) * tk.cw, ty, &mark.to_string(), fg_mark);
+                let tx = area.x + gut_w + tk.cw / 2;
+                let text = if l.kind == LineKind::NoNewline { clean(&l.text) } else { clean(&l.text) };
+                let fg = if l.kind == LineKind::NoNewline { tk.text_faint } else { tk.text };
+                if tx < area.x + row_w {
+                    cx.text_fit(tx, ty, area.x + row_w - tx, &text, fg);
+                }
+            }
+        }
+    }
+    if hidden > 0 && scroll + take >= shown {
+        let n = scroll + take - scroll;
+        if n < vis {
+            let y = area.y + n * tk.row_h;
+            let msg = format!("\u{2026} {hidden} more rows hidden \u{2014} press m to show more");
+            cx.line_fit(area.x + gut_w, y, row_w.saturating_sub(gut_w), &msg, tk.text_muted);
+        }
+    }
+    cx.scrollbar(area, content_rows, vis, scroll);
+    DiffPaint { scroll, page: vis }
 }

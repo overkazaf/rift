@@ -53,6 +53,15 @@
 //! `ui.rs` + `dock.rs` (dock state, layout and drawing, tab badges, pane tint),
 //! `notify.rs` (desktop notifications, dock badge), `launch.rs` ("New Agent",
 //! worktrees, grid layouts).
+//!
+//! # Workflows
+//!
+//! `crate::workflow` builds on this module: best-of-N, write & review, fix
+//! tests and task queues. It consumes the same [`AgentEvent`]s (from
+//! `runtime::poll`), opens grids through `runtime::open_grid` / `open_slot_tab`,
+//! sends text with `console::send_text`, and adds [`control::PaneInfo::wf`]
+//! (queue, countdown, reviewer note) to the dock cards plus the `t` / `f` / `S`
+//! keys.
 
 pub mod cli;
 pub mod console;
