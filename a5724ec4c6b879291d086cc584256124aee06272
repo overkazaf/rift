@@ -1,0 +1,391 @@
+README.md
+  46dcc8959d90ad53 190-201,267-276,314
+src/renderer/gpu_tests.rs
+  ff07782318e9acdc 807-835
+  46dcc8959d90ad53 74-77,86-87,360-432,526-562,730-731,768-769,776-806
+src/renderer/shape.rs
+  46dcc8959d90ad53 67-68,104-124,324-340
+src/app/ime.rs
+  46dcc8959d90ad53 116-117
+src/app/mod.rs
+  46dcc8959d90ad53 5,330-333,337-343,348-353,629-631,654-657
+src/agents/prompt.rs
+  46dcc8959d90ad53 1-1120
+src/renderer/atlas.rs
+  46dcc8959d90ad53 32-34,213,218
+src/tools/blocks.rs
+  46dcc8959d90ad53 234-242
+src/network/browser/mod.rs
+  46dcc8959d90ad53 90,93,95,97-102,133-135,137,139
+src/ui/kit/draw.rs
+  46dcc8959d90ad53 24-26,233-234,236-244
+src/config/toml.rs
+  46dcc8959d90ad53 163-165,485-486
+src/agents/ui.rs
+  ff07782318e9acdc 699
+  46dcc8959d90ad53 1-9,13-14,21-46,58-73,86-88,95,106-156,158-162,168-180,182,184-185,193-195,198-219,229,232,235-245,247,250-260,262-263,265-268,270-277,279-309,311-372,374-375,377-388,390-404,406,408-469,472-480,482-496,499-500,502-526,528,545-553,587-594,621,685-693,695-696,714-716,728-745,749,751-755,763-764,768,770-774,777-778,782,784-809,811,813-906,919,946-961,973-982
+src/agents/runtime.rs
+  46dcc8959d90ad53 13-14,35-36,48-49,77,88,90,95,187-190,219-222,293,302,358,362,366-370,373-384,388-390,396-397,433-435,438-441,450,454-463,470-473
+  ff07782318e9acdc 133
+src/renderer/gpu.rs
+  ff07782318e9acdc 763-772
+  46dcc8959d90ad53 136-140,312-314,482-483,490,496,498-499,503-516,548,550,552,555-558,650-655,726-744,746-760
+src/renderer/cells.rs
+  46dcc8959d90ad53 1-243
+src/blocks_ui/draw.rs
+  46dcc8959d90ad53 36-38
+src/ui/primitives.rs
+  46dcc8959d90ad53 69-76,78-104,197-230
+src/agents/state.rs
+  46dcc8959d90ad53 141-188,317-318,343,450-464,552,715-755
+src/app/lifecycle.rs
+  46dcc8959d90ad53 7,91-96,154-158,264,274,599-604,606,667-670,672-674,1140,1158
+  ff07782318e9acdc 238,242,275-278
+src/renderer/gpu_text.rs
+  46dcc8959d90ad53 40-41,87,117-119,147-148,166,188,278-283,504-507
+  ff07782318e9acdc 168-169,211-213,216
+src/screenshot/mission.rs
+  46dcc8959d90ad53 1-238
+src/renderer/mod.rs
+  ff07782318e9acdc 2446-2480
+  46dcc8959d90ad53 3,181,223-244,303-304,306-307,309-310,368,376,402-413,551,1019-1030,1073,1149-1188,1735-1738,2381-2391,2393-2445
+src/agents/registry.rs
+  46dcc8959d90ad53 234-243,463,465-467,471,549-600,602-604,606-613,994-1045
+src/config/mod.rs
+  46dcc8959d90ad53 164
+src/agents/metrics.rs
+  46dcc8959d90ad53 1-518
+src/terminal/mod.rs
+  46dcc8959d90ad53 164-171,267-268,655,679,796,808,1007
+src/ui/scrollbar.rs
+  46dcc8959d90ad53 219-221
+src/agents/mod.rs
+  46dcc8959d90ad53 38-51,53-55,58-59,61,65,67,325-327,332
+src/screenshot/mod.rs
+  46dcc8959d90ad53 15,200
+src/terminal/extras.rs
+  46dcc8959d90ad53 47,51-58,63-75
+src/review/mod.rs
+  46dcc8959d90ad53 103-104,107-115,371,378,409,433-467,951-997
+src/renderer/font.rs
+  ff07782318e9acdc 290-292,339,574-578,591-599
+src/terminal/reflow.rs
+  46dcc8959d90ad53 33-42,118-120,157-192,264-273,280-293
+  ff07782318e9acdc 373
+src/screenshot/scenes.rs
+  ff07782318e9acdc 293,855-900,907-921,926-946,948-950,953-961,963-964,966-974,976-977,979-981
+  46dcc8959d90ad53 30,43-46,73-76,109-113,140-142,171-179,182-183,185,193-202,205-224,290-292,294,922-925,947,951-952,962,965,975,978
+src/agents/console.rs
+  46dcc8959d90ad53 1-17,19-724
+  ff07782318e9acdc 18
+src/window/manager.rs
+  46dcc8959d90ad53 389-390,394-395,397-399
+src/agents/control.rs
+  46dcc8959d90ad53 1-1138
+src/terminal/tests.rs
+  46dcc8959d90ad53 617-815
+src/terminal/ansi.rs
+  46dcc8959d90ad53 230
+src/agents/dock.rs
+  ff07782318e9acdc 117-119,126-149,1112-1114
+  35d2b413eba89ebd 925,973-974,978-982
+  46dcc8959d90ad53 1-116,120-125,150-924,926-972,975-977,983-1111,1115-1208
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.8-ntes.9",
+  "base_commit_sha": "a5724ec4c6b879291d086cc584256124aee06272",
+  "prompts": {
+    "35d2b413eba89ebd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2dd563d2-69bb-482a-a58c-7f90a926ab67",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "nongjiawu",
+      "messages": [],
+      "total_additions": 8,
+      "total_deletions": 4,
+      "accepted_lines": 8,
+      "overriden_lines": 0,
+      "per_file_stats": {
+        "src/agents/dock.rs": {
+          "additions": 8,
+          "deletions": 4,
+          "accepted_lines": 8
+        }
+      }
+    },
+    "46dcc8959d90ad53": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6fa63a6e-29eb-4ea1-9d68-d297cc1526ef",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "nongjiawu",
+      "messages": [],
+      "total_additions": 7572,
+      "total_deletions": 1037,
+      "accepted_lines": 7336,
+      "overriden_lines": 3,
+      "per_file_stats": {
+        "src/renderer/gpu_text.rs": {
+          "additions": 21,
+          "deletions": 201,
+          "accepted_lines": 20
+        },
+        "README.md": {
+          "additions": 24,
+          "deletions": 2,
+          "accepted_lines": 23
+        },
+        "src/renderer/cells.rs": {
+          "additions": 246,
+          "accepted_lines": 243
+        },
+        "src/agents/dock.rs": {
+          "additions": 1234,
+          "deletions": 57,
+          "accepted_lines": 1170
+        },
+        "src/agents/registry.rs": {
+          "additions": 131,
+          "deletions": 8,
+          "accepted_lines": 131
+        },
+        "src/agents/metrics.rs": {
+          "additions": 518,
+          "accepted_lines": 518
+        },
+        "src/config/toml.rs": {
+          "additions": 6,
+          "accepted_lines": 6
+        },
+        "src/agents/ui.rs": {
+          "additions": 686,
+          "deletions": 398,
+          "accepted_lines": 671
+        },
+        "src/agents/control.rs": {
+          "additions": 1152,
+          "deletions": 14,
+          "accepted_lines": 1138
+        },
+        "src/app/ime.rs": {
+          "additions": 6,
+          "deletions": 4,
+          "accepted_lines": 2
+        },
+        "src/renderer/gpu_tests.rs": {
+          "additions": 202,
+          "deletions": 55,
+          "accepted_lines": 156
+        },
+        "src/renderer/gpu.rs": {
+          "additions": 85,
+          "deletions": 22,
+          "accepted_lines": 79,
+          "overriden_lines": 2
+        },
+        "src/renderer/atlas.rs": {
+          "additions": 6,
+          "deletions": 1,
+          "accepted_lines": 5
+        },
+        "src/agents/state.rs": {
+          "additions": 112,
+          "deletions": 2,
+          "accepted_lines": 111
+        },
+        "src/ui/primitives.rs": {
+          "additions": 70,
+          "deletions": 13,
+          "accepted_lines": 70
+        },
+        "src/agents/runtime.rs": {
+          "additions": 73,
+          "deletions": 98,
+          "accepted_lines": 70
+        },
+        "src/network/browser/mod.rs": {
+          "additions": 21,
+          "deletions": 18,
+          "accepted_lines": 15
+        },
+        "src/agents/console.rs": {
+          "additions": 737,
+          "deletions": 13,
+          "accepted_lines": 723
+        },
+        "src/terminal/reflow.rs": {
+          "additions": 78,
+          "deletions": 2,
+          "accepted_lines": 76
+        },
+        "src/terminal/mod.rs": {
+          "additions": 15,
+          "accepted_lines": 15
+        },
+        "src/review/mod.rs": {
+          "additions": 100,
+          "deletions": 1,
+          "accepted_lines": 100
+        },
+        "src/window/manager.rs": {
+          "additions": 7,
+          "accepted_lines": 7
+        },
+        "src/tools/blocks.rs": {
+          "additions": 9,
+          "accepted_lines": 9
+        },
+        "src/config/mod.rs": {
+          "additions": 1,
+          "accepted_lines": 1
+        },
+        "src/renderer/mod.rs": {
+          "additions": 171,
+          "deletions": 10,
+          "accepted_lines": 170,
+          "overriden_lines": 1
+        },
+        "src/ui/kit/draw.rs": {
+          "additions": 14,
+          "deletions": 5,
+          "accepted_lines": 14
+        },
+        "src/terminal/extras.rs": {
+          "additions": 26,
+          "deletions": 2,
+          "accepted_lines": 24
+        },
+        "src/renderer/shape.rs": {
+          "additions": 42,
+          "accepted_lines": 42
+        },
+        "src/app/mod.rs": {
+          "additions": 26,
+          "deletions": 4,
+          "accepted_lines": 25
+        },
+        "src/agents/mod.rs": {
+          "additions": 26,
+          "deletions": 3,
+          "accepted_lines": 26
+        },
+        "src/screenshot/mission.rs": {
+          "additions": 256,
+          "deletions": 18,
+          "accepted_lines": 238
+        },
+        "src/agents/prompt.rs": {
+          "additions": 1141,
+          "deletions": 21,
+          "accepted_lines": 1120
+        },
+        "src/terminal/ansi.rs": {
+          "additions": 1,
+          "accepted_lines": 1
+        },
+        "src/screenshot/scenes.rs": {
+          "additions": 83,
+          "deletions": 15,
+          "accepted_lines": 78
+        },
+        "src/screenshot/mod.rs": {
+          "additions": 2,
+          "deletions": 1,
+          "accepted_lines": 2
+        },
+        "src/ui/scrollbar.rs": {
+          "additions": 3,
+          "accepted_lines": 3
+        },
+        "src/app/lifecycle.rs": {
+          "additions": 39,
+          "deletions": 49,
+          "accepted_lines": 32
+        },
+        "src/blocks_ui/draw.rs": {
+          "additions": 3,
+          "accepted_lines": 3
+        },
+        "src/terminal/tests.rs": {
+          "additions": 199,
+          "accepted_lines": 199
+        }
+      }
+    },
+    "ff07782318e9acdc": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "94d36611-7f9c-432a-a618-ac1e24231ff9",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "nongjiawu",
+      "messages": [],
+      "total_additions": 264,
+      "total_deletions": 14,
+      "accepted_lines": 250,
+      "overriden_lines": 5,
+      "per_file_stats": {
+        "src/agents/runtime.rs": {
+          "additions": 1,
+          "deletions": 1,
+          "accepted_lines": 1
+        },
+        "src/renderer/gpu_tests.rs": {
+          "additions": 32,
+          "accepted_lines": 29
+        },
+        "src/screenshot/scenes.rs": {
+          "additions": 122,
+          "deletions": 1,
+          "accepted_lines": 111,
+          "overriden_lines": 5
+        },
+        "src/agents/ui.rs": {
+          "additions": 1,
+          "deletions": 3,
+          "accepted_lines": 1
+        },
+        "src/agents/console.rs": {
+          "additions": 1,
+          "deletions": 1,
+          "accepted_lines": 1
+        },
+        "src/renderer/gpu.rs": {
+          "additions": 10,
+          "accepted_lines": 10
+        },
+        "src/renderer/font.rs": {
+          "additions": 19,
+          "accepted_lines": 19
+        },
+        "src/renderer/gpu_text.rs": {
+          "additions": 6,
+          "deletions": 2,
+          "accepted_lines": 6
+        },
+        "src/agents/dock.rs": {
+          "additions": 30,
+          "deletions": 3,
+          "accepted_lines": 30
+        },
+        "src/terminal/reflow.rs": {
+          "additions": 1,
+          "accepted_lines": 1
+        },
+        "src/app/lifecycle.rs": {
+          "additions": 6,
+          "deletions": 3,
+          "accepted_lines": 6
+        },
+        "src/renderer/mod.rs": {
+          "additions": 35,
+          "accepted_lines": 35
+        }
+      }
+    }
+  }
+}
