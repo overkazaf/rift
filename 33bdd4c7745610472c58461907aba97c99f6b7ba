@@ -1,0 +1,214 @@
+src/agents/control.rs
+  46dcc8959d90ad53 50-51,132-137,150-151,158-169,178-179,193-194,628-634,819-821,849-850,1150-1168
+src/ai/inline/mod.rs
+  46dcc8959d90ad53 277
+src/app/ime.rs
+  46dcc8959d90ad53 155
+src/agents/console.rs
+  46dcc8959d90ad53 145-147,168,188-189,200,205,209,213,232-235,272-290,294,296,298-324,429-431,475-479,634-636,638,711
+src/blocks_ui/mod.rs
+  46dcc8959d90ad53 109
+src/ui/confirm.rs
+  46dcc8959d90ad53 27-29,373
+src/agents/runtime.rs
+  46dcc8959d90ad53 50-51,223-226,248,494-500
+README.md
+  46dcc8959d90ad53 240,275,282-340,537
+src/screenshot/autopilot.rs
+  46dcc8959d90ad53 1-85
+src/agents/prompt.rs
+  46dcc8959d90ad53 98-100,298-327,500,520-521,529,550,568-581,583,691,723,1096-1118
+src/screenshot/scenes.rs
+  46dcc8959d90ad53 30,51,86,126-127,158,309,333-335
+src/tools/command_palette.rs
+  46dcc8959d90ad53 454-455,1500-1505
+src/screenshot/mission.rs
+  46dcc8959d90ad53 39-54,77-78,82,187-190,212,244-245
+src/mcp/protocol.rs
+  0dbde0fd25c90086 69
+src/tools/regex_playground.rs
+  46dcc8959d90ad53 813-822
+src/agents/mod.rs
+  46dcc8959d90ad53 52-62,77,88
+src/agents/ui.rs
+  46dcc8959d90ad53 36-39,80-83,321-322,343-344,386-388,436,814-824
+src/agents/policy.rs
+  46dcc8959d90ad53 1-2826
+src/agents/dock.rs
+  0dbde0fd25c90086 7,345,383-384,398,412,414,480-490,847-850,854-855,868,871,909
+  46dcc8959d90ad53 851-853,863-865,1239-1264
+src/app/overlays.rs
+  46dcc8959d90ad53 126-128,704,910-920
+src/tools/exec_preview/rules.rs
+  46dcc8959d90ad53 50-54,141,164,216,221,224,1255-1376
+src/tools/exec_preview.rs
+  46dcc8959d90ad53 21-29
+src/app/lifecycle.rs
+  46dcc8959d90ad53 455-459,1029
+src/mcp/host.rs
+  0dbde0fd25c90086 273-275,278,281-300,317-325
+src/screenshot/mod.rs
+  46dcc8959d90ad53 14
+src/agents/autopilot.rs
+  46dcc8959d90ad53 1-1622
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.8-ntes.9",
+  "base_commit_sha": "33bdd4c7745610472c58461907aba97c99f6b7ba",
+  "prompts": {
+    "0dbde0fd25c90086": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ab3a52d4-8aba-4e2f-9593-1c7c8219b334",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "nongjiawu",
+      "messages": [],
+      "total_additions": 66,
+      "total_deletions": 4,
+      "accepted_lines": 64,
+      "overriden_lines": 0,
+      "per_file_stats": {
+        "src/mcp/host.rs": {
+          "additions": 35,
+          "accepted_lines": 35
+        },
+        "src/agents/dock.rs": {
+          "additions": 30,
+          "deletions": 3,
+          "accepted_lines": 28
+        },
+        "src/mcp/protocol.rs": {
+          "additions": 1,
+          "deletions": 1,
+          "accepted_lines": 1
+        }
+      }
+    },
+    "46dcc8959d90ad53": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6fa63a6e-29eb-4ea1-9d68-d297cc1526ef",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "nongjiawu",
+      "messages": [],
+      "total_additions": 5250,
+      "total_deletions": 179,
+      "accepted_lines": 5128,
+      "overriden_lines": 0,
+      "per_file_stats": {
+        "src/screenshot/mod.rs": {
+          "additions": 1,
+          "accepted_lines": 1
+        },
+        "src/agents/runtime.rs": {
+          "additions": 17,
+          "deletions": 2,
+          "accepted_lines": 16
+        },
+        "src/tools/exec_preview/rules.rs": {
+          "additions": 137,
+          "deletions": 8,
+          "accepted_lines": 132
+        },
+        "src/agents/policy.rs": {
+          "additions": 2893,
+          "deletions": 67,
+          "accepted_lines": 2826
+        },
+        "src/tools/exec_preview.rs": {
+          "additions": 9,
+          "accepted_lines": 9
+        },
+        "src/agents/prompt.rs": {
+          "additions": 85,
+          "deletions": 11,
+          "accepted_lines": 79
+        },
+        "src/agents/console.rs": {
+          "additions": 79,
+          "deletions": 33,
+          "accepted_lines": 77
+        },
+        "src/agents/dock.rs": {
+          "additions": 34,
+          "deletions": 4,
+          "accepted_lines": 33
+        },
+        "src/screenshot/scenes.rs": {
+          "additions": 11,
+          "deletions": 2,
+          "accepted_lines": 11
+        },
+        "src/ui/confirm.rs": {
+          "additions": 4,
+          "accepted_lines": 4
+        },
+        "src/agents/autopilot.rs": {
+          "additions": 1657,
+          "deletions": 35,
+          "accepted_lines": 1622
+        },
+        "README.md": {
+          "additions": 65,
+          "deletions": 6,
+          "accepted_lines": 62
+        },
+        "src/tools/command_palette.rs": {
+          "additions": 8,
+          "accepted_lines": 8
+        },
+        "src/app/lifecycle.rs": {
+          "additions": 7,
+          "deletions": 1,
+          "accepted_lines": 6
+        },
+        "src/ai/inline/mod.rs": {
+          "additions": 1,
+          "accepted_lines": 1
+        },
+        "src/app/ime.rs": {
+          "additions": 1,
+          "accepted_lines": 1
+        },
+        "src/agents/control.rs": {
+          "additions": 58,
+          "deletions": 3,
+          "accepted_lines": 58
+        },
+        "src/agents/ui.rs": {
+          "additions": 28,
+          "accepted_lines": 28
+        },
+        "src/screenshot/autopilot.rs": {
+          "additions": 86,
+          "deletions": 1,
+          "accepted_lines": 85
+        },
+        "src/screenshot/mission.rs": {
+          "additions": 26,
+          "deletions": 6,
+          "accepted_lines": 26
+        },
+        "src/tools/regex_playground.rs": {
+          "additions": 10,
+          "accepted_lines": 10
+        },
+        "src/app/overlays.rs": {
+          "additions": 19,
+          "accepted_lines": 19
+        },
+        "src/agents/mod.rs": {
+          "additions": 13,
+          "accepted_lines": 13
+        },
+        "src/blocks_ui/mod.rs": {
+          "additions": 1,
+          "accepted_lines": 1
+        }
+      }
+    }
+  }
+}
