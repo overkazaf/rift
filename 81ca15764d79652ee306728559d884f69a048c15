@@ -1,0 +1,398 @@
+src/agents/cli.rs
+  46dcc8959d90ad53 1-324
+src/app/keymap.rs
+  46dcc8959d90ad53 95-96,100
+src/agents/inbox.rs
+  46dcc8959d90ad53 1-114
+src/agents/launch.rs
+  46dcc8959d90ad53 1-342
+src/renderer/gpu_text.rs
+  ff07782318e9acdc 124-126,151,267-278,357-361,467,813
+  46dcc8959d90ad53 1-43,45-123,130-150,153-266,294-356,362-466,468-812,814-853
+src/agents/runtime.rs
+  46dcc8959d90ad53 1-671
+README.md
+  46dcc8959d90ad53 249-294,306-307
+src/renderer/font.rs
+  46dcc8959d90ad53 185-187,190-204,208-213,238,299-300,303,314,348-349
+src/config/mod.rs
+  46dcc8959d90ad53 108-112,128-129,141-172,192-193,201
+src/ui/primitives.rs
+  46dcc8959d90ad53 69-83,111
+src/agents/ui.rs
+  46dcc8959d90ad53 1-86,88-700,702-703
+src/app/ime.rs
+  46dcc8959d90ad53 147
+src/agents/git.rs
+  46dcc8959d90ad53 1-106
+src/tools/blocks.rs
+  46dcc8959d90ad53 115-125
+src/agents/mod.rs
+  46dcc8959d90ad53 1-334
+src/renderer/mod.rs
+  ff07782318e9acdc 276-278,339-340,520-526
+  46dcc8959d90ad53 2-4,7-10,180,182,187-189,205-206,265-275,279-285,332-338,341-345,352-357,361-366,368-369,466,476,492
+src/app/lifecycle.rs
+  ff07782318e9acdc 644-646
+  46dcc8959d90ad53 60,62-65,67-71,163,166,168,224-234,241-251,253-254,258,286,437-442,555-560,601-602,604,617-618,620-631,634-642,727-733,751-752,944-950,953,979-981,1029,1031,1127-1214
+src/ui/confirm.rs
+  46dcc8959d90ad53 22-23,365
+src/app/panes.rs
+  ff07782318e9acdc 103-139
+src/agents/state.rs
+  46dcc8959d90ad53 1-515,517-522,529,534-908
+src/window/pane.rs
+  46dcc8959d90ad53 158-165,198-213,215,222-226,229-232,239,247,256,264,281,299,353-361,377-380,382
+src/pty.rs
+  46dcc8959d90ad53 57-66,73-74,151-157
+src/app/mod.rs
+  46dcc8959d90ad53 6,138-143,166-178,193-194,267-270,338-339,440-443,544-545,677
+src/app/mouse.rs
+  46dcc8959d90ad53 648-651
+src/review/git.rs
+  46dcc8959d90ad53 1-23,25-100,103-618
+src/agents/registry.rs
+  46dcc8959d90ad53 1-430,436-943
+src/platform/macos.rs
+  46dcc8959d90ad53 28-50
+src/config/toml.rs
+  46dcc8959d90ad53 1,404-412,469-492,675-701
+src/window/manager.rs
+  46dcc8959d90ad53 220-266
+src/ui/kit/draw.rs
+  46dcc8959d90ad53 229
+src/app/overlays.rs
+  46dcc8959d90ad53 117-119,131-133,504-508,689,804-829
+src/main.rs
+  46dcc8959d90ad53 5-6,19,43-45,125
+src/ui/menubar.rs
+  46dcc8959d90ad53 61-70,312-313,328-329,339-340,368-379,408
+src/tools/command_palette.rs
+  46dcc8959d90ad53 246-247,261,273,363,371,376,389,404,450-451,502-505,813,853-905,1483-1487,1530-1531,1541,2135-2138,2153-2154
+src/renderer/shape.rs
+  46dcc8959d90ad53 1-201,203-314
+src/agents/detect.rs
+  46dcc8959d90ad53 1-644
+src/review/ui.rs
+  46dcc8959d90ad53 1-392
+src/renderer/gpu.rs
+  46dcc8959d90ad53 110-111,899-900,905,907,909-912
+  ff07782318e9acdc 3,5-27,30-31,34,37,47-49,57,59-81,86-91,93-109,112-123,127-139,142,144-159,162-163,169,175-177,182-185,187-190,200-237,239-241,244-260,262-264,266-293,296,299-308,311,313-371,374-417,419-444,446,448-466,468-488,490-500,502-503,505-511,513-517,519-540,542-547,549-558,561,564-627,632-633,636,638,642,651-666,674-676,680-681,699,701-726,728,731,733-773,775-812,818,820-821,827,830-867,869-875,877-878,880-898,901-904,906,913,915-960,962-976,981-983,991,998,1003,1080-1141,1160-1169,1174-1182,1186,1201-1202,1210,1230-1231,1233-1235,1409
+src/review/mod.rs
+  46dcc8959d90ad53 1-52,54-125,127-1058
+src/network/browser/mod.rs
+  46dcc8959d90ad53 130-131
+src/renderer/atlas.rs
+  46dcc8959d90ad53 1-443
+src/mcp/protocol.rs
+  46dcc8959d90ad53 180-184,291-298
+src/agents/notify.rs
+  46dcc8959d90ad53 1-156
+src/renderer/gpu_tests.rs
+  46dcc8959d90ad53 1-313,316-318,326,333,337,339-340,342-428,437,446-447,462,464,468-475,478-479,486,498,502,509,519,532,548,555,581-587,593-594
+  ff07782318e9acdc 314-315,319-321,324-325,327-332,334-336,338,341
+  35d2b413eba89ebd 429-436,438-445,448-461,463,465-467,476-477,480-485,487-497,499-501,503-508,510-511,517-518,520-531,533-547,549-554,556-580,588-592
+src/app/shortcuts.rs
+  46dcc8959d90ad53 149-150,443-444
+src/review/diff.rs
+  46dcc8959d90ad53 1-661,663-666,668-673,675-712
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.8-ntes.9",
+  "base_commit_sha": "81ca15764d79652ee306728559d884f69a048c15",
+  "prompts": {
+    "35d2b413eba89ebd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2dd563d2-69bb-482a-a58c-7f90a926ab67",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "nongjiawu",
+      "messages": [],
+      "total_additions": 129,
+      "total_deletions": 145,
+      "accepted_lines": 129,
+      "overriden_lines": 0,
+      "per_file_stats": {
+        "src/renderer/gpu_tests.rs": {
+          "additions": 129,
+          "deletions": 145,
+          "accepted_lines": 129
+        }
+      }
+    },
+    "46dcc8959d90ad53": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6fa63a6e-29eb-4ea1-9d68-d297cc1526ef",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "nongjiawu",
+      "messages": [],
+      "total_additions": 11235,
+      "total_deletions": 236,
+      "accepted_lines": 10866,
+      "overriden_lines": 16,
+      "per_file_stats": {
+        "src/review/diff.rs": {
+          "additions": 714,
+          "deletions": 2,
+          "accepted_lines": 709,
+          "overriden_lines": 3
+        },
+        "src/renderer/gpu_text.rs": {
+          "additions": 822,
+          "deletions": 8,
+          "accepted_lines": 810,
+          "overriden_lines": 1
+        },
+        "src/ui/confirm.rs": {
+          "additions": 3,
+          "accepted_lines": 3
+        },
+        "src/renderer/atlas.rs": {
+          "additions": 454,
+          "deletions": 10,
+          "accepted_lines": 443
+        },
+        "src/renderer/gpu_tests.rs": {
+          "additions": 601,
+          "deletions": 2,
+          "accepted_lines": 440
+        },
+        "src/app/lifecycle.rs": {
+          "additions": 211,
+          "deletions": 38,
+          "accepted_lines": 194,
+          "overriden_lines": 3
+        },
+        "src/app/keymap.rs": {
+          "additions": 3,
+          "deletions": 1,
+          "accepted_lines": 3
+        },
+        "src/agents/inbox.rs": {
+          "additions": 120,
+          "deletions": 6,
+          "accepted_lines": 114
+        },
+        "src/agents/mod.rs": {
+          "additions": 334,
+          "accepted_lines": 334
+        },
+        "src/ui/primitives.rs": {
+          "additions": 16,
+          "accepted_lines": 16
+        },
+        "src/agents/notify.rs": {
+          "additions": 156,
+          "accepted_lines": 156
+        },
+        "src/agents/launch.rs": {
+          "additions": 359,
+          "deletions": 17,
+          "accepted_lines": 342
+        },
+        "src/renderer/shape.rs": {
+          "additions": 314,
+          "deletions": 1,
+          "accepted_lines": 313,
+          "overriden_lines": 1
+        },
+        "src/main.rs": {
+          "additions": 8,
+          "accepted_lines": 8
+        },
+        "src/agents/state.rs": {
+          "additions": 900,
+          "deletions": 1,
+          "accepted_lines": 897,
+          "overriden_lines": 4
+        },
+        "src/network/browser/mod.rs": {
+          "additions": 2,
+          "accepted_lines": 2
+        },
+        "src/platform/macos.rs": {
+          "additions": 23,
+          "accepted_lines": 23
+        },
+        "src/agents/ui.rs": {
+          "additions": 755,
+          "deletions": 52,
+          "accepted_lines": 701,
+          "overriden_lines": 2
+        },
+        "src/app/overlays.rs": {
+          "additions": 41,
+          "accepted_lines": 41
+        },
+        "src/agents/git.rs": {
+          "additions": 106,
+          "accepted_lines": 106
+        },
+        "README.md": {
+          "additions": 48,
+          "accepted_lines": 48
+        },
+        "src/tools/blocks.rs": {
+          "additions": 11,
+          "accepted_lines": 11
+        },
+        "src/app/ime.rs": {
+          "additions": 1,
+          "accepted_lines": 1
+        },
+        "src/agents/registry.rs": {
+          "additions": 942,
+          "deletions": 4,
+          "accepted_lines": 938
+        },
+        "src/review/git.rs": {
+          "additions": 625,
+          "deletions": 8,
+          "accepted_lines": 615,
+          "overriden_lines": 2
+        },
+        "src/review/ui.rs": {
+          "additions": 397,
+          "deletions": 5,
+          "accepted_lines": 392
+        },
+        "src/renderer/mod.rs": {
+          "additions": 63,
+          "deletions": 9,
+          "accepted_lines": 63
+        },
+        "src/window/manager.rs": {
+          "additions": 60,
+          "accepted_lines": 47
+        },
+        "src/ui/kit/draw.rs": {
+          "additions": 1,
+          "accepted_lines": 1
+        },
+        "src/agents/runtime.rs": {
+          "additions": 671,
+          "accepted_lines": 671
+        },
+        "src/app/mod.rs": {
+          "additions": 40,
+          "deletions": 2,
+          "accepted_lines": 40
+        },
+        "src/mcp/protocol.rs": {
+          "additions": 14,
+          "accepted_lines": 14
+        },
+        "src/window/pane.rs": {
+          "additions": 58,
+          "deletions": 4,
+          "accepted_lines": 56
+        },
+        "src/pty.rs": {
+          "additions": 22,
+          "deletions": 6,
+          "accepted_lines": 22
+        },
+        "src/config/toml.rs": {
+          "additions": 62,
+          "deletions": 1,
+          "accepted_lines": 62
+        },
+        "src/agents/detect.rs": {
+          "additions": 675,
+          "deletions": 31,
+          "accepted_lines": 644
+        },
+        "src/config/mod.rs": {
+          "additions": 42,
+          "accepted_lines": 42
+        },
+        "src/tools/command_palette.rs": {
+          "additions": 84,
+          "deletions": 4,
+          "accepted_lines": 83
+        },
+        "src/agents/cli.rs": {
+          "additions": 324,
+          "accepted_lines": 324
+        },
+        "src/renderer/gpu.rs": {
+          "additions": 11,
+          "deletions": 1,
+          "accepted_lines": 11
+        },
+        "src/ui/menubar.rs": {
+          "additions": 30,
+          "deletions": 1,
+          "accepted_lines": 29
+        },
+        "src/renderer/font.rs": {
+          "additions": 33,
+          "deletions": 7,
+          "accepted_lines": 33
+        },
+        "src/review/mod.rs": {
+          "additions": 1071,
+          "deletions": 15,
+          "accepted_lines": 1056
+        },
+        "src/app/shortcuts.rs": {
+          "additions": 4,
+          "accepted_lines": 4
+        },
+        "src/app/mouse.rs": {
+          "additions": 4,
+          "accepted_lines": 4
+        }
+      }
+    },
+    "ff07782318e9acdc": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "94d36611-7f9c-432a-a618-ac1e24231ff9",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "nongjiawu",
+      "messages": [],
+      "total_additions": 1041,
+      "total_deletions": 411,
+      "accepted_lines": 1027,
+      "overriden_lines": 9,
+      "per_file_stats": {
+        "src/app/lifecycle.rs": {
+          "additions": 3,
+          "accepted_lines": 3
+        },
+        "src/renderer/gpu_tests.rs": {
+          "additions": 21,
+          "deletions": 15,
+          "accepted_lines": 18,
+          "overriden_lines": 2
+        },
+        "src/renderer/gpu.rs": {
+          "additions": 944,
+          "deletions": 393,
+          "accepted_lines": 934,
+          "overriden_lines": 6
+        },
+        "src/app/panes.rs": {
+          "additions": 37,
+          "accepted_lines": 37
+        },
+        "src/renderer/gpu_text.rs": {
+          "additions": 24,
+          "deletions": 3,
+          "accepted_lines": 23,
+          "overriden_lines": 1
+        },
+        "src/renderer/mod.rs": {
+          "additions": 12,
+          "accepted_lines": 12
+        }
+      }
+    }
+  }
+}
