@@ -225,11 +225,28 @@ pub struct TabEditor {
     pub text: String,
     /// Caret position in chars.
     pub caret: usize,
+    /// Whole text selected (as on entry): typing replaces it.
+    pub all: bool,
 }
 
 impl TabEditor {
     pub fn new(idx: usize, text: &str) -> Self {
-        Self { idx, text: text.to_string(), caret: text.chars().count() }
+        Self { idx, text: text.to_string(), caret: text.chars().count(), all: !text.is_empty() }
+    }
+
+    /// Drop the selected text (if all is selected). True when it did.
+    fn take_selection(&mut self) -> bool {
+        if !std::mem::take(&mut self.all) {
+            return false;
+        }
+        self.text.clear();
+        self.caret = 0;
+        true
+    }
+
+    pub fn select_all(&mut self) {
+        self.all = !self.text.is_empty();
+        self.caret = self.text.chars().count();
     }
 
     fn byte_at(&self, chars: usize) -> usize {
@@ -238,12 +255,19 @@ impl TabEditor {
 
     pub fn insert_str(&mut self, s: &str) {
         let s: String = s.chars().filter(|c| !c.is_control()).collect();
+        if s.is_empty() {
+            return;
+        }
+        self.take_selection();
         let at = self.byte_at(self.caret);
         self.text.insert_str(at, &s);
         self.caret += s.chars().count();
     }
 
     pub fn backspace(&mut self) {
+        if self.take_selection() {
+            return;
+        }
         if self.caret > 0 {
             let a = self.byte_at(self.caret - 1);
             let b = self.byte_at(self.caret);
@@ -253,6 +277,9 @@ impl TabEditor {
     }
 
     pub fn delete(&mut self) {
+        if self.take_selection() {
+            return;
+        }
         if self.caret < self.text.chars().count() {
             let a = self.byte_at(self.caret);
             let b = self.byte_at(self.caret + 1);
@@ -260,19 +287,29 @@ impl TabEditor {
         }
     }
 
+    /// Left collapses a full selection to its start (macOS text fields).
     pub fn left(&mut self) {
-        self.caret = self.caret.saturating_sub(1);
+        if std::mem::take(&mut self.all) {
+            self.caret = 0;
+        } else {
+            self.caret = self.caret.saturating_sub(1);
+        }
     }
 
+    /// Right collapses a full selection to its end.
     pub fn right(&mut self) {
-        self.caret = (self.caret + 1).min(self.text.chars().count());
+        if !std::mem::take(&mut self.all) {
+            self.caret = (self.caret + 1).min(self.text.chars().count());
+        }
     }
 
     pub fn home(&mut self) {
+        self.all = false;
         self.caret = 0;
     }
 
     pub fn end(&mut self) {
+        self.all = false;
         self.caret = self.text.chars().count();
     }
 }
@@ -324,6 +361,12 @@ pub fn render_editor(
     let tx = x + pad;
     let clip = x + w - 2;
     let fg = theme.fg;
+    if ed.all && preedit.is_empty() {
+        // Selected text (typing replaces it).
+        let sw = (text_cols(&shown) * cw).min(clip.saturating_sub(tx));
+        let sel = crate::ui::pack_rgb(crate::ui::lighten(theme.bg, 45));
+        crate::ui::fill_rect(buffer, buf_w, tx, ty, sw, ch, sel);
+    }
     let end = draw_text(buffer, buf_w, buf_h, font, &shown, tx, ty, clip, fg);
     if !preedit.is_empty() {
         // Underline the composition.
@@ -341,6 +384,55 @@ pub fn render_editor(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn editor_starts_fully_selected_and_typing_replaces() {
+        // Regression: the field opened with the caret after the old title, so
+        // typing "build" produced "Tab 1build".
+        let mut e = TabEditor::new(0, "Tab 1");
+        assert!(e.all);
+        e.insert_str("b");
+        e.insert_str("uild");
+        assert_eq!((e.text.as_str(), e.caret, e.all), ("build", 5, false));
+        // IME commits go through insert_str too.
+        let mut e = TabEditor::new(0, "Tab 1");
+        e.insert_str("构建");
+        assert_eq!(e.text, "构建");
+        // Control chars / empty commits leave the selection alone.
+        let mut e = TabEditor::new(0, "Tab 1");
+        e.insert_str("\r");
+        assert_eq!((e.text.as_str(), e.all), ("Tab 1", true));
+    }
+
+    #[test]
+    fn editor_selection_collapses_like_a_text_field() {
+        let mut e = TabEditor::new(0, "abc");
+        e.right();
+        assert_eq!((e.caret, e.all), (3, false));
+        e.insert_str("d");
+        assert_eq!(e.text, "abcd");
+        let mut e = TabEditor::new(0, "abc");
+        e.left();
+        assert_eq!((e.caret, e.all), (0, false));
+        e.insert_str("x");
+        assert_eq!(e.text, "xabc");
+        let mut e = TabEditor::new(0, "abc");
+        e.backspace();
+        assert_eq!((e.text.as_str(), e.caret), ("", 0));
+        let mut e = TabEditor::new(0, "abc");
+        e.delete();
+        assert_eq!(e.text, "");
+        let mut e = TabEditor::new(0, "abc");
+        e.home();
+        e.delete();
+        assert_eq!(e.text, "bc");
+        e.select_all();
+        assert!(e.all);
+        e.insert_str("z");
+        assert_eq!(e.text, "z");
+        // Empty title: nothing to select.
+        assert!(!TabEditor::new(0, "").all);
+    }
 
     #[test]
     fn layout_reserves_plus_and_fills() {
@@ -428,6 +520,7 @@ mod tests {
     fn editor_edits_by_char() {
         let mut e = TabEditor::new(0, "终端");
         assert_eq!(e.caret, 2);
+        e.end(); // collapse the initial select-all, caret after the text
         e.insert_str("ab\n");
         assert_eq!(e.text, "终端ab");
         e.left();

@@ -144,10 +144,32 @@ impl WindowManager {
     pub fn new_tab(&mut self, cols: usize, rows: usize) {
         let id = self.alloc_id();
         let pane = self.make_pane(id, cols, rows, None);
-        let tab = Tab::new(pane);
+        self.push_auto_tab(Tab::new(pane));
+    }
+
+    /// Append `tab` with the first free automatic "Tab N" title and focus it.
+    fn push_auto_tab(&mut self, mut tab: Tab) {
+        tab.title = self.free_auto_title();
+        tab.custom_title = false;
         self.tabs.push(tab);
         self.active_tab = self.tabs.len() - 1;
-        self.renumber_tabs();
+    }
+
+    /// Smallest "Tab N" not shown by another automatically titled tab.
+    /// Automatic titles are assigned once and then travel with their tab:
+    /// reordering (drag) or closing a neighbour must not relabel the others,
+    /// or a dragged tab would look as if it had never moved.
+    fn free_auto_title(&self) -> String {
+        let used: std::collections::HashSet<&str> = self
+            .tabs
+            .iter()
+            .filter(|t| !t.custom_title)
+            .map(|t| t.title.as_str())
+            .collect();
+        (1..)
+            .map(|n| format!("Tab {n}"))
+            .find(|t| !used.contains(t.as_str()))
+            .unwrap_or_default()
     }
 
     pub fn renumber_tabs(&mut self) {
@@ -163,8 +185,11 @@ impl WindowManager {
         let name = name.trim();
         if let Some(tab) = self.tabs.get_mut(idx) {
             if name.is_empty() {
+                // Back to an automatic title (a free number; others keep theirs).
                 tab.custom_title = false;
-                self.renumber_tabs();
+                tab.title.clear();
+                let auto = self.free_auto_title();
+                self.tabs[idx].title = auto;
             } else {
                 tab.title = name.to_string();
                 tab.custom_title = true;
@@ -182,7 +207,7 @@ impl WindowManager {
         let tab = self.tabs.remove(from);
         self.tabs.insert(to, tab);
         self.active_tab = crate::ui::tabbar::remap_after_move(self.active_tab, from, to);
-        self.renumber_tabs();
+        // No renumbering: the title moves with the tab (see `free_auto_title`).
         self.tab_events.push(TabEvent::Moved { from, to });
         true
     }
@@ -204,7 +229,6 @@ impl WindowManager {
             if self.active_tab >= self.tabs.len() {
                 self.active_tab = self.tabs.len() - 1;
             }
-            self.renumber_tabs();
         }
         false
     }
@@ -254,9 +278,7 @@ impl WindowManager {
     pub fn new_tab_in(&mut self, cols: usize, rows: usize, cwd: Option<&str>, title: Option<&str>) -> usize {
         let id = self.alloc_id();
         let pane = self.make_pane(id, cols, rows, cwd);
-        self.tabs.push(Tab::new(pane));
-        self.active_tab = self.tabs.len() - 1;
-        self.renumber_tabs();
+        self.push_auto_tab(Tab::new(pane));
         if let Some(t) = title {
             self.rename_tab(self.active_tab, t);
         }
@@ -488,7 +510,6 @@ impl WindowManager {
         } else if self.active_tab > idx {
             self.active_tab -= 1;
         }
-        self.renumber_tabs();
         false
     }
 
@@ -496,5 +517,75 @@ impl WindowManager {
         if idx < self.tabs.len() {
             self.active_tab = idx;
         }
+    }
+}
+
+#[cfg(test)]
+mod tab_title_tests {
+    use super::*;
+
+    fn titles(wm: &WindowManager) -> Vec<&str> {
+        wm.tabs.iter().map(|t| t.title.as_str()).collect()
+    }
+
+    fn three() -> WindowManager {
+        let mut wm = WindowManager::headless(80, 24);
+        wm.new_tab(80, 24);
+        wm.new_tab(80, 24);
+        wm
+    }
+
+    #[test]
+    fn dragged_tab_keeps_its_title() {
+        // Regression: move_tab used to renumber, so after a drag the bar still
+        // read "Tab 1 | Tab 2 | Tab 3" and the reorder was invisible.
+        let mut wm = three();
+        assert_eq!(titles(&wm), ["Tab 1", "Tab 2", "Tab 3"]);
+        assert!(wm.move_tab(2, 0));
+        assert_eq!(titles(&wm), ["Tab 3", "Tab 1", "Tab 2"]);
+        assert_eq!(wm.active_tab, 0, "the active tab follows its content");
+        assert!(wm.move_tab(0, 1));
+        assert_eq!(titles(&wm), ["Tab 1", "Tab 3", "Tab 2"]);
+        assert!(!wm.move_tab(1, 1));
+        assert!(!wm.move_tab(0, 9));
+    }
+
+    #[test]
+    fn closing_does_not_relabel_and_new_tabs_fill_gaps() {
+        let mut wm = three();
+        wm.move_tab(2, 0); // Tab 3, Tab 1, Tab 2
+        assert!(!wm.close_tab_at(1));
+        assert_eq!(titles(&wm), ["Tab 3", "Tab 2"]);
+        wm.new_tab(80, 24);
+        assert_eq!(titles(&wm), ["Tab 3", "Tab 2", "Tab 1"]);
+        wm.new_tab(80, 24);
+        assert_eq!(titles(&wm), ["Tab 3", "Tab 2", "Tab 1", "Tab 4"]);
+    }
+
+    #[test]
+    fn renamed_tabs_survive_moves_and_clearing_restores_an_auto_title() {
+        let mut wm = three();
+        wm.rename_tab(1, "  build  ");
+        assert_eq!(titles(&wm), ["Tab 1", "build", "Tab 3"]);
+        wm.move_tab(1, 2);
+        assert_eq!(titles(&wm), ["Tab 1", "Tab 3", "build"]);
+        wm.rename_tab(2, "   ");
+        assert_eq!(titles(&wm), ["Tab 1", "Tab 3", "Tab 2"]);
+        assert!(!wm.tabs[2].custom_title);
+        // A custom title equal to "Tab 2" does not block the automatic one.
+        let mut wm = three();
+        wm.rename_tab(0, "Tab 9");
+        wm.close_tab_at(2);
+        wm.new_tab(80, 24);
+        assert_eq!(titles(&wm), ["Tab 9", "Tab 2", "Tab 1"]);
+    }
+
+    #[test]
+    fn single_tab_rename() {
+        let mut wm = WindowManager::headless(80, 24);
+        wm.rename_tab(0, "日本語 tab");
+        assert_eq!(titles(&wm), ["日本語 tab"]);
+        wm.rename_tab(0, "");
+        assert_eq!(titles(&wm), ["Tab 1"]);
     }
 }

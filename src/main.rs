@@ -29,6 +29,7 @@ mod tools;
 mod plugin;
 mod platform;
 mod screenshot;
+mod update;
 #[cfg(test)]
 mod audit;
 
@@ -44,6 +45,10 @@ fn main() {
     // `rift agent-event <state>`: agent hooks tell the running Rift what an agent is doing.
     if args.get(1).map(String::as_str) == Some("agent-event") {
         std::process::exit(agents::cli::run(&args[2..]));
+    }
+    // `rift upgrade [VERSION|--list|--check]`: self-upgrade from GitHub Releases.
+    if args.get(1).map(String::as_str) == Some("upgrade") {
+        std::process::exit(update::cli::run(&args[2..]));
     }
     // Headless scene renderer: no window, no event loop, no shell.
     if args.iter().any(|a| a == "--screenshot") {
@@ -65,6 +70,23 @@ fn main() {
                 print_help();
                 return;
             }
+            // `rift --demo <name|list|FILE.cast>`: open with a tutorial playing.
+            "--demo" => match it.next().map(String::as_str) {
+                Some("list") => {
+                    print!("{}", tools::tutorial::list_text());
+                    return;
+                }
+                Some(name) if !name.is_empty() => {
+                    if let Err(e) = tools::tutorial::set_startup(name) {
+                        eprintln!("rift: {e}");
+                        std::process::exit(2);
+                    }
+                }
+                _ => {
+                    eprintln!("--demo needs a NAME (try 'rift --demo list')");
+                    std::process::exit(1);
+                }
+            },
             "--config" => match it.next() {
                 Some(path) if !path.is_empty() => config::toml::set_config_path(path.into()),
                 _ => {
@@ -118,12 +140,15 @@ fn print_help() {
     println!("USAGE: rift [OPTIONS]");
     println!("       rift mcp          MCP stdio bridge to the running Rift (see README)");
     println!("       rift agent-event working|waiting|done|idle|error   report an AI agent's state (hooks)");
+    println!("       rift upgrade [VERSION]   upgrade (or downgrade) from GitHub Releases, SHA-256 verified");
+    println!("       rift upgrade --list | --check   list releases / check for a newer one");
     println!();
     println!("OPTIONS:");
     println!("  -h, --help       Print this help message");
     println!("  -V, --version    Print version");
     println!("  --list-keybindings  Print the effective keybinding table");
     println!("  --config PATH    Use custom config file");
+    println!("  --demo NAME      Start with a tutorial playing (--demo list shows them; or a .cast file)");
     println!("  --screenshot SCENE|all --out DIR [--width 1600 --height 1000 --theme NAME]");
     println!("                   Render product screenshots offscreen (no window)");
     println!();

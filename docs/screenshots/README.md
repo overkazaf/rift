@@ -28,6 +28,7 @@ important content stays inside the central 1200 x 630 area.
 | `autopilot.png` | Autopilot countdown on a Claude Code card plus the Policy Log overlay (approved / denied, deciding rule) |
 | `workflow-compare.png` | Best-of-3 Compare view: candidate cards (files, tests, duration, cost), file list and diff, Merge / Discard / Ask AI |
 | `workflow-queue.png` | Per-agent task queue overlay with three queued tasks |
+| `tutorials.png` | Help > Tutorials: the "Splits & panes" demo playing in the tutorial player (demo panes with the real renderer, Shift+Cmd+D key overlay, caption with key chips, transport bar) |
 
 Notes:
 

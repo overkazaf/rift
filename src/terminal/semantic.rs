@@ -484,6 +484,23 @@ mod tests {
     }
 
     #[test]
+    fn clear_screen_leaves_no_blocks_over_blank_rows() {
+        let mut t = Terminal::new(40, 8);
+        feed(&mut t, b"\x1b]133;A\x07$ \x1b]133;B\x07echo hi\r\n\x1b]133;C\x07hi\r\n\x1b]133;D;0\x07");
+        assert_eq!(t.blocks.block_count(), 1);
+        // `clear`: its own block and the one it wiped must both disappear.
+        feed(&mut t, b"\x1b]133;A\x07$ \x1b]133;B\x07clear\r\n\x1b]133;C\x07\x1b[H\x1b[2J\x1b[3J\x1b]133;D;0\x07");
+        assert_eq!(t.blocks.block_count(), 0);
+        // Commands after the clear still get blocks.
+        feed(&mut t, b"\x1b]133;A\x07$ \x1b]133;B\x07ls\r\n\x1b]133;C\x07a\r\n\x1b]133;D;0\x07");
+        assert_eq!(t.blocks.block_count(), 1);
+        assert_eq!(t.blocks.blocks()[0].command, "ls");
+        // Full-screen apps on the alt screen do not touch blocks.
+        feed(&mut t, b"\x1b[?1049h\x1b[2J\x1b[?1049l");
+        assert_eq!(t.blocks.block_count(), 1);
+    }
+
+    #[test]
     fn osc133_d_without_command_is_ignored() {
         let mut t = Terminal::new(40, 6);
         feed(&mut t, b"\x1b]133;D;0\x07\x1b]133;A\x07");

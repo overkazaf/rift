@@ -136,6 +136,8 @@ fn managed_edits(config: &Config, base: Option<&Config>) -> Vec<Edit> {
     let ei = config.effect_intensity.clamp(0.0, 1.0);
     push("general", "effect_intensity", (ei - b.effect_intensity).abs() >= 0.005, fmt_f(ei, 2));
     push("general", "startup_animation", config.startup_animation != b.startup_animation, config.startup_animation.to_string());
+    push("general", "restore_session", config.restore_session != b.restore_session, config.restore_session.to_string());
+    push("general", "check_updates", config.check_updates != b.check_updates, config.check_updates.to_string());
     push("ai", "auto_fix", config.ai_auto_fix != b.ai_auto_fix, config.ai_auto_fix.to_string());
     push("ai", "nl_hash", config.ai_nl_hash != b.ai_nl_hash, config.ai_nl_hash.to_string());
     if config.ai_consent != Consent::Unset {
@@ -395,6 +397,12 @@ fn parse_toml_config(content: &str) -> Config {
     if let Some(v) = get_int(&map, "general", "startup_animation").or_else(|| get_int(&map, "", "startup_animation")) {
         config.startup_animation = v != 0;
     }
+    if let Some(v) = get_int(&map, "general", "restore_session").or_else(|| get_int(&map, "", "restore_session")) {
+        config.restore_session = v != 0;
+    }
+    if let Some(v) = get_int(&map, "general", "check_updates").or_else(|| get_int(&map, "", "check_updates")) {
+        config.check_updates = v != 0;
+    }
     if let Some(v) = get_int(&map, "general", "scrollback_lines").or_else(|| get_int(&map, "", "scrollback_lines")) {
         config.scrollback_lines = (v.max(0) as usize).min(1_000_000);
     }
@@ -422,6 +430,12 @@ fn parse_toml_config(content: &str) -> Config {
     }
     if let Some(cursor) = get_rgb(&map, "theme.custom", "cursor") {
         config.theme.cursor = cursor;
+    }
+    if let Some(c) = get_rgb(&map, "theme.custom", "selection_bg") {
+        config.theme.selection_bg = Some(c);
+    }
+    if let Some(c) = get_rgb(&map, "theme.custom", "selection_fg") {
+        config.theme.selection_fg = Some(c);
     }
 
     // AI consent + toggles. Auto-fix stays off until the user has consented.
@@ -750,6 +764,16 @@ mod tests {
     }
 
     #[test]
+    fn check_updates_is_off_by_default_and_round_trips() {
+        assert!(!Config::default().check_updates);
+        assert!(!parse_toml_config("[general]\nfont_size = 14.0\n").check_updates);
+        assert!(parse_toml_config("[general]\ncheck_updates = true\n").check_updates);
+        let mut c = Config::default();
+        c.check_updates = true;
+        assert!(parse_toml_config(&config_to_toml(&c)).check_updates);
+    }
+
+    #[test]
     fn effect_parsing_defaults_clamps_and_rejects_junk() {
         let c = parse_toml_config("[general]\nfont_size = 14.0\n");
         assert_eq!(c.effect, None);
@@ -762,6 +786,15 @@ mod tests {
         assert_eq!(c.effect, Some(EffectKind::Crt), "top-level key accepted");
         let c = parse_toml_config("[general]\neffect = \"pixelate\"\n");
         assert_eq!(c.effect, None, "removed effects are ignored");
+    }
+
+    #[test]
+    fn custom_selection_colors_parse() {
+        let c = parse_toml_config("[theme.custom]\nselection_bg = [10, 20, 30]\nselection_fg = [240, 240, 240]\n");
+        assert_eq!(c.theme.selection_bg, Some((10, 20, 30)));
+        assert_eq!(c.theme.selection_fg, Some((240, 240, 240)));
+        let c = parse_toml_config("[theme.custom]\nselection_bg = [999, 0, 0]\n");
+        assert_eq!(c.theme.selection_bg, None, "invalid colors are ignored");
     }
 
     #[test]

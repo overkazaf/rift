@@ -27,7 +27,7 @@ use crate::tools::hud::{Hud, HudData};
 use crate::window::tab::{PaneNode, SplitDir, Tab};
 use crate::window::{Pane, PaneRect, WindowManager};
 
-pub const NAMES: [&str; 21] = [
+pub const NAMES: [&str; 23] = [
     "hero",
     "blocks",
     "ai-chat",
@@ -49,6 +49,8 @@ pub const NAMES: [&str; 21] = [
     "workflow-wizard",
     "workflow-queue",
     "autopilot",
+    "tutorials",
+    "selection",
 ];
 
 pub struct SceneSpec {
@@ -84,6 +86,8 @@ pub fn spec(name: &str) -> Option<SceneSpec> {
         "workflow-wizard" => (18.0 / 24.0, |s| super::workflow::build_wizard(s)),
         "workflow-queue" => (18.0 / 24.0, |s| super::workflow::build_queue(s)),
         "autopilot" => (18.0 / 24.0, |s| super::autopilot::build(s)),
+        "tutorials" => (DENSE, tutorials),
+        "selection" => (NORMAL, selection),
         _ => return None,
     };
     Some(SceneSpec { font_mul, build })
@@ -125,6 +129,8 @@ pub struct Stage {
     pub workflow: Option<super::workflow::Overlay>,
     /// Fixed "now" for time-dependent drawing (countdowns); `None` = the real clock.
     pub clock: Option<Instant>,
+    /// Help > Tutorials player: when set, it replaces the whole frame (as in the app).
+    pub tutorial: Option<crate::tools::tutorial::player::Player>,
     font_path: String,
     font_px: f32,
 }
@@ -156,6 +162,7 @@ impl Stage {
             dock_cols: 0,
             workflow: None,
             clock: None,
+            tutorial: None,
             font_path: font_path.to_string(),
             font_px,
         }
@@ -289,6 +296,11 @@ impl Stage {
         let area = self.content_area();
         let blayout = self.browser_layout();
         let mut buf = vec![0u32; w * h];
+
+        if let Some(p) = &mut self.tutorial {
+            crate::tools::tutorial::view::draw_player(p, &mut buf, w, h, &mut self.renderer, &crate::app::keymap::Keymap::default());
+            return buf;
+        }
 
         self.renderer.render_tabbed_with_cmd(
             &self.wm, area, &mut buf, w as u32, h as u32, false, &self.blocks, self.split_ui,
@@ -587,6 +599,44 @@ fn blocks(s: &mut Stage) {
     s.retime(0, &[12, 58, 9_400, 4_200, 1_800]);
     s.pane(0).terminal.blocks.toggle_collapse(2);
     s.blocks_ui.hover = Some(Hover { tab: 0, pane: 0, block: 3, button: Some(Button::AskAi) });
+}
+
+/// Text selection: a stream selection over compiler output (painted behind
+/// the glyphs, clipped to each line's text) plus a block selection.
+fn selection(s: &mut Stage) {
+    std_tabs(s);
+    s.layout();
+    let p = aurora();
+    let mut sc = Script::new();
+    sc.run(&p, "git status -sb", GIT_STATUS, 0);
+    sc.run(&p, "cargo build", CARGO_BUILD_ERR, 101);
+    sc.run(&p, "echo", "\u{6784}\u{5efa}\u{5931}\u{8d25} build failed: see {bred}error[E0432]{0} above", 0);
+    sc.prompt(&p.exit(101));
+    s.feed(0, &sc);
+    s.retime(0, &[58, 1_800, 3]);
+    // (absolute row, col) of the first line containing `needle`.
+    let find = |s: &mut Stage, needle: &str| -> (usize, usize) {
+        let t = &s.pane(0).terminal;
+        let total = t.scrollback.len() + t.grid.len();
+        for abs in 0..total {
+            let Some(cells) = t.abs_line(abs) else { continue };
+            let text: String = cells.iter().filter(|c| c.c != '\0').map(|c| c.c).collect();
+            if let Some(i) = text.find(needle) {
+                // Columns: wide characters take two cells.
+                let col = text[..i].chars().map(|c| unicode_width::UnicodeWidthChar::width(c).unwrap_or(1)).sum();
+                return (abs, col);
+            }
+        }
+        (0, 0)
+    };
+    let (r0, c0) = find(s, "unresolved import");
+    let (r1, c1) = find(s, "build failed");
+    let mut sel = crate::window::Selection::new();
+    sel.start_at(r0, c0);
+    sel.extend_to(r1, c1 + "build".len() - 1);
+    sel.finish();
+    let pane = s.wm.active_tab().active;
+    s.renderer.set_selection(pane, Some(&sel), true);
 }
 
 fn fix_suggestion(s: &mut Stage) {
@@ -1090,4 +1140,21 @@ mod tests {
         let dock = tracked.agents_dock().expect("dock open");
         assert_eq!(dock.w, area.x);
     }
+}
+
+/// Help > Tutorials: the "Splits & panes" demo playing, right after the
+/// split-down shortcut (key overlay, caption with key chips, transport bar).
+fn tutorials(s: &mut Stage) {
+    use crate::tools::tutorial::cast::{Kind, Mark};
+    s.window_title = "Tutorials \u{2014} rift".into();
+    let d = crate::tools::tutorial::find("splits").expect("bundled demo");
+    let cast = crate::tools::tutorial::load(d).expect("bundled demo parses");
+    let at = cast
+        .events
+        .iter()
+        .find(|e| matches!(&e.kind, Kind::Mark(Mark::Key(k, _)) if k == "split_down"))
+        .map_or(0.0, |e| e.t);
+    let mut p = crate::tools::tutorial::player::Player::new(cast, d.title.into(), Some(d.id), s.cell());
+    p.seek(at + 1.2);
+    s.tutorial = Some(p);
 }

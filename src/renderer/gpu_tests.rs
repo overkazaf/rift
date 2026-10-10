@@ -255,46 +255,35 @@ fn cursor_styles() {
 }
 
 #[test]
-fn selection_and_search_highlights() {
+fn selection_is_painted_behind_text_on_both_paths() {
     let Some(mut r) = Rig::new(50, 8, &font_path(), false) else { return };
     r.feed(b"first line of text\r\nsecond line of text\r\nthird line of text\r\n");
-    r.feed(b"\x1b[31mcolored\x1b[0m \x1b[44mbackground\x1b[0m line\r\n");
-    // Selection from (row 1, col 7) to (row 3, col 12).
+    r.feed(b"\x1b[31mcolored\x1b[0m \x1b[44mbackground\x1b[0m \x1b[7mreverse\x1b[0m\r\n");
+    r.feed("wide \u{4e2d}\u{6587} text\r\n".as_bytes());
+    // Stream selection from (row 1, col 7) to (row 4, col 6): middle rows stop
+    // at their text, the last one cuts through the wide glyph's left half.
     let mut sel = crate::window::Selection::new();
     sel.start_at(1, 7);
-    sel.extend_to(3, 12);
-    let rows = {
-        let t = &r.wm.active_pane().terminal;
-        crate::blocks_ui::view::view_abs_rows(t)
-    };
-    // CPU: blend over the finished frame.
-    let mut c = r.cpu_frame();
-    r.cpu.render_selection(&sel, &rows, &mut c, r.w, r.h, r.area);
-    // GPU: highlight quads.
-    let mut rects = Vec::new();
-    for (row, abs) in rows.iter().enumerate() {
-        let Some(abs) = abs else { continue };
-        let mut start = None;
-        for col in 0..=r.w / r.cpu.cell_width() {
-            let on = col < r.w / r.cpu.cell_width() && sel.contains(*abs, col);
-            match (on, start) {
-                (true, None) => start = Some(col),
-                (false, Some(s)) => {
-                    rects.push(HlRect { row, c0: s, c1: col, rgba: [80, 120, 200, 105] });
-                    start = None;
-                }
-                _ => {}
-            }
-        }
-    }
-    assert!(!rects.is_empty());
-    r.gpu.set_highlights(0, rects);
-    let (g, _) = r.gpu_frame();
-    let d = diff(&c, &g, r.w, TOL);
-    eprintln!("[gpu-parity] selection: max {} bad {}", d.max, d.bad);
-    assert!(d.bad as f64 / d.total as f64 <= FRAC, "selection differs: {} px, first {:?}", d.bad, d.first_bad);
-    // Clearing the highlights repaints the rows.
-    r.gpu.set_highlights(0, Vec::new());
+    sel.extend_to(4, 6);
+    sel.finish();
+    r.cpu.set_selection(0, Some(&sel), true);
+    r.gpu.set_selection(0, Some(&sel), true);
+    r.assert_match("selection_stream", TOL, FRAC);
+    // Unfocused window: dimmed selection, still in parity.
+    r.cpu.set_selection(0, Some(&sel), false);
+    r.gpu.set_selection(0, Some(&sel), false);
+    r.assert_match("selection_unfocused", TOL, FRAC);
+    // Block selection.
+    let mut b = crate::window::Selection::new();
+    b.start_block(0, 3);
+    b.extend_to(4, 12);
+    b.finish();
+    r.cpu.set_selection(0, Some(&b), true);
+    r.gpu.set_selection(0, Some(&b), true);
+    r.assert_match("selection_block", TOL, FRAC);
+    // Clearing the selection repaints the rows.
+    r.cpu.set_selection(0, None, true);
+    r.gpu.set_selection(0, None, true);
     r.assert_match("selection_cleared", TOL, FRAC);
 }
 

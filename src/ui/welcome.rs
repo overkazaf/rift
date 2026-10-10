@@ -142,7 +142,7 @@ impl Welcome {
         cx.line(r.x, y, "rift", tk.accent);
         y += tk.row_h;
         cx.line_fit(r.x, y, r.w, "Rust Terminal Emulator v0.3.0", tk.text_muted);
-        y += tk.row_h * 2;
+        y += tk.row_h + tk.row_h / 2;
         cx.line(r.x, y, "Welcome!", tk.text);
         y += tk.row_h;
         for line in [
@@ -154,6 +154,9 @@ impl Welcome {
             y += tk.row_h;
         }
         y += tk.row_h / 2;
+        // Tutorials: short demos of the main features (Help > Tutorials...).
+        cx.line_fit(r.x, y, r.w, "Watch it first: Help > Tutorials\u{2026}", tk.accent);
+        y += tk.row_h;
         let hint = format!("{}+Shift+? reopens this guide.", crate::config::mod_key());
         cx.line_fit(r.x, y, r.w, &hint, tk.text_faint);
     }

@@ -680,6 +680,10 @@ impl Terminal {
                 for row in 0..self.grid.rows.len() {
                     self.grid.fill_row(row, blank);
                 }
+                if !self.using_alt_screen {
+                    // `clear` / Ctrl+L: no block chrome over the blank screen.
+                    self.blocks.on_screen_erased(self.scrollback.len());
+                }
             }
             _ => {}
         }

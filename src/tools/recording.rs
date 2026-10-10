@@ -9,6 +9,9 @@ use std::time::Instant;
 pub struct Recorder {
     file: File,
     start: Instant,
+    /// Trailing bytes of an incomplete UTF-8 sequence, per stream ([o, i]):
+    /// PTY reads can split a multi-byte character across two events.
+    carry: [Vec<u8>; 2],
 }
 
 impl Recorder {
@@ -28,7 +31,7 @@ impl Recorder {
             cols, rows, ts
         )?;
 
-        Ok(Self { file, start: Instant::now() })
+        Ok(Self { file, start: Instant::now(), carry: [Vec::new(), Vec::new()] })
     }
 
     pub fn record_output(&mut self, data: &[u8]) {
@@ -41,7 +44,13 @@ impl Recorder {
 
     fn write_event(&mut self, kind: &str, data: &[u8]) {
         let elapsed = self.start.elapsed().as_secs_f64();
-        let escaped = escape_json_bytes(data);
+        let slot = &mut self.carry[usize::from(kind != "o")];
+        slot.extend_from_slice(data);
+        let text = take_utf8(slot);
+        if text.is_empty() {
+            return;
+        }
+        let escaped = escape_json_str(&text);
         let _ = writeln!(self.file, r#"[{:.6}, "{}", "{}"]"#, elapsed, kind, escaped);
     }
 
@@ -158,21 +167,53 @@ fn parse_event(line: &str) -> Option<PlayEvent> {
     Some(PlayEvent { time, kind, data })
 }
 
-fn escape_json_bytes(data: &[u8]) -> String {
-    let mut out = String::with_capacity(data.len() * 2);
-    for &b in data {
-        match b {
-            b'\\' => out.push_str("\\\\"),
-            b'"' => out.push_str("\\\""),
-            b'\n' => out.push_str("\\n"),
-            b'\r' => out.push_str("\\r"),
-            b'\t' => out.push_str("\\t"),
-            0x08 => out.push_str("\\b"),
-            0x0C => out.push_str("\\f"),
-            b if b < 0x20 => {
-                out.push_str(&format!("\\u{:04x}", b));
+/// Decode the complete UTF-8 prefix of `buf` (invalid bytes become U+FFFD)
+/// and leave an incomplete trailing sequence in `buf` for the next event.
+fn take_utf8(buf: &mut Vec<u8>) -> String {
+    let mut out = String::new();
+    let mut rest: &[u8] = buf;
+    loop {
+        match std::str::from_utf8(rest) {
+            Ok(s) => {
+                out.push_str(s);
+                rest = &[];
+                break;
             }
-            b => out.push(b as char),
+            Err(e) => {
+                let (ok, tail) = rest.split_at(e.valid_up_to());
+                out.push_str(std::str::from_utf8(ok).unwrap_or_default());
+                match e.error_len() {
+                    Some(n) => {
+                        out.push('\u{FFFD}');
+                        rest = &tail[n..];
+                    }
+                    None => {
+                        rest = tail;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    *buf = rest.to_vec();
+    out
+}
+
+fn escape_json_str(data: &str) -> String {
+    let mut out = String::with_capacity(data.len() * 2);
+    for c in data.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{08}' => out.push_str("\\b"),
+            '\u{0C}' => out.push_str("\\f"),
+            c if (c as u32) < 0x20 || c == '\u{7f}' => {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => out.push(c),
         }
     }
     out
@@ -213,4 +254,30 @@ fn unescape_json(s: &str) -> Vec<u8> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod utf8_tests {
+    use super::*;
+
+    #[test]
+    fn split_multibyte_chars_round_trip() {
+        let src = "中文 ✓ 🦀 ok\n".as_bytes();
+        let mut carry = Vec::new();
+        let mut json = String::new();
+        // Feed one byte at a time: every multi-byte char is split.
+        for b in src {
+            carry.push(*b);
+            json.push_str(&escape_json_str(&take_utf8(&mut carry)));
+        }
+        assert!(carry.is_empty());
+        assert_eq!(unescape_json(&json), src);
+    }
+
+    #[test]
+    fn invalid_bytes_become_replacement_char() {
+        let mut buf = vec![b'a', 0xff, b'b'];
+        assert_eq!(take_utf8(&mut buf), "a\u{FFFD}b");
+        assert!(buf.is_empty());
+    }
 }

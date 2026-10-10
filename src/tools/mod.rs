@@ -36,3 +36,4 @@ pub mod system_info;
 pub mod session;
 pub mod port_dashboard;
 pub mod regex_playground;
+pub mod tutorial;

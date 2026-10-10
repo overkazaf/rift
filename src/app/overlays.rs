@@ -37,6 +37,11 @@ pub fn try_intercept(app: &mut App, event: &KeyEvent, event_loop: &ActiveEventLo
     if app.win.exec_preview.visible {
         return handle_exec_preview(app, event);
     }
+    // Tutorials (Help > Tutorials): the list / player take every key; nothing
+    // reaches the shell while they are open.
+    if app.win.tutorial.visible() {
+        return handle_tutorial(app, event);
+    }
     // The queue countdown: Esc pauses the queue instead of reaching the agent.
     if crate::workflow::countdown_active(app) && !app.workflows.overlay_visible() && matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
         crate::workflow::cancel_countdown(app);
@@ -341,6 +346,40 @@ fn handle_webview_dialog(app: &mut App, event: &KeyEvent) -> bool {
         }
         app.request_redraw();
     }
+    true
+}
+
+/// Decode a key for the tutorial list / player. Always consumes the key.
+fn handle_tutorial(app: &mut App, event: &KeyEvent) -> bool {
+    use crate::tools::tutorial::player::TKey;
+    let shift = app.win.modifiers.shift_key();
+    let key = match &event.logical_key {
+        Key::Named(NamedKey::Space) => Some(TKey::Space),
+        Key::Named(NamedKey::ArrowLeft) if shift => Some(TKey::ShiftLeft),
+        Key::Named(NamedKey::ArrowRight) if shift => Some(TKey::ShiftRight),
+        Key::Named(NamedKey::ArrowLeft) => Some(TKey::Left),
+        Key::Named(NamedKey::ArrowRight) => Some(TKey::Right),
+        Key::Named(NamedKey::ArrowUp) => Some(TKey::Up),
+        Key::Named(NamedKey::ArrowDown) => Some(TKey::Down),
+        Key::Named(NamedKey::Enter) => Some(TKey::Enter),
+        Key::Named(NamedKey::Escape) => Some(TKey::Esc),
+        Key::Named(NamedKey::Home) => Some(TKey::Home),
+        Key::Named(NamedKey::End) => Some(TKey::End),
+        // Plain letters / digits only: Cmd/Ctrl chords do nothing here.
+        Key::Character(s) if !app.win.modifiers.super_key() && !app.win.modifiers.control_key() => {
+            s.chars().next().map(|c| TKey::Char(c.to_ascii_lowercase()))
+        }
+        _ => None,
+    };
+    if let Some(k) = key {
+        let cell = (app.win.renderer.cell_width(), app.win.renderer.cell_height());
+        app.win.tutorial.handle_key(k, cell);
+        if !app.win.tutorial.playing() {
+            // Back to the live panes: repaint them from scratch.
+            app.win.renderer.invalidate_all();
+        }
+    }
+    app.request_redraw();
     true
 }
 
@@ -699,6 +738,7 @@ fn dispatch_palette_action(app: &mut App, action: PaletteAction, event_loop: &Ac
         PaletteAction::Agent(l) => crate::agents::runtime::launch(app, l),
         PaletteAction::Workflow(c) => crate::workflow::run_command(app, c),
         PaletteAction::Autopilot(c) => crate::agents::autopilot::run_command(app, c),
+        PaletteAction::Upgrade(tag) => crate::update::ui::confirm_version(app, &tag),
         PaletteAction::Template(_) => {}
     }
 }

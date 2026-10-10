@@ -457,6 +457,8 @@ pub enum PaletteAction {
     Workflow(crate::workflow::WorkflowCmd),
     /// Autopilot: toggle, policy log, edit policy.
     Autopilot(crate::agents::autopilot::AutopilotCmd),
+    /// Install this release tag (after a confirmation); see `update::ui`.
+    Upgrade(String),
     /// Internal: completes the query to this keyword; never dispatched.
     Template(&'static str),
 }
@@ -1410,6 +1412,13 @@ fn entry(name: &str, cat: Category, shortcut: Option<String>, action: PaletteAct
 
 fn dynamic_items(ctx: &PaletteContext) -> Vec<PaletteItem> {
     let mut v = Vec::new();
+    // Releases from the last "Rift: Upgrade to Version..." fetch.
+    for (name, detail, tag) in crate::update::ui::palette_items() {
+        let mut it = entry(&name, Category::Settings, Some(detail), PaletteAction::Upgrade(tag));
+        it.meta = true;
+        it.id = format!("upgrade-dyn:{name}");
+        v.push(it);
+    }
     for m in &ctx.models {
         let mut it = entry(&format!("AI Model: {}", m.label), Category::Ai, Some(if m.active { format!("{} - current", m.detail) } else { m.detail.clone() }), PaletteAction::SelectModel(m.choice.clone()));
         it.meta = true;
@@ -1505,6 +1514,8 @@ fn catalog() -> Vec<PaletteItem> {
     v.push(entry("Next Agent Needing Attention", Agents, s("Shift+."), Menu(MenuAction::AgentNextAttention)));
     v.push(entry("New Agent...", Agents, None, Menu(MenuAction::AgentNew)));
     v.push(entry("Agent Layout: 2\u{d7}2", Agents, None, Menu(MenuAction::AgentLayout2x2)));
+    v.push(entry("Rift: Check for Updates", Settings, None, Menu(MenuAction::CheckForUpdates)));
+    v.push(entry("Rift: Upgrade to Version\u{2026}", Settings, None, Menu(MenuAction::ChooseVersion)));
     {
         use crate::agents::autopilot::AutopilotCmd as A;
         v.push(entry("Agents: Toggle Autopilot", Agents, None, PaletteAction::Autopilot(A::Toggle)));
@@ -1557,6 +1568,11 @@ fn catalog() -> Vec<PaletteItem> {
     // Settings
     v.push(entry("Preferences", Settings, s(","), Menu(MenuAction::Preferences)));
     v.push(entry("Welcome Guide", Settings, s("Shift+/"), Menu(MenuAction::Welcome)));
+    // Help > Tutorials: the list, and one entry per bundled demo.
+    v.push(entry("Help: Tutorials", Settings, None, Menu(MenuAction::Tutorials)));
+    for d in crate::tools::tutorial::DEMOS {
+        v.push(entry(&format!("Help: Play demo: {}", d.title), Settings, None, Menu(MenuAction::PlayDemo(d.id))));
+    }
     v.push(entry("Toggle Full Screen", Settings, Some(format!("Ctrl+{m}+F")), Menu(MenuAction::ToggleFullScreen)));
     v.push(entry("Zoom In", Settings, s("="), Menu(MenuAction::ZoomIn)));
     v.push(entry("Zoom Out", Settings, Some("Ctrl+-".into()), Menu(MenuAction::ZoomOut)));
@@ -2172,7 +2188,8 @@ mod tests {
             | MenuAction::CompareOutput | MenuAction::UiGallery | MenuAction::ReviewChanges
             | MenuAction::ReviewMark | MenuAction::Pane(_)
             | MenuAction::AgentMissionControl | MenuAction::AgentNextAttention | MenuAction::AgentNew
-            | MenuAction::AgentLayout2x2 => {}
+            | MenuAction::AgentLayout2x2 | MenuAction::CheckForUpdates | MenuAction::ChooseVersion
+            | MenuAction::Tutorials | MenuAction::PlayDemo(_) => {}
         }
     }
 
@@ -2189,7 +2206,11 @@ mod tests {
             M::NaturalLanguageToggle, M::TimeWarp, M::HudToggle, M::BroadcastToggle,
             M::Find, M::ClearBuffer, M::CompareOutput, M::UiGallery, M::ReviewChanges, M::ReviewMark,
             M::AgentMissionControl, M::AgentNextAttention, M::AgentNew, M::AgentLayout2x2,
+            M::CheckForUpdates, M::ChooseVersion, M::Tutorials,
         ];
+        for d in crate::tools::tutorial::DEMOS {
+            expected.push(M::PlayDemo(d.id));
+        }
         for c in [BrowserCmd::Back, BrowserCmd::Forward, BrowserCmd::Reload, BrowserCmd::FocusAddress, BrowserCmd::Close] {
             expected.push(M::Browser(c));
         }

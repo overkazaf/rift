@@ -1,7 +1,7 @@
 pub mod toml;
 
 #[allow(dead_code)]
-pub const VERSION: &str = "0.3.0";
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 #[allow(dead_code)]
 pub const APP_NAME: &str = "rift";
 #[allow(dead_code)]
@@ -103,6 +103,12 @@ pub struct Config {
     pub effect_intensity: f32,
     /// Play the short RIFT logo reveal at startup (`startup_animation`).
     pub startup_animation: bool,
+    /// Reopen the previous session's windows, tabs and splits at startup
+    /// (`restore_session`). Off: every launch starts with one plain pane.
+    pub restore_session: bool,
+    /// Quietly check GitHub for a newer release at startup, at most once a
+    /// day (`check_updates`). Off by default: no network unless asked.
+    pub check_updates: bool,
     /// Draw bold text with the bright palette variant (colors 0-7 -> 8-15).
     pub bold_is_bright: bool,
     /// Which renderer draws the terminal (`renderer = "auto" | "gpu" | "cpu"`).
@@ -189,6 +195,8 @@ impl Default for Config {
             effect: None,
             effect_intensity: crate::effects::DEFAULT_INTENSITY,
             startup_animation: true,
+            restore_session: false,
+            check_updates: false,
             bold_is_bright: false,
             renderer: RendererMode::Auto,
             font_ligatures: None,
@@ -232,6 +240,31 @@ impl Config {
     }
 }
 
+/// Minimum WCAG contrast ratio kept for selected text before it is swapped
+/// for the theme fg / bg.
+pub const MIN_SELECTION_CONTRAST: f32 = 2.5;
+
+/// `a` moved toward `b` by `t` (0.0 = a, 1.0 = b).
+pub fn mix_rgb(a: Rgb, b: Rgb, t: f32) -> Rgb {
+    let m = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round().clamp(0.0, 255.0) as u8;
+    (m(a.0, b.0), m(a.1, b.1), m(a.2, b.2))
+}
+
+/// WCAG relative luminance (0.0 black .. 1.0 white).
+pub fn relative_luminance(c: Rgb) -> f32 {
+    let lin = |v: u8| {
+        let v = v as f32 / 255.0;
+        if v <= 0.040_45 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+    };
+    0.2126 * lin(c.0) + 0.7152 * lin(c.1) + 0.0722 * lin(c.2)
+}
+
+/// WCAG contrast ratio between two colors (1.0 ..= 21.0).
+pub fn contrast_ratio(a: Rgb, b: Rgb) -> f32 {
+    let (la, lb) = (relative_luminance(a), relative_luminance(b));
+    (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+}
+
 #[derive(Clone)]
 #[allow(dead_code)]
 pub struct Theme {
@@ -240,6 +273,12 @@ pub struct Theme {
     pub bg: Rgb,
     pub cursor: Rgb,
     pub palette: [Rgb; 16],
+    /// Background of selected cells (`None` = derived from accent and bg, see
+    /// [`Theme::selection_colors`]).
+    pub selection_bg: Option<Rgb>,
+    /// Text color of selected cells (`None` = keep each cell's own color,
+    /// swapped for a readable one when the contrast is too low).
+    pub selection_fg: Option<Rgb>,
 }
 
 impl Theme {
@@ -254,6 +293,8 @@ impl Theme {
                 (54, 62, 112), (255, 110, 150), (80, 255, 190), (255, 232, 120),
                 (120, 160, 255), (255, 110, 220), (110, 242, 255), (236, 242, 255),
             ],
+            selection_bg: None,
+            selection_fg: None,
         }
     }
 
@@ -261,6 +302,45 @@ impl Theme {
     /// is the cursor colour; every built-in theme keeps it clearly chromatic.
     pub fn accent(&self) -> Rgb {
         self.cursor
+    }
+
+    /// Background of selected cells: the configured `selection_bg`, else the
+    /// accent blended into the background. Tinted like the theme and clearly
+    /// separated from the background on dark and light themes alike.
+    pub fn selection_bg(&self) -> Rgb {
+        if let Some(c) = self.selection_bg {
+            return c;
+        }
+        let light = relative_luminance(self.bg) > 0.4;
+        // Back off toward the bg until the theme's own text reads well on it
+        // (low-contrast themes such as solarized), but stay visible.
+        let mut t = if light { 0.28 } else { 0.32 };
+        loop {
+            let c = mix_rgb(self.bg, self.accent(), t);
+            if t <= 0.2 || contrast_ratio(self.fg, c) >= 4.0 {
+                return c;
+            }
+            t -= 0.02;
+        }
+    }
+
+    /// Text color of a selected cell whose own color is `fg`, drawn on
+    /// `sel_bg`: the configured `selection_fg`, else `fg` itself as long as
+    /// it stays readable, else whichever of theme fg / bg contrasts more
+    /// (white / black if neither is readable).
+    pub fn selection_text(&self, fg: Rgb, sel_bg: Rgb) -> Rgb {
+        if let Some(c) = self.selection_fg {
+            return c;
+        }
+        if contrast_ratio(fg, sel_bg) >= MIN_SELECTION_CONTRAST {
+            return fg;
+        }
+        let theme = if contrast_ratio(self.fg, sel_bg) >= contrast_ratio(self.bg, sel_bg) { self.fg } else { self.bg };
+        if contrast_ratio(theme, sel_bg) >= MIN_SELECTION_CONTRAST {
+            return theme;
+        }
+        let (white, black) = ((255, 255, 255), (0, 0, 0));
+        if contrast_ratio(white, sel_bg) >= contrast_ratio(black, sel_bg) { white } else { black }
     }
 
     pub fn catppuccin_mocha() -> Self {
@@ -275,6 +355,8 @@ impl Theme {
                 (88, 91, 112), (243, 139, 168), (166, 227, 161), (249, 226, 175),
                 (137, 180, 250), (245, 194, 231), (148, 226, 213), (205, 214, 244),
             ],
+            selection_bg: None,
+            selection_fg: None,
         }
     }
 
@@ -288,6 +370,8 @@ impl Theme {
                 (0, 80, 20), (255, 80, 80), (80, 255, 120), (255, 255, 80),
                 (80, 180, 255), (255, 80, 255), (80, 255, 255), (0, 255, 65),
             ],
+            selection_bg: None,
+            selection_fg: None,
         }
     }
 
@@ -301,6 +385,8 @@ impl Theme {
                 (98, 114, 164), (255, 110, 110), (105, 255, 148), (255, 255, 165),
                 (125, 140, 190), (255, 146, 218), (164, 255, 255), (255, 255, 255),
             ],
+            selection_bg: None,
+            selection_fg: None,
         }
     }
 
@@ -314,6 +400,8 @@ impl Theme {
                 (76, 86, 106), (191, 97, 106), (163, 190, 140), (235, 203, 139),
                 (129, 161, 193), (180, 142, 173), (143, 188, 187), (236, 239, 244),
             ],
+            selection_bg: None,
+            selection_fg: None,
         }
     }
 
@@ -327,6 +415,8 @@ impl Theme {
                 (0, 43, 54), (203, 75, 22), (88, 110, 117), (101, 123, 131),
                 (131, 148, 150), (108, 113, 196), (147, 161, 161), (253, 246, 227),
             ],
+            selection_bg: None,
+            selection_fg: None,
         }
     }
 
@@ -340,6 +430,8 @@ impl Theme {
                 (65, 72, 104), (247, 118, 142), (158, 206, 106), (224, 175, 104),
                 (122, 162, 247), (187, 154, 247), (125, 207, 255), (192, 202, 245),
             ],
+            selection_bg: None,
+            selection_fg: None,
         }
     }
 
@@ -353,6 +445,8 @@ impl Theme {
                 (40, 20, 80), (255, 50, 120), (50, 255, 170), (255, 255, 50),
                 (50, 180, 255), (255, 50, 255), (50, 255, 255), (240, 240, 255),
             ],
+            selection_bg: None,
+            selection_fg: None,
         }
     }
 
@@ -366,6 +460,8 @@ impl Theme {
                 (146, 131, 116), (251, 73, 52), (184, 187, 38), (250, 189, 47),
                 (131, 165, 152), (211, 134, 155), (142, 192, 124), (235, 219, 178),
             ],
+            selection_bg: None,
+            selection_fg: None,
         }
     }
 
@@ -379,6 +475,8 @@ impl Theme {
                 (114, 112, 114), (255, 97, 136), (169, 220, 118), (255, 216, 102),
                 (120, 220, 232), (171, 157, 242), (120, 220, 232), (255, 255, 255),
             ],
+            selection_bg: None,
+            selection_fg: None,
         }
     }
 
@@ -510,6 +608,28 @@ mod tests {
             assert_ne!(a, t.bg, "{name}");
         }
         assert_eq!(Config::available_themes().len(), 10);
+    }
+
+    #[test]
+    fn selection_colors_are_visible_and_text_stays_readable() {
+        let light = Theme { name: "light", fg: (40, 40, 40), bg: (250, 250, 248), cursor: (38, 110, 220), ..Theme::nord() };
+        let themes = Config::available_themes().iter().map(|n| Config::theme_by_name(n).unwrap()).chain([light]);
+        for t in themes {
+            let sel = t.selection_bg();
+            // Clearly separated from the background, text readable on it.
+            assert!(contrast_ratio(sel, t.bg) >= 1.3, "{}: selection {sel:?} too close to bg", t.name);
+            assert!(contrast_ratio(t.selection_text(t.fg, sel), sel) >= MIN_SELECTION_CONTRAST, "{}", t.name);
+            for c in t.palette {
+                let txt = t.selection_text(c, sel);
+                assert!(txt == c || contrast_ratio(txt, sel) >= contrast_ratio(c, sel), "{}", t.name);
+            }
+            // Low-contrast text is swapped for the theme fg / bg.
+            assert_ne!(t.selection_text(sel, sel), sel, "{}", t.name);
+        }
+        // Explicit colors win.
+        let t = Theme { selection_bg: Some((1, 2, 3)), selection_fg: Some((4, 5, 6)), ..Theme::nord() };
+        assert_eq!(t.selection_bg(), (1, 2, 3));
+        assert_eq!(t.selection_text((200, 200, 200), (1, 2, 3)), (4, 5, 6));
     }
 
     #[test]

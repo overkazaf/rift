@@ -29,6 +29,8 @@ pub enum ConfirmAction {
     Policy(Box<crate::agents::autopilot::PolicyConfirm>),
     /// Close a window that still runs processes. Buttons: Close / Cancel.
     CloseWindow { win: crate::app::windows::WinId, save_if_last: bool },
+    /// Update offer / version pick (see `update::ui::resolve_confirm`).
+    Upgrade(crate::update::ui::UpgradeConfirm),
 }
 
 pub struct ConfirmRequest {
@@ -395,6 +397,7 @@ pub fn resolve(app: &mut App, req: ConfirmRequest, choice: Option<usize>) {
                 crate::app::window_ops::request_close(app, win, false, save_if_last);
             }
         }
+        ConfirmAction::Upgrade(c) => crate::update::ui::resolve_confirm(app, c, choice),
         ConfirmAction::SshHostKey { mut reply } => {
             if let Some(tx) = reply.take() {
                 let _ = tx.send(choice == Some(0));

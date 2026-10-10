@@ -149,7 +149,9 @@ impl Selection {
         self.dragging = false;
     }
 
-    /// Whether the cell at (absolute row, col) is selected.
+    /// Whether the cell at (absolute row, col) is logically selected (the
+    /// painted shape is [`row_span`](Self::row_span)).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn contains(&self, row: usize, col: usize) -> bool {
         if !self.active {
             return false;
@@ -172,6 +174,59 @@ impl Selection {
             return col <= ec;
         }
         true
+    }
+
+    /// Painted columns `c0..c1` of absolute row `row` (whose cells are
+    /// `cells`, in a pane `cols` wide), or `None` when nothing on the row is
+    /// highlighted. Scrollback rows may be stored without their trailing
+    /// blanks, so the span can extend past `cells.len()` (up to `cols`).
+    ///
+    /// Unlike [`contains`](Self::contains) (the logical selection, used for
+    /// hit tests) this is the *visual* shape, as in Ghostty / Warp / iTerm2:
+    /// * stream selections stop at the row's content (last non-blank cell)
+    ///   plus one cell standing for the selected line break, instead of
+    ///   running to the pane edge; soft-wrapped rows (the line continues) and
+    ///   rows ending in a selected wide spacer keep their full width,
+    /// * block selections stay rectangular,
+    /// * wide characters are always covered whole (both halves).
+    pub fn row_span(&self, row: usize, cells: &[Cell], cols: usize) -> Option<(usize, usize)> {
+        let n = cells.len().max(cols);
+        if !self.active || n == 0 {
+            return None;
+        }
+        let ((sr, sc), (er, ec)) = self.normalized();
+        if row < sr || row > er {
+            return None;
+        }
+        let (mut c0, mut c1) = if self.mode == SelMode::Block {
+            (self.start.1.min(self.end.1), self.start.1.max(self.end.1) + 1)
+        } else {
+            let c0 = if row == sr { sc } else { 0 };
+            let c1 = if row == er { ec.saturating_add(1) } else { n };
+            if row < er && row_is_wrapped(cells) {
+                (c0, c1)
+            } else {
+                // Content end: last cell with a glyph or a colored background.
+                let end = cells
+                    .iter()
+                    .rposition(|c| (c.c != ' ' && !c.is_spacer()) || c.bg != crate::terminal::Color::Default || c.reverse())
+                    .map_or(0, |i| i + 1);
+                (c0, c1.min((end + 1).max(c0 + 1)))
+            }
+        };
+        c1 = c1.min(n);
+        if c0 >= c1 {
+            return None;
+        }
+        // Wide characters: '\0' (not a spacer) is the right half of the cell before it.
+        let half = |c: usize| cells.get(c).map_or(false, |x| x.c == '\0' && !x.is_spacer());
+        if c0 > 0 && half(c0) {
+            c0 -= 1;
+        }
+        if half(c1) {
+            c1 += 1;
+        }
+        Some((c0, c1))
     }
 
     /// Selected text. `line(abs_row)` returns that row's cells.
@@ -635,5 +690,112 @@ mod tests {
         assert_eq!(sanitize_paste("l1\r\nl2\r\n", true), "l1\rl2\r");
         assert_eq!(sanitize_paste("l1\nl2\r", false), "l1\nl2\r");
         assert_eq!(sanitize_paste("", true), "");
+    }
+
+    /// `s` padded with blanks to `n` cells.
+    fn row(s: &str, n: usize) -> Vec<Cell> {
+        let mut v = cells(s);
+        v.resize(n, Cell::default());
+        v
+    }
+
+    #[test]
+    fn stream_span_stops_at_content_plus_line_break() {
+        let mut sel = Selection::new();
+        sel.start_at(0, 3);
+        sel.extend_to(2, 4);
+        sel.finish();
+        let r = row("hello world", 40);
+        // First row: from the start column to the text end + one cell.
+        assert_eq!(sel.row_span(0, &r, 0), Some((3, 12)));
+        // Middle row: whole text + one cell, never the empty space after it.
+        assert_eq!(sel.row_span(1, &r, 0), Some((0, 12)));
+        // Empty middle row: a single cell for its line break.
+        assert_eq!(sel.row_span(1, &row("", 40), 0), Some((0, 1)));
+        // Last row: up to the end column.
+        assert_eq!(sel.row_span(2, &r, 0), Some((0, 5)));
+        // Outside the selection.
+        assert_eq!(sel.row_span(3, &r, 0), None);
+        // A full line never gets an extra cell past the pane edge.
+        assert_eq!(sel.row_span(1, &row(&"x".repeat(40), 40), 0), Some((0, 40)));
+        // A colored background counts as content.
+        let mut bgrow = row("ab", 40);
+        bgrow[20].bg = crate::terminal::Color::Indexed(4);
+        assert_eq!(sel.row_span(1, &bgrow, 0), Some((0, 22)));
+    }
+
+    #[test]
+    fn stream_span_keeps_full_width_on_soft_wrapped_rows() {
+        let mut sel = Selection::new();
+        sel.start_at(0, 0);
+        sel.extend_to(1, 2);
+        sel.finish();
+        let mut r = row("abc", 10);
+        r[9].set_wrap(true);
+        assert_eq!(sel.row_span(0, &r, 0), Some((0, 10)));
+    }
+
+    #[test]
+    fn last_row_past_the_text_is_clipped_too() {
+        let mut sel = Selection::new();
+        sel.start_at(0, 0);
+        sel.extend_to(0, 30);
+        sel.finish();
+        assert_eq!(sel.row_span(0, &row("hi", 40), 0), Some((0, 3)));
+        // select_all style range on a short line
+        let mut all = Selection::new();
+        all.select_all(3, 40);
+        assert_eq!(all.row_span(2, &row("prompt$", 40), 0), Some((0, 8)));
+    }
+
+    #[test]
+    fn block_span_is_rectangular() {
+        let mut sel = Selection::new();
+        sel.start_block(0, 8);
+        sel.extend_to(2, 3);
+        sel.finish();
+        for r in 0..=2 {
+            assert_eq!(sel.row_span(r, &row("", 20), 0), Some((3, 9)), "row {r}");
+            assert_eq!(sel.row_span(r, &row("long line of text here", 30), 0), Some((3, 9)));
+        }
+        assert_eq!(sel.row_span(3, &row("", 20), 0), None);
+    }
+
+    #[test]
+    fn spans_cover_wide_chars_whole() {
+        // "a中b": cells a, 中, \0, b
+        let r = row("a\u{4e2d}b", 10);
+        let mut sel = Selection::new();
+        sel.start_at(0, 2); // right half of 中
+        sel.extend_to(0, 3);
+        sel.finish();
+        assert_eq!(sel.row_span(0, &r, 0), Some((1, 4)));
+        let mut sel = Selection::new();
+        sel.start_at(0, 0);
+        sel.extend_to(0, 1); // left half only
+        sel.finish();
+        assert_eq!(sel.row_span(0, &r, 0), Some((0, 3)));
+    }
+
+    #[test]
+    fn trimmed_rows_span_up_to_the_pane_width() {
+        // Scrollback rows are stored without trailing blanks.
+        let mut sel = Selection::new();
+        sel.start_at(0, 0);
+        sel.extend_to(2, 3);
+        sel.finish();
+        assert_eq!(sel.row_span(1, &cells("abc"), 40), Some((0, 4)), "line break cell past the stored cells");
+        assert_eq!(sel.row_span(1, &[], 40), Some((0, 1)), "empty stored row");
+        let mut b = Selection::new();
+        b.start_block(0, 10);
+        b.extend_to(2, 12);
+        b.finish();
+        assert_eq!(b.row_span(1, &cells("ab"), 40), Some((10, 13)));
+    }
+
+    #[test]
+    fn inactive_selection_paints_nothing() {
+        let sel = Selection::new();
+        assert_eq!(sel.row_span(0, &row("abc", 10), 0), None);
     }
 }

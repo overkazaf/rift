@@ -79,6 +79,12 @@ Six screen effects (**CRT, Neon Glow, Matrix Rain, Hologram, Glitch, Amber**) on
 
 SSH manager · Time Warp (rewind the screen) · HUD · Git / Docker / CI panels · Port dashboard · Regex playground · History search (`Cmd+Y`) · asciinema recording · Secret masking · Inline images (Kitty graphics protocol) · Broadcast input · Compare pane output · File manager · Command heatmap · Audit log
 
+### Tutorials
+
+**Help → Tutorials…** (or *Help: Tutorials* in the command palette, or `rift --demo list`) plays short recorded demos inside Rift: command blocks, splits, AI, the palette, Preview-Then-Accept, Mission Control, tabs and windows, Time Warp. Captions show the shortcuts from *your* keymap. `Space` pauses, `←`/`→` step, `1`/`2`/`4` set the speed, `Esc` returns to your terminal untouched. Playback never sends anything to your shell. `rift --demo file.cast` plays your own asciinema recordings the same way.
+
+<img src="docs/screenshots/tutorials.png" alt="The tutorial player showing the Splits & panes demo with a key overlay, a caption and the transport bar" width="800">
+
 ### Core
 
 Damage-tracked rendering with an optional wgpu backend · IME (Chinese input) · font fallback (Nerd Font / Powerline / CJK) · shell integration (OSC 133 / OSC 7) · smooth scrolling · rich selection · context menu · Kitty inline images · session restore
@@ -132,6 +138,28 @@ open target/Rift.app
 rift --help            # usage
 rift --version
 rift --config PATH     # use a specific config file
+```
+
+## Upgrading
+
+Rift upgrades itself from [GitHub Releases](https://github.com/overkazaf/rift/releases):
+
+```bash
+rift upgrade            # latest stable release
+rift upgrade --list     # all releases; * marks the one you run
+rift upgrade 0.4.1      # a specific version (downgrades allowed, with a warning)
+rift upgrade --check    # just report; exit 10 when an update is available
+```
+
+In the app: **Help → Check for Updates…**, or the command palette entries **Rift: Check for Updates** and **Rift: Upgrade to Version…** (pick any release from a list). *Upgrade & Restart* installs in the background, saves your session and reopens it in the new version.
+
+Every download is checked against the release's published `.sha256`; a mismatch (or a missing checksum, unless `--no-verify`) is refused. On macOS the running `Rift.app` is replaced in place (or `/Applications/Rift.app` is installed when you run a bare binary) and the quarantine flag is cleared, since the app is not notarized yet; on Linux the `rift` binary is replaced atomically. Development builds under `target/` are never overwritten: the verified package is downloaded and its path printed. If the install location isn't writable you'll be told to re-run with `sudo` or move Rift somewhere you own. Set `GITHUB_TOKEN` if you hit the anonymous API rate limit.
+
+Rift never checks for updates on its own unless you opt in:
+
+```toml
+[general]
+check_updates = true   # quiet check at startup, at most once a day
 ```
 
 ## AI setup
@@ -505,7 +533,7 @@ Every window has its own tabs, panes and docks; the agent registry, MCP server a
 |---|---|
 | `Cmd+Shift+S` | SSH manager |
 | `Cmd+Shift+H` | HUD |
-| `Ctrl+Shift+Z` | Time Warp |
+| `Cmd+Shift+Z` (macOS) · `Ctrl+Shift+Z` | Time Warp |
 | `Cmd+Shift+G` | Git panel |
 | `Cmd+Shift+O` | Docker panel |
 | `Cmd+Shift+I` | CI/CD panel |

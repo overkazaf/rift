@@ -382,7 +382,33 @@ pub fn handle_click(app: &mut App, event_loop: &ActiveEventLoop) {
 // ── Menu bar ──
 
 pub fn handle_menu_action(app: &mut App, action: MenuAction, event_loop: &ActiveEventLoop) {
+    // While a tutorial plays, menu accelerators (Cmd+D, Cmd+Shift+T, ...) must
+    // not change the live panes hidden behind it: Esc returns to them as they were.
+    let tutorial_action = matches!(action, MenuAction::Tutorials | MenuAction::PlayDemo(_));
+    if app.win.tutorial.playing()
+        && !tutorial_action
+        && !matches!(
+            action,
+            MenuAction::ToggleFullScreen | MenuAction::ZoomIn | MenuAction::ZoomOut | MenuAction::ZoomReset | MenuAction::NewWindow | MenuAction::CloseWindow
+        )
+    {
+        log::info!("{action:?} ignored while a tutorial plays (Esc exits it)");
+        return;
+    }
+    if app.win.tutorial.picker.is_some() && !tutorial_action {
+        app.win.tutorial.close();
+    }
     match action {
+        MenuAction::Tutorials => {
+            app.win.tutorial.open_picker();
+            app.win.renderer.invalidate_all();
+        }
+        MenuAction::PlayDemo(id) => {
+            let cell = (app.win.renderer.cell_width(), app.win.renderer.cell_height());
+            if let Err(e) = app.win.tutorial.play(id, cell) {
+                log::warn!("tutorial: {e}");
+            }
+        }
         MenuAction::NewTab => {
             let (c, r) = pane_size(app);
             app.win.wm.new_tab(c, r);
@@ -515,6 +541,8 @@ pub fn handle_menu_action(app: &mut App, action: MenuAction, event_loop: &Active
             Some(kind) => crate::agents::runtime::launch(app, crate::agents::runtime::Launch::Layout { kind, cols: 2, rows: 2 }),
             None => app.win.blocks_ui.show_toast("No agent CLI found (claude, codex, gemini, opencode, aider, cursor-agent)"),
         },
+        MenuAction::CheckForUpdates => crate::update::ui::check_now(app),
+        MenuAction::ChooseVersion => crate::update::ui::choose_version(app),
     }
     app.request_redraw();
 }

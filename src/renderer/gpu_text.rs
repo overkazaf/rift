@@ -21,7 +21,8 @@
 //! writes plain `0x00RRGGBB`).
 //!
 //! Instance order inside a row is the paint order: row background, cell
-//! backgrounds + cursor shapes, glyphs, decorations, highlights.
+//! backgrounds (selection included) + cursor shapes, glyphs, decorations,
+//! search highlights.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -337,7 +338,7 @@ impl Renderer {
         self.gpu_text_active() && self.cur_pane != NO_CACHE
     }
 
-    /// Replace the highlight set (selection, search matches) of `pane`.
+    /// Replace the highlight set (search matches) of `pane`.
     /// Rows are repainted only if their highlights changed.
     pub fn set_highlights(&mut self, pane: usize, rects: Vec<HlRect>) {
         self.hl_pane = pane;
@@ -538,6 +539,10 @@ impl Renderer {
         if let Some((s, e, c)) = run.take() {
             out.push(Inst::solid_rgb(s, y0, e - s, ch, c));
         }
+        // Selection past the stored cells (trimmed scrollback rows).
+        if let Some((x0, x1)) = self.sel_tail_px(row, cells.len(), rect, buf_width) {
+            out.push(Inst::solid_rgb(x0, y0, x1 - x0, ch, self.sel_bg));
+        }
         out.append(&mut cursor_quads);
 
         // ── Ligature runs ──
@@ -650,7 +655,8 @@ impl Renderer {
             }
         }
 
-        // ── Pass 4: highlights (selection, search) over everything ──
+        // ── Pass 4: search highlights over everything (the selection is a
+        //    cell background, painted in pass 1 behind the glyphs) ──
         if self.cur_pane == self.hl_pane {
             if let Some(rects) = self.hl_rows.get(&row) {
                 let max_col = rect.width / cw.max(1);

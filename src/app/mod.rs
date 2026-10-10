@@ -90,6 +90,8 @@ pub struct WindowState {
     pub confirm: crate::ui::confirm::ConfirmModal,
     pub timewarp: TimeWarp,
     pub timewarp_browser: TimeWarpBrowser,
+    /// Help > Tutorials: the demo list and player (replaces the terminal view while playing).
+    pub tutorial: crate::tools::tutorial::TutorialUi,
     pub hud: Hud,
     pub hud_visible: bool,
     pub broadcast: bool,
@@ -164,7 +166,7 @@ impl WindowState {
             modifiers: ModifiersState::empty(),
             recorder: None,
             prefs: Preferences::new(config),
-            welcome: if first { Welcome::new_auto() } else { Welcome::hidden() },
+            welcome: if first && !crate::tools::tutorial::startup_pending() { Welcome::new_auto() } else { Welcome::hidden() },
             ssh_dialog: SshDialog::new(),
             autocomplete: Autocomplete::new(),
             webview_dialog: WebViewDialog::new(),
@@ -180,6 +182,7 @@ impl WindowState {
             confirm: crate::ui::confirm::ConfirmModal::new(),
             timewarp: TimeWarp::new(500),
             timewarp_browser: TimeWarpBrowser::new(),
+            tutorial: if first { crate::tools::tutorial::TutorialUi::for_first_window() } else { crate::tools::tutorial::TutorialUi::new() },
             hud: Hud::new(),
             hud_visible: false,
             broadcast: false,
@@ -328,7 +331,11 @@ impl App {
         // Restore the previous session (windows, tabs, titles, working dirs,
         // scrollback). The first saved window goes into the window we are
         // about to create; the others are opened on `resumed`.
-        let file = crate::tools::session::load_session_file();
+        // Opt-in (`restore_session = true`): by default each launch starts
+        // with a single plain pane.
+        // After an in-app upgrade the relaunched Rift reopens the session once.
+        let after_upgrade = crate::update::ui::take_restore_marker();
+        let file = if config.restore_session || after_upgrade { crate::tools::session::load_session_file() } else { None };
         let restore_focus = file.as_ref().map(|f| f.focused).filter(|f| *f > 0);
         let mut saved = file.map(|f| f.windows).unwrap_or_default();
         let mut pending_windows = Vec::new();
@@ -553,6 +560,11 @@ impl App {
                 self.win.cursor_x = position.x as usize;
                 self.win.cursor_y = position.y as usize;
 
+                // Tutorials own the window: no hover, drags or mouse reports to a program.
+                if self.win.tutorial.visible() {
+                    return;
+                }
+
                 // Command palette: hover highlights rows; swallow the move.
                 if self.win.command_palette.visible {
                     overlays::palette_cursor_moved(self);
@@ -633,6 +645,10 @@ impl App {
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {
+                // Tutorials: clicks never reach the terminal (no mouse reports to the PTY).
+                if self.win.tutorial.visible() {
+                    return;
+                }
                 // Confirmation modal is modal for the mouse too.
                 if self.win.confirm.visible() {
                     if state == ElementState::Pressed && button == MouseButton::Left {
@@ -804,6 +820,9 @@ impl App {
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
+                if self.win.tutorial.visible() {
+                    return;
+                }
                 if self.win.command_palette.visible {
                     let lines = match delta {
                         MouseScrollDelta::LineDelta(_, y) => y as i32,
@@ -833,6 +852,10 @@ impl App {
                 }
                 if !focused && !self.win.ime_preedit.is_empty() {
                     self.win.ime_preedit.clear();
+                    self.request_redraw();
+                }
+                // The selection is dimmed while the window is unfocused.
+                if self.win.selection.active {
                     self.request_redraw();
                 }
                 // Send focus in/out sequences if terminal requested focus reporting

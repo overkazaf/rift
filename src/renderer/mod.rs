@@ -300,7 +300,7 @@ pub struct Renderer {
     /// Another frame is needed right away (GPU atlas had to be recycled).
     #[cfg(feature = "gpu")]
     redraw_requested: bool,
-    /// Highlighted ranges (selection, search) for the GPU path; they also
+    /// Highlighted ranges (search matches) for the GPU path; they also
     /// break ligature runs.
     hl_pane: usize,
     hl_rows: HashMap<usize, Vec<cells::HlRect>>,
@@ -308,10 +308,21 @@ pub struct Renderer {
     hl_hash: HashMap<usize, u64>,
     /// Glyph bitmaps of shaped (ligature) glyphs for the CPU path.
     gid_cache: HashMap<(usize, u16, u8), font::GidBitmap>,
+    /// Text selection painted *behind* the glyphs of pane `sel_pane` (cell
+    /// background pass, both CPU and GPU paths). Set by the app each frame.
+    sel: Option<crate::window::Selection>,
+    sel_pane: usize,
+    /// Effective selection background (theme-derived, dimmed while unfocused).
+    sel_bg: Rgb,
+    /// Selected columns `c0..c1` per view row of the pane being rendered.
+    sel_spans: Vec<Option<(usize, usize)>>,
 }
 
 /// How far unfocused panes are blended toward the background (0.0..1.0).
 const UNFOCUSED_DIM: f32 = 0.28;
+/// How far the selection background fades toward the theme background while
+/// the window is unfocused (still visible, clearly inactive).
+const UNFOCUSED_SELECTION_FADE: f32 = 0.5;
 /// Divider base color: theme.bg lightened by this much.
 const DIVIDER_LIGHTEN: u8 = 18;
 
@@ -366,6 +377,10 @@ impl Renderer {
             hl_rows: HashMap::new(),
             hl_hash: HashMap::new(),
             gid_cache: HashMap::new(),
+            sel: None,
+            sel_pane: usize::MAX,
+            sel_bg: (0, 0, 0),
+            sel_spans: Vec::new(),
         }
     }
 
@@ -392,6 +407,23 @@ impl Renderer {
 
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn ligatures(&self) -> bool { self.ligatures }
+
+    /// Selection to paint in pane `pane` this frame (`None` = no selection).
+    /// Selected cells get the theme selection background behind full-contrast
+    /// glyphs; only rows whose highlighted span changed are repainted. While
+    /// the window is unfocused the selection is dimmed instead of hidden.
+    pub fn set_selection(&mut self, pane: usize, sel: Option<&crate::window::Selection>, focused: bool) {
+        self.sel = sel.filter(|s| s.active).copied();
+        self.sel_pane = pane;
+        let bg = self.theme.selection_bg();
+        self.sel_bg = if focused { bg } else { crate::config::mix_rgb(bg, self.theme.bg, UNFOCUSED_SELECTION_FADE) };
+    }
+
+    /// Selected columns of view `row` in the pane being rendered.
+    #[inline]
+    pub(super) fn sel_span(&self, row: usize) -> Option<(usize, usize)> {
+        self.sel_spans.get(row).copied().flatten()
+    }
 
     /// Drop all cached pixels/hashes; the next frame is a full redraw.
     pub fn invalidate(&mut self) {
@@ -879,8 +911,20 @@ impl Renderer {
         let mut new_hashes: Vec<u64> = Vec::with_capacity(nrows);
         let mut dirty = std::mem::take(&mut self.dirty_rows);
         dirty.clear();
+        // Selection spans of this pane (the visual shape, see `Selection::row_span`).
+        self.sel_spans.clear();
+        if let Some(sel) = self.sel.filter(|_| self.sel_pane == self.cur_pane) {
+            let row_abs = crate::blocks_ui::view::view_abs_rows(terminal);
+            self.sel_spans.extend(visible.iter().enumerate().map(|(row, cells)| {
+                row_abs.get(row).copied().flatten().and_then(|abs| sel.row_span(abs, cells, terminal.cols))
+            }));
+        }
+        let sel_bits = rgb_bits(self.sel_bg);
         for (row, cells) in visible.iter().enumerate() {
             let mut h = hash_cells(mix(mix(0, cells.len() as u64), screen_sig), cells, hover_link);
+            if let Some((c0, c1)) = self.sel_span(row) {
+                h = mix(mix(h, 0x5e1 << 52 | (c0 as u64) << 26 | c1 as u64), sel_bits);
+            }
             if show_cursor && row == view_cursor_row {
                 h = mix(h, 1 << 40 | (terminal.cursor_col as u64) << 8 | terminal.cursor_style as u64);
             }
@@ -979,6 +1023,7 @@ impl Renderer {
             self.pane_rows.insert(key, new_hashes);
         }
         self.dirty_rows = dirty;
+        self.sel_spans.clear();
         self.clear_screen_state();
     }
 
@@ -1019,6 +1064,8 @@ impl Renderer {
         // Ligatures / contextual alternates: runs of plain cells are shaped;
         // cells that belong to a shaped glyph skip their own glyph here and
         // the shaped glyphs are blended on top after the row.
+        let sel_span = self.sel_span(row);
+        let sel_bg = self.sel_bg;
         let mut lig_cds: Vec<cells::Cd> = Vec::new();
         let mut covered: Vec<bool> = Vec::new();
         let mut shaped: Vec<(usize, font::ShapeFace, std::sync::Arc<shape::ShapedRun>)> = Vec::new();
@@ -1055,6 +1102,13 @@ impl Renderer {
             if cell.dim() {
                 fg = (fg.0 / 2, fg.1 / 2, fg.2 / 2);
             }
+            // Selection: its background behind the glyph, text kept readable.
+            let selected = sel_span.map_or(false, |(a, b)| col >= a && col < b);
+            if selected {
+                bg = sel_bg;
+                fg = self.theme.selection_text(fg, sel_bg);
+            }
+            let fill = cell.bg != Color::Default || cell.reverse() || selected;
 
             // Skip wide-char continuation placeholder
             if cell.c == '\0' { continue; }
@@ -1075,7 +1129,7 @@ impl Renderer {
 
             if (has_glyph || deco.any()) && !wide && !is_cursor {
                 // Fast path: one pre-blended (glyph, fg, bg) tile, copied row-wise.
-                let under = if cell.bg != Color::Default || cell.reverse() { bg } else { dbg };
+                let under = if fill { bg } else { dbg };
                 let fg_px = pack(fg.0, fg.1, fg.2);
                 let bg_px = pack(under.0, under.1, under.2);
                 let ul_px = pack(ul_rgb.0, ul_rgb.1, ul_rgb.2);
@@ -1092,7 +1146,7 @@ impl Renderer {
                 blit_tile(buffer, buf_width, x0, y0, cw, ch, self.tiles.get(&tkey));
             } else {
                 self.draw_cell_slow(
-                    cell, fg, bg, is_cursor, wide, has_glyph, terminal.cursor_style,
+                    cell, fg, bg, fill, is_cursor, wide, has_glyph, terminal.cursor_style,
                     style, deco, ul_rgb, buffer, buf_width, x0, y0,
                 );
             }
@@ -1147,9 +1201,30 @@ impl Renderer {
             }
         }
 
+        // Selection past the stored cells (trimmed scrollback rows).
+        if let Some((x0, x1)) = self.sel_tail_px(row, cells.len(), rect, buf_width) {
+            let px = pack_rgb(sel_bg);
+            for cy in 0..ch {
+                let o = (y0 + cy) * buf_width;
+                buffer[o + x0..o + x1].fill(px);
+            }
+        }
+
         if !shaped.is_empty() {
             self.draw_shaped_cpu(buffer, buf_width, buf_height, rect, y0, &lig_cds, &shaped);
         }
+    }
+
+    /// Pixel columns `x0..x1` of the selection on view `row` that lie past
+    /// its `ncells` stored cells (trimmed scrollback rows), clipped to the pane.
+    pub(super) fn sel_tail_px(&self, row: usize, ncells: usize, rect: PaneRect, buf_width: usize) -> Option<(usize, usize)> {
+        let (c0, c1) = self.sel_span(row)?;
+        let cw = self.font.cell_width;
+        let max_col = rect.width / cw.max(1);
+        let (c0, c1) = (c0.max(ncells), c1.min(max_col));
+        let x1 = (rect.x + c1 * cw).min(buf_width);
+        let x0 = rect.x + c0 * cw;
+        (x1 > x0).then_some((x0, x1))
     }
 
     /// CPU path: blend shaped (ligature) glyphs over the finished row.
@@ -1238,6 +1313,7 @@ impl Renderer {
         cell: &Cell,
         fg: Rgb,
         bg: Rgb,
+        fill: bool,
         is_cursor: bool,
         wide: bool,
         has_glyph: bool,
@@ -1260,7 +1336,7 @@ impl Renderer {
         } else { cw };
 
         // Background fill
-        if cell.bg != Color::Default || cell.reverse() || (is_cursor && cursor_style == crate::terminal::CursorStyle::Block) {
+        if fill || (is_cursor && cursor_style == crate::terminal::CursorStyle::Block) {
             let fill = if is_cursor && cursor_style == crate::terminal::CursorStyle::Block {
                 self.theme.cursor
             } else { bg };
@@ -1544,58 +1620,6 @@ impl Renderer {
         height: u32,
     ) {
         prefs.render(buffer, width as usize, height as usize, &mut self.font, &self.theme);
-    }
-
-    pub fn render_selection(
-        &self,
-        sel: &crate::window::Selection,
-        row_abs: &[Option<usize>],
-        buffer: &mut [u32],
-        buf_width: usize,
-        buf_height: usize,
-        rect: PaneRect,
-    ) {
-        if !sel.active { return; }
-        let cw = self.font.cell_width;
-        let ch = self.font.cell_height;
-        let offset_y = rect.y;
-        let offset_x = rect.x;
-        let stride = buf_width;
-        let clip_right = (rect.x + rect.width).min(buf_width);
-        let buf_height = (rect.y + rect.height).min(buf_height);
-        let buf_width = clip_right;
-
-        let max_row = buf_height.saturating_sub(offset_y) / ch.max(1);
-        let max_col = buf_width.saturating_sub(offset_x) / cw.max(1);
-
-        for row in 0..max_row.min(row_abs.len()) {
-            let Some(abs) = row_abs[row] else { continue };
-            for col in 0..max_col {
-                if sel.contains(abs, col) {
-                    let x0 = offset_x + col * cw;
-                    let y0 = offset_y + row * ch;
-                    for cy in 0..ch {
-                        let py = y0 + cy;
-                        if py >= buf_height { break; }
-                        for cx in 0..cw {
-                            let px = x0 + cx;
-                            if px >= buf_width { break; }
-                            let idx = py * stride + px;
-                            if idx < buffer.len() {
-                                let base = buffer[idx];
-                                let br = (base >> 16) & 0xff;
-                                let bg = (base >> 8) & 0xff;
-                                let bb = base & 0xff;
-                                let r = (br * 150 + 80 * 105) / 255;
-                                let g = (bg * 150 + 120 * 105) / 255;
-                                let b = (bb * 150 + 200 * 105) / 255;
-                                buffer[idx] = (r << 16) | (g << 8) | b;
-                            }
-                        }
-                    }
-                }
-            }
-        }
     }
 
     /// Foreground of `cell`, honoring "bold is bright" for palette 0-7.
@@ -2477,5 +2501,219 @@ mod tests {
             }
             assert!(inside > 0);
         }
+    }
+
+    // ── Selection (painted behind the glyphs) ──
+
+    struct SelRig {
+        r: Renderer,
+        wm: WindowManager,
+        w: usize,
+        h: usize,
+    }
+
+    impl SelRig {
+        fn new(cols: usize, rows: usize, text: &str) -> Option<Self> {
+            let r = small_renderer()?;
+            let (w, h) = (cols * r.cell_width(), rows * r.cell_height());
+            let mut wm = WindowManager::headless(cols, rows);
+            wm.active_pane_mut().feed(text.as_bytes());
+            // Park the cursor on the last row, away from the selection.
+            wm.active_pane_mut().feed(format!("\x1b[{rows};1H").as_bytes());
+            Some(Self { r, wm, w, h })
+        }
+
+        /// One damage-tracked frame (the persistent back buffer is kept).
+        fn frame(&mut self) -> Vec<u32> {
+            let mut buf = vec![0u32; self.w * self.h];
+            let blocks = crate::tools::blocks::BlockManager::new();
+            let area = PaneRect { x: 0, y: 0, width: self.w, height: self.h };
+            self.r.render_tabbed(&self.wm, area, &mut buf, self.w as u32, self.h as u32, &blocks);
+            buf
+        }
+
+        /// The same state rendered by a fresh renderer (no damage tracking).
+        fn fresh(&self, sel: Option<&crate::window::Selection>) -> Vec<u32> {
+            let mut r = small_renderer().unwrap();
+            r.set_selection(self.wm.active_tab().active, sel, true);
+            let mut buf = vec![0u32; self.w * self.h];
+            let blocks = crate::tools::blocks::BlockManager::new();
+            let area = PaneRect { x: 0, y: 0, width: self.w, height: self.h };
+            r.render_tabbed(&self.wm, area, &mut buf, self.w as u32, self.h as u32, &blocks);
+            buf
+        }
+
+        fn select(&mut self, sel: Option<&crate::window::Selection>) {
+            let pane = self.wm.active_tab().active;
+            self.r.set_selection(pane, sel, true);
+        }
+
+        /// Pixels of cell (row, col).
+        fn cell(&self, buf: &[u32], row: usize, col: usize) -> Vec<u32> {
+            let (cw, ch) = (self.r.cell_width(), self.r.cell_height());
+            (0..ch).flat_map(|y| (0..cw).map(move |x| (x, y)))
+                .map(|(x, y)| buf[(row * ch + y) * self.w + col * cw + x])
+                .collect()
+        }
+
+        /// Top-left pixel of cell (row, col): background, never glyph ink.
+        fn corner(&self, buf: &[u32], row: usize, col: usize) -> u32 {
+            buf[row * self.r.cell_height() * self.w + col * self.r.cell_width()]
+        }
+
+        fn sel_px(&self) -> u32 { pack_rgb(self.r.theme.selection_bg()) }
+        fn bg_px(&self) -> u32 { pack_rgb(self.r.theme.bg) }
+    }
+
+    fn stream(a: (usize, usize), b: (usize, usize)) -> crate::window::Selection {
+        let mut s = crate::window::Selection::new();
+        s.start_at(a.0, a.1);
+        s.extend_to(b.0, b.1);
+        s.finish();
+        s
+    }
+
+    fn unpack(p: u32) -> Rgb { ((p >> 16) as u8, (p >> 8) as u8, p as u8) }
+
+    #[test]
+    fn selected_glyphs_keep_their_fg_color() {
+        let Some(mut t) = SelRig::new(30, 4, "hello world\r\n") else { return };
+        let plain = t.frame();
+        let sel = stream((0, 0), (0, 4));
+        t.select(Some(&sel));
+        let on = t.frame();
+        let fg = pack_rgb(t.r.theme.fg);
+        let sel_px = t.sel_px();
+        for col in 0..5 {
+            let (a, b) = (t.cell(&plain, 0, col), t.cell(&on, 0, col));
+            // Full-coverage glyph pixels are exactly the fg in both frames:
+            // the selection never tints the text itself.
+            let ink: Vec<usize> = (0..a.len()).filter(|&i| a[i] == fg).collect();
+            assert!(!ink.is_empty(), "col {col} has glyph ink");
+            for &i in &ink {
+                assert_eq!(b[i], fg, "col {col}: glyph pixel tinted");
+            }
+            // Background pixels became the selection color.
+            for i in 0..a.len() {
+                if a[i] == t.bg_px() {
+                    assert_eq!(b[i], sel_px, "col {col}: bg pixel {i} not selected");
+                }
+            }
+        }
+        // Unselected cells are untouched.
+        assert_eq!(t.cell(&plain, 0, 8), t.cell(&on, 0, 8));
+    }
+
+    #[test]
+    fn selection_bg_fills_empty_cells() {
+        let Some(mut t) = SelRig::new(30, 4, "a    b\r\n") else { return };
+        let sel = stream((0, 0), (0, 5));
+        t.select(Some(&sel));
+        let on = t.frame();
+        let sel_px = t.sel_px();
+        for col in 1..5 {
+            assert!(t.cell(&on, 0, col).iter().all(|p| *p == sel_px), "blank col {col} filled");
+        }
+    }
+
+    #[test]
+    fn stream_selection_skips_trailing_space_on_middle_rows() {
+        let Some(mut t) = SelRig::new(40, 5, "first line\r\nmid\r\nthe last line\r\n") else { return };
+        let sel = stream((0, 6), (2, 2));
+        t.select(Some(&sel));
+        let on = t.frame();
+        let (sel_px, bg) = (t.sel_px(), t.bg_px());
+        // Row 0: from col 6 through the text end (10) + one line-break cell.
+        assert_eq!(t.corner(&on, 0, 5), bg);
+        assert_eq!(t.corner(&on, 0, 10), sel_px);
+        assert_eq!(t.corner(&on, 0, 11), bg);
+        // Row 1 ("mid"): text + one cell, then nothing up to the pane edge.
+        for col in 0..4 { assert_eq!(t.corner(&on, 1, col), sel_px, "mid col {col}"); }
+        for col in 4..40 { assert_eq!(t.corner(&on, 1, col), bg, "trailing col {col}"); }
+        // Row 2: up to the end column.
+        assert_eq!(t.corner(&on, 2, 2), sel_px);
+        assert_eq!(t.corner(&on, 2, 3), bg);
+    }
+
+    #[test]
+    fn block_selection_is_rectangular() {
+        let Some(mut t) = SelRig::new(40, 5, "x\r\nmuch longer line of text\r\n\r\n") else { return };
+        let mut b = crate::window::Selection::new();
+        b.start_block(0, 6);
+        b.extend_to(2, 3);
+        b.finish();
+        t.select(Some(&b));
+        let on = t.frame();
+        let (sel_px, bg) = (t.sel_px(), t.bg_px());
+        for row in 0..=2 {
+            for col in 3..=6 { assert_eq!(t.corner(&on, row, col), sel_px, "({row},{col})"); }
+            assert_eq!(t.corner(&on, row, 2), bg);
+            assert_eq!(t.corner(&on, row, 7), bg);
+        }
+        assert_eq!(t.corner(&on, 3, 4), bg);
+    }
+
+    #[test]
+    fn reverse_video_under_selection_stays_readable() {
+        let Some(mut t) = SelRig::new(30, 4, "\x1b[7mREV\x1b[0m plain\r\n") else { return };
+        let plain = t.frame();
+        // Reverse video: the cell background is the theme fg.
+        assert_eq!(t.corner(&plain, 0, 0), pack_rgb(t.r.theme.fg));
+        let sel = stream((0, 0), (0, 2));
+        t.select(Some(&sel));
+        let on = t.frame();
+        let sel_bg = t.r.theme.selection_bg();
+        assert_eq!(t.corner(&on, 0, 0), pack_rgb(sel_bg));
+        // The glyph keeps a readable color on the selection background.
+        let cell = t.cell(&on, 0, 0);
+        let ink = cell.iter().copied().filter(|p| *p != pack_rgb(sel_bg))
+            .max_by(|a, b| crate::config::contrast_ratio(unpack(*a), sel_bg)
+                .total_cmp(&crate::config::contrast_ratio(unpack(*b), sel_bg)))
+            .expect("glyph ink");
+        assert!(crate::config::contrast_ratio(unpack(ink), sel_bg) >= crate::config::MIN_SELECTION_CONTRAST);
+    }
+
+    #[test]
+    fn damage_tracking_follows_the_selection() {
+        let text = "line zero\r\nline one\r\nline two\r\nline three\r\nline four\r\n";
+        let Some(mut t) = SelRig::new(30, 7, text) else { return };
+        let plain = t.frame();
+        t.frame();
+        assert!(t.r.dirty_rows.iter().all(|d| !d), "idle frame repaints nothing");
+        // New selection: only its rows repaint.
+        let mut sel = crate::window::Selection::new();
+        sel.start_at(1, 2);
+        sel.extend_to(2, 3);
+        t.select(Some(&sel));
+        let f = t.frame();
+        assert_eq!(t.r.dirty_rows.iter().filter(|d| **d).count(), 2);
+        assert_eq!(f, t.fresh(Some(&sel)));
+        // Dragging one row further: the old end row and the new row repaint.
+        sel.extend_to(3, 1);
+        t.select(Some(&sel));
+        let f = t.frame();
+        let dirty: Vec<usize> = (0..t.r.dirty_rows.len()).filter(|&i| t.r.dirty_rows[i]).collect();
+        assert_eq!(dirty, vec![2, 3]);
+        assert_eq!(f, t.fresh(Some(&sel)));
+        // Unchanged selection: nothing repaints.
+        t.frame();
+        assert!(t.r.dirty_rows.iter().all(|d| !d));
+        // Selection gone: its rows return to the plain rendering.
+        t.select(None);
+        let f = t.frame();
+        assert_eq!(t.r.dirty_rows.iter().filter(|d| **d).count(), 3);
+        assert_eq!(f, plain);
+    }
+
+    #[test]
+    fn unfocused_selection_is_dimmed_not_hidden() {
+        let Some(mut t) = SelRig::new(30, 4, "hello\r\n") else { return };
+        let sel = stream((0, 0), (0, 4));
+        let pane = t.wm.active_tab().active;
+        t.r.set_selection(pane, Some(&sel), false);
+        let on = t.frame();
+        let c = t.corner(&on, 0, 1);
+        assert_ne!(c, t.bg_px());
+        assert_ne!(c, t.sel_px());
     }
 }

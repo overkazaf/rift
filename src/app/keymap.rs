@@ -358,6 +358,12 @@ impl Keymap {
             .unwrap_or_else(|| "(unbound)".into())
     }
 
+    /// The first chord bound to `action` (None when unbound), for UI text
+    /// that names one shortcut (tutorial captions).
+    pub fn primary(&self, action: Action) -> Option<String> {
+        self.chords.iter().find(|(a, _, _)| *a == action).and_then(|(_, l, _)| l.first()).map(Chord::display)
+    }
+
     /// Table printed by `rift --list-keybindings`.
     pub fn table(&self) -> String {
         let mut out = String::new();

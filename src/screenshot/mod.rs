@@ -17,7 +17,7 @@ mod mission;
 mod page;
 mod png;
 mod scenes;
-mod shell;
+pub(crate) mod shell;
 mod workflow;
 
 use std::path::{Path, PathBuf};
@@ -192,6 +192,32 @@ mod tests {
         assert!(scenes::spec("nope").is_none());
     }
 
+    /// Manual check of the selection scene on a light theme (no built-in
+    /// theme is light): `RIFT_SHOT_OUT=<dir> cargo test --bin rift
+    /// selection_scene_light -- --ignored`.
+    #[test]
+    #[ignore]
+    fn selection_scene_light() {
+        let Ok(out) = std::env::var("RIFT_SHOT_OUT") else { return };
+        let mut o = parse(&args(&["--screenshot", "selection", "--out", &out])).unwrap();
+        o.theme = Theme {
+            name: "light",
+            fg: (56, 58, 66),
+            bg: (250, 250, 250),
+            cursor: (64, 120, 242),
+            palette: [
+                (56, 58, 66), (228, 86, 73), (80, 161, 79), (193, 132, 1),
+                (64, 120, 242), (166, 38, 164), (1, 132, 188), (160, 161, 167),
+                (105, 108, 119), (228, 86, 73), (80, 161, 79), (193, 132, 1),
+                (64, 120, 242), (166, 38, 164), (1, 132, 188), (250, 250, 250),
+            ],
+            selection_bg: None,
+            selection_fg: None,
+        };
+        o.out = PathBuf::from(&out).join("light");
+        println!("wrote {}", render_scene("selection", &o).unwrap().display());
+    }
+
     /// End to end at a small size: scripted panes -> real renderer -> frame -> PNG.
     #[test]
     fn renders_scenes_to_png() {
@@ -199,7 +225,7 @@ mod tests {
             return; // no monospace font on this machine
         }
         let dir = std::env::temp_dir().join(format!("rift-shot-test-{}", std::process::id()));
-        for scene in ["blocks", "fix-suggestion", "cmdk", "nl-command", "palette", "preview-accept", "mission-control"] {
+        for scene in ["blocks", "fix-suggestion", "cmdk", "nl-command", "palette", "preview-accept", "mission-control", "selection"] {
             let o = parse(&args(&["--screenshot", scene, "--out", dir.to_str().unwrap(), "--width", "800", "--height", "500"])).unwrap();
             let path = render_scene(scene, &o).unwrap();
             let bytes = std::fs::read(&path).unwrap();

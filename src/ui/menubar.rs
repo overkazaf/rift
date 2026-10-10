@@ -32,6 +32,10 @@ pub enum MenuAction {
     NoEffect,
     Preferences,
     Welcome,
+    /// Help > Tutorials...: the list of bundled demos.
+    Tutorials,
+    /// Play one bundled demo (id from `tools::tutorial::DEMOS`).
+    PlayDemo(&'static str),
     UiGallery,
     WebView,
     Browser(crate::network::browser::BrowserCmd),
@@ -72,6 +76,10 @@ pub enum MenuAction {
     /// "New Agent..." (opens the palette in agent mode).
     AgentNew,
     AgentLayout2x2,
+    /// Help > Check for Updates...
+    CheckForUpdates,
+    /// Help > Upgrade to Version... (release picker).
+    ChooseVersion,
     Pane(PaneCmd),
 }
 
@@ -405,9 +413,16 @@ impl AppMenuBar {
         let help_menu = Submenu::new("Help", true);
         let welcome = MenuItem::new("Welcome Guide", true, None::<Accelerator>);
         actions.insert(welcome.id().clone(), MenuAction::Welcome);
+        let tutorials = MenuItem::new("Tutorials\u{2026}", true, None::<Accelerator>);
+        actions.insert(tutorials.id().clone(), MenuAction::Tutorials);
         let gallery = MenuItem::new("UI Gallery", true, None::<Accelerator>);
         actions.insert(gallery.id().clone(), MenuAction::UiGallery);
-        let _ = help_menu.append_items(&[&welcome, &gallery]);
+        let _ = help_menu.append_items(&[&welcome, &tutorials, &gallery]);
+        let check_updates = MenuItem::new("Check for Updates\u{2026}", true, None::<Accelerator>);
+        actions.insert(check_updates.id().clone(), MenuAction::CheckForUpdates);
+        let choose_version = MenuItem::new("Upgrade to Version\u{2026}", true, None::<Accelerator>);
+        actions.insert(choose_version.id().clone(), MenuAction::ChooseVersion);
+        let _ = help_menu.append_items(&[&PredefinedMenuItem::separator(), &check_updates, &choose_version]);
 
         // ── Assemble menu bar ──
         let _ = menu.append_items(&[

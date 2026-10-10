@@ -9,7 +9,8 @@ use super::shape::ShapedRun;
 use super::*;
 use crate::terminal::CursorStyle;
 
-/// One highlighted run of cells in a view row (selection, search match).
+/// One highlighted run of cells in a view row (search match; the selection
+/// is a cell background, see `Renderer::set_selection`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HlRect {
     pub row: usize,
@@ -91,6 +92,8 @@ impl Renderer {
         let theme_cursor = self.theme.cursor;
         let cursor_style = terminal.cursor_style;
         let accent = self.theme.cursor;
+        let sel_span = self.sel_span(row);
+        let sel_bg = self.sel_bg;
         let mut cds: Vec<Cd> = Vec::with_capacity(cells.len());
         for (col, cell) in cells.iter().enumerate() {
             let x0 = rect.x + col * cw;
@@ -117,6 +120,12 @@ impl Renderer {
             if cell.dim() {
                 fg = (fg.0 / 2, fg.1 / 2, fg.2 / 2);
             }
+            // Selection: background behind the glyph, text kept readable.
+            let selected = sel_span.map_or(false, |(a, b)| col >= a && col < b);
+            if selected {
+                bg = sel_bg;
+                fg = self.theme.selection_text(fg, sel_bg);
+            }
             if cell.c == '\0' {
                 cds.push(cd);
                 continue;
@@ -141,7 +150,7 @@ impl Renderer {
             cd = Cd {
                 x0,
                 bg: if block { theme_cursor } else { bg },
-                fill: cell.bg != Color::Default || cell.reverse() || block,
+                fill: cell.bg != Color::Default || cell.reverse() || block || selected,
                 fill_w: if is_cursor { cursor_w } else if wide { cw * 2 } else { cw },
                 cursor_w,
                 text,

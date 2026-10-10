@@ -123,6 +123,13 @@ impl ExecPreview {
         Self::run(cmd, cwd, home.as_deref(), true).filter(|p| p.severity != Severity::Info)
     }
 
+    /// Classification only: the rules, without live impact analysis (no file
+    /// scans, no `git` subprocess). Used by tutorial playback, which must not
+    /// touch the machine.
+    pub fn check_static(cmd: &str) -> Option<ExecPreview> {
+        Self::run(cmd, None, None, false)
+    }
+
     fn run(cmd: &str, cwd: Option<&str>, home: Option<&str>, analyze: bool) -> Option<ExecPreview> {
         let trimmed = cmd.trim();
         if trimmed.is_empty() {
@@ -162,7 +169,7 @@ impl ExecPreview {
 
     /// Does this severity require the user to type "yes" rather than a bare
     /// Enter/Y keypress?
-    fn needs_typed_confirm(&self) -> bool {
+    pub fn needs_typed_confirm(&self) -> bool {
         matches!(self.severity, Severity::Critical)
     }
 

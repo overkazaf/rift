@@ -50,6 +50,9 @@ struct OscState {
     /// been claimed by a block yet.
     explicit: Option<String>,
     running: Option<(CommandBlock, Instant)>,
+    /// The running command's lines were wiped by an erase-display (`clear`):
+    /// it finishes without leaving a block over blank rows.
+    running_erased: bool,
 }
 
 const MAX_BLOCKS: usize = 2000;
@@ -302,6 +305,7 @@ impl BlockManager {
             timestamp: unix_now(),
         };
         self.osc.running = Some((block, Instant::now()));
+        self.osc.running_erased = false;
     }
 
     /// 133;D[;exit] — command finished. `cursor_line`/`cursor_col` give the
@@ -321,6 +325,9 @@ impl BlockManager {
                 exit_code,
                 duration_ms: b.duration_ms,
             });
+            if std::mem::take(&mut self.osc.running_erased) {
+                return;
+            }
             self.blocks.push(b);
             if self.blocks.len() > MAX_BLOCKS {
                 self.blocks.remove(0);
@@ -340,6 +347,23 @@ impl BlockManager {
         if n == 0 { return; }
         self.blocks.retain(|b| b.output_end.max(b.output_start).max(b.command_line) >= n);
         self.shift_pointers(n);
+    }
+
+    /// ED 2 on the main screen: every line from `screen_top` (absolute) down
+    /// is now blank. Blocks drawn there are gone; one that starts in
+    /// scrollback keeps only its part above the screen.
+    pub fn on_screen_erased(&mut self, screen_top: usize) {
+        self.blocks.retain(|b| b.command_line < screen_top);
+        for b in &mut self.blocks {
+            if b.output_end >= screen_top {
+                b.output_end = screen_top.saturating_sub(1).max(b.output_start.saturating_sub(1));
+            }
+        }
+        if let Some((b, _)) = &self.osc.running {
+            if b.command_line >= screen_top {
+                self.osc.running_erased = true;
+            }
+        }
     }
 
     /// "Clear Buffer": scrollback *and* the visible screen were erased, so

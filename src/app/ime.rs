@@ -43,8 +43,9 @@ pub fn handle_ime(app: &mut App, ime: Ime) {
 
 /// Route committed IME text to the topmost text-accepting overlay, or the PTY.
 fn commit_text(app: &mut App, text: &str) {
-    // A pending confirmation (consent / paste / host key) swallows all text.
-    if app.win.confirm.visible() {
+    // A pending confirmation (consent / paste / host key) swallows all text;
+    // so does a tutorial (nothing reaches the shell while it is open).
+    if app.win.confirm.visible() || app.win.tutorial.visible() {
         return;
     }
     // The inline tab-rename field takes IME commits first.

@@ -284,14 +284,23 @@ pub fn handle_key(app: &mut App, event: &KeyEvent) -> bool {
         Key::Named(NamedKey::Home) => ed.home(),
         Key::Named(NamedKey::End) => ed.end(),
         Key::Named(NamedKey::Space) if !m.super_key() && !m.control_key() => ed.insert_str(" "),
-        Key::Character(s) if m.super_key() => {
-            if s.eq_ignore_ascii_case("v") {
+        Key::Character(s) if m.super_key() => match s.to_ascii_lowercase().as_str() {
+            "v" => {
                 if let Some(text) = crate::window::selection::paste_from_clipboard() {
                     // One line only.
                     ed.insert_str(&crate::window::selection::sanitize_paste(text.lines().next().unwrap_or(""), false));
                 }
             }
-        }
+            "a" => ed.select_all(),
+            // The field is one line with no partial selection: copy the whole text.
+            "c" => crate::window::selection::copy_to_clipboard(&ed.text),
+            "x" => {
+                crate::window::selection::copy_to_clipboard(&ed.text);
+                ed.select_all();
+                ed.backspace();
+            }
+            _ => {}
+        },
         Key::Character(s) if !m.control_key() => ed.insert_str(s),
         _ => {}
     }

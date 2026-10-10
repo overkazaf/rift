@@ -213,6 +213,27 @@ pub fn redraw(app: &mut App) {
     debug_assert_eq!((geo_w, geo_h), (width as usize, height as usize));
     let hud_h = if app.win.hud_visible { app.win.renderer.cell_height() * 3 + 20 } else { 0 };
 
+    // Tutorial player (Help > Tutorials): like Time Warp, recorded frames
+    // replace the live view; the live panes keep running untouched.
+    if app.win.tutorial.playing() {
+        let cell = (app.win.renderer.cell_width(), app.win.renderer.cell_height());
+        app.win.tutorial.start_pending(cell);
+        app.win.tutorial.tick(std::time::Instant::now());
+    }
+    if let Some(player) = app.win.tutorial.player.as_mut() {
+        crate::tools::tutorial::view::draw_player(player, &mut buffer, width as usize, height as usize, &mut app.win.renderer, &app.keymap);
+        #[cfg(feature = "gpu")]
+        if let Some(ref mut gpu) = app.win.gpu_pipeline {
+            let effect = app.win.renderer.active_effect();
+            let time = app.win.renderer.start_time.elapsed().as_secs_f32();
+            gpu.render_frame(&buffer, width, height, effect, time);
+            drop(buffer);
+            return;
+        }
+        if let Err(e) = buffer.present() { log::warn!("present: {e}"); }
+        return;
+    }
+
     // TimeWarp mode: render snapshot instead of live terminal
     if app.win.timewarp_browser.active {
         if let Some((grid, crow, ccol, age)) = app.win.timewarp.get(app.win.timewarp_browser.position) {
@@ -265,15 +286,21 @@ pub fn redraw(app: &mut App) {
         dragging_border: app.win.dragging_border,
         zoomed: app.win.wm.active_tab().is_zoomed(),
     };
-    // GPU text: selection and search matches become instance quads of the
-    // rows they cover instead of being blended into the CPU buffer.
+    // Selection is painted in the cell pass (behind the glyphs) of the active
+    // pane, by both the CPU and the GPU text paths.
+    app.win.renderer.set_selection(
+        app.win.wm.active_tab().active,
+        Some(&app.win.selection),
+        app.win.window_focused,
+    );
+    // GPU text: search matches become instance quads of the rows they cover.
     #[cfg(feature = "gpu")]
     let gpu_text_frame = app.win.renderer.gpu_text_active();
     #[cfg(not(feature = "gpu"))]
     let gpu_text_frame = false;
     #[cfg(feature = "gpu")]
     if gpu_text_frame {
-        let (pane, rects) = gpu_highlights(&app.win.wm, &app.win.selection, &app.win.search, &app.win.renderer, content_area);
+        let (pane, rects) = gpu_highlights(&app.win.wm, &app.win.search, &app.win.renderer, content_area);
         app.win.renderer.set_highlights(pane, rects);
     }
     app.win.renderer.link_hover = app.win.link_hover;
@@ -299,20 +326,6 @@ pub fn redraw(app: &mut App) {
         );
     }
     let t_overlays = std::time::Instant::now();
-
-    // Selection highlight
-    if app.win.selection.active && !gpu_text_frame {
-        let sel_rect = app.win.wm.pane_layouts(content_area)
-            .into_iter()
-            .find(|(_, _, active)| *active)
-            .map(|(_, r, _)| r)
-            .unwrap_or(content_area);
-        let row_abs = crate::blocks_ui::view::view_abs_rows(&app.win.wm.active_pane().terminal);
-        app.win.renderer.render_selection(
-            &app.win.selection, &row_abs, &mut buffer,
-            width as usize, height as usize, sel_rect,
-        );
-    }
 
     // IME: position the OS candidate window and draw inline preedit text
     // (While renaming a tab the preedit belongs to the rename field instead.)
@@ -580,6 +593,12 @@ pub fn redraw(app: &mut App) {
             &mut app.win.renderer.font, &app.win.renderer.theme,
         );
     }
+    if let Some(sel) = app.win.tutorial.picker {
+        crate::tools::tutorial::view::draw_picker(
+            sel, &crate::tools::tutorial::TutorialUi::catalog(), &mut buffer, width as usize, height as usize,
+            &mut app.win.renderer.font, &app.win.renderer.theme,
+        );
+    }
     if app.win.welcome.visible {
         app.win.welcome.render(
             &mut buffer, width as usize, height as usize,
@@ -808,6 +827,9 @@ fn about_to_wait_inner(app: &mut App, event_loop: &ActiveEventLoop) {
 
     // MCP: answer queued requests from connected coding agents (never blocks).
     crate::mcp::host::poll(app);
+
+    // Update checks / background upgrade results (Help > Check for Updates).
+    crate::update::ui::poll(app, event_loop);
 
     // Change Review: collect finished git jobs (snapshots, diffs, reverts).
     crate::review::poll(app);
@@ -1100,7 +1122,8 @@ fn window_tick(app: &mut App, event_loop: &ActiveEventLoop, wake_at: &mut std::t
         || app.win.regex_playground.visible
         || app.win.error_notif.visible
         || app.win.history.visible
-        || app.win.teaching.enabled;
+        || app.win.teaching.enabled
+        || app.win.tutorial.animating();
     let timewarp_active = app.win.timewarp_browser.active;
     let agents_anim = crate::agents::runtime::animating(app);
 
@@ -1226,11 +1249,11 @@ fn init_gpu(app: &mut App, window: &Arc<winit::window::Window>) {
     }
 }
 
-/// Selection and search-match highlights of the active pane as per-row quads.
+/// Search-match highlights of the active pane as per-row quads (the
+/// selection is part of the cell pass, see `Renderer::set_selection`).
 #[cfg(feature = "gpu")]
 fn gpu_highlights(
     wm: &crate::window::WindowManager,
-    selection: &crate::window::Selection,
     search: &crate::tools::search::SearchOverlay,
     renderer: &crate::renderer::Renderer,
     content_area: crate::window::PaneRect,
@@ -1239,9 +1262,8 @@ fn gpu_highlights(
     let tab = wm.active_tab();
     let pane_idx = tab.active;
     let mut out = Vec::new();
-    let want_sel = selection.active;
     let want_search = search.visible && !search.matches.is_empty();
-    if !want_sel && !want_search {
+    if !want_search {
         return (pane_idx, out);
     }
     let cw = renderer.cell_width().max(1);
@@ -1252,24 +1274,6 @@ fn gpu_highlights(
         .unwrap_or(content_area);
     let max_col = rect.width / cw;
     let row_abs = crate::blocks_ui::view::view_abs_rows(&wm.active_pane().terminal);
-    if want_sel {
-        for (row, abs) in row_abs.iter().enumerate() {
-            let Some(abs) = abs else { continue };
-            let mut start: Option<usize> = None;
-            for col in 0..=max_col {
-                let on = col < max_col && selection.contains(*abs, col);
-                match (on, start) {
-                    (true, None) => start = Some(col),
-                    (false, Some(s)) => {
-                        // Same tint as `Renderer::render_selection`: (80, 120, 200) at 105/255.
-                        out.push(HlRect { row, c0: s, c1: col, rgba: [80, 120, 200, 105] });
-                        start = None;
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
     if want_search {
         let accent = renderer.theme.cursor;
         for (i, m) in search.matches.iter().enumerate() {
