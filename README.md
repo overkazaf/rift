@@ -22,6 +22,7 @@ Native and fast like Ghostty. Blocks and AI like Warp. Local-first, bring-your-o
 ## Why Rift
 
 - **Native and fast.** Written in Rust. Rendering is damage-tracked, with an optional GPU path: a keystroke frame takes about 6 ms, down from about 42 ms before damage tracking. IME, CJK and Nerd Font fallback are built in.
+- **Multilingual.** Full IME support for Chinese, Japanese and Korean input. CJK font fallback just works. The `# natural language` feature accepts prompts in any language — type `# 找出占空间最大的文件` and get a real command back.
 - **Understands your screen.** Shell integration turns output into command blocks. The AI gets your selection, a block or the whole screen as context, and it never runs a command without you.
 - **Yours, locally.** No account and no telemetry. Bring your own key (DeepSeek or any OpenAI-compatible API) or run fully offline with Ollama.
 
@@ -87,7 +88,7 @@ SSH manager · Time Warp (rewind the screen) · HUD · Git / Docker / CI panels 
 
 ### Core
 
-Damage-tracked rendering with an optional wgpu backend · IME (Chinese input) · font fallback (Nerd Font / Powerline / CJK) · shell integration (OSC 133 / OSC 7) · smooth scrolling · rich selection · context menu · Kitty inline images · session restore
+Damage-tracked rendering with an optional wgpu backend · IME (Chinese / Japanese / Korean input) · font fallback (Nerd Font / Powerline / CJK) · multilingual AI prompts (`# ...` in any language) · shell integration (OSC 133 / OSC 7) · smooth scrolling · rich selection · context menu · Kitty inline images · session restore
 
 ## How it compares
 
