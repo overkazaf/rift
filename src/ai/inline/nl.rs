@@ -44,7 +44,11 @@ pub fn detect_query_with(typed: &str, prefix: Option<&str>) -> Option<String> {
     if matches!(marker.as_str(), "TODO" | "FIXME" | "NOTE" | "XXX" | "HACK" | "BUG" | "WARNING" | "WARN" | "NB") {
         return None;
     }
-    if 1 + words.count() < MIN_WORDS {
+    let has_cjk = q.chars().any(|c| matches!(c,
+        '\u{4E00}'..='\u{9FFF}' | '\u{3400}'..='\u{4DBF}' |
+        '\u{3040}'..='\u{30FF}' | '\u{AC00}'..='\u{D7AF}'
+    ));
+    if !has_cjk && 1 + words.count() < MIN_WORDS {
         return None;
     }
     Some(q.to_string())
@@ -118,6 +122,16 @@ mod tests {
         assert_eq!(detect_query_with("#?", Some("#? ")), None);
         // the plain form still needs 3 words
         assert_eq!(detect_query_with("# disk usage", Some("#? ")), None);
+    }
+
+    #[test]
+    fn cjk_text_bypasses_min_words() {
+        assert_eq!(detect_query_with("# 找出占空间最大的文件", None).as_deref(), Some("找出占空间最大的文件"));
+        assert_eq!(detect_query_with("# 磁盘用量", None).as_deref(), Some("磁盘用量"));
+        assert_eq!(detect_query_with("# ディスク使用量を表示", None).as_deref(), Some("ディスク使用量を表示"));
+        assert_eq!(detect_query_with("# 디스크 사용량", None).as_deref(), Some("디스크 사용량"));
+        // Pure ASCII short input still needs MIN_WORDS
+        assert_eq!(detect_query_with("# disk usage", None), None);
     }
 
     #[test]
